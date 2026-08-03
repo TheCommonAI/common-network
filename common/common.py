@@ -592,24 +592,62 @@ def _fmt_ms(ms: int | None) -> str:
     return f"{ms}ms" if ms < 1000 else f"{ms / 1000:.1f}s"
 
 
-def _probe_once(gateway: str, prompt: str, node: str | None = None, timeout: float = 180.0) -> dict:
+def _link_probe(endpoint_url: str, attempts: int = 3, timeout: float = 15.0) -> int | None:
+    """Round-trip to a node's own public endpoint, doing no inference.
+
+    This is the measurement that separates "this machine's model is slow" from
+    "the link to this machine is slow" -- GET /models loads nothing and
+    generates nothing, so what's left is tunnel + that operator's uplink.
+    Min of N, because we want the floor of the link, not its worst sample.
+
+    Caveat worth keeping in mind when reading the numbers: this is measured
+    client->node, whereas real traffic goes gateway->node. It is a proxy for
+    that leg, not the same path.
+    """
+    url = endpoint_url.rstrip("/") + "/models"
+    best: int | None = None
+    for _ in range(attempts):
+        t = time.monotonic()
+        try:
+            with urllib.request.urlopen(url, timeout=timeout):
+                pass
+        except urllib.error.HTTPError:
+            pass  # any HTTP answer still proves the round trip -- time it
+        except (urllib.error.URLError, socket.timeout, OSError):
+            continue
+        ms = int((time.monotonic() - t) * 1000)
+        best = ms if best is None else min(best, ms)
+    return best
+
+
+def _probe_once(gateway: str, prompt: str, node: str | None = None, timeout: float = 180.0,
+                direct_url: str | None = None, direct_model: str | None = None) -> dict:
     """One streamed request. Always returns a measurement dict, never raises.
 
     Streams deliberately: with stream=False the only timing you get is total
     duration, which mostly measures how long the answer was. Time-to-first-token
     is the number that actually reflects routing + network + model load.
+
+    `direct_url` bypasses the gateway and talks to the node's endpoint straight
+    -- same prompt, same node, one hop fewer. The difference between the two
+    is what the gateway costs (embed + score + proxy).
     """
-    body = {"model": "auto", "messages": [{"role": "user", "content": prompt}], "stream": True}
+    if direct_url:
+        url = direct_url.rstrip("/") + "/chat/completions"
+        model = direct_model or "auto"
+    else:
+        url = f"{gateway}/v1/chat/completions"
+        model = "auto"
+
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": True}
     headers = {"Content-Type": "application/json"}
-    if node:
+    if node and not direct_url:
         # Forcing a node also disables the gateway's fallback (see gateway.py),
         # which is what we want -- a failure here must surface as that node's
         # failure, not get silently masked by the runner-up.
         headers["X-Common-Node"] = node
 
-    req = urllib.request.Request(
-        f"{gateway}/v1/chat/completions", data=json.dumps(body).encode(), headers=headers, method="POST"
-    )
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
     start = time.monotonic()
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)
@@ -625,6 +663,8 @@ def _probe_once(gateway: str, prompt: str, node: str | None = None, timeout: flo
     ttft_ms: int | None = None
     chunks = 0
     text: list[str] = []
+    gaps: list[int] = []   # inter-token arrival gaps -- the jitter signature
+    last_tok: float | None = None
 
     try:
         with resp:
@@ -641,8 +681,15 @@ def _probe_once(gateway: str, prompt: str, node: str | None = None, timeout: flo
                     continue
                 delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
                 if delta:
+                    now = time.monotonic()
                     if ttft_ms is None:
-                        ttft_ms = int((time.monotonic() - start) * 1000)
+                        ttft_ms = int((now - start) * 1000)
+                    else:
+                        # A steady p50 with a fat p90/max means the link is
+                        # stalling, not the model -- a model generates at a
+                        # roughly constant rate, a congested uplink does not.
+                        gaps.append(int((now - last_tok) * 1000))
+                    last_tok = now
                     chunks += 1
                     text.append(delta)
     except (urllib.error.URLError, socket.timeout, ConnectionError, OSError) as e:
@@ -663,6 +710,9 @@ def _probe_once(gateway: str, prompt: str, node: str | None = None, timeout: flo
         # forward usage counts (TODO: add tokens_in/tokens_out to decisions).
         "out_tokens_approx": chunks,
         "tok_s_approx": round(chunks / (gen_ms / 1000.0), 2) if gen_ms > 0 else None,
+        "gap_p50_ms": _pct(gaps, 50),
+        "gap_p90_ms": _pct(gaps, 90),
+        "gap_max_ms": max(gaps) if gaps else None,
         "answer": answer,
         "error": None if answer else "empty response",
     }
@@ -712,6 +762,31 @@ def cmd_test(gateway: str, args: argparse.Namespace) -> None:
               f"{len(PROBES)} probe(s) × {repeats} repeat(s)"))
     print()
 
+    # Per-node link measurement, before any inference. Two numbers per node:
+    #   link_rtt_ms    -- reach the node, load nothing, generate nothing.
+    #                     Pure tunnel + that operator's uplink.
+    #   direct_ttft_ms -- same node, same trivial prompt, gateway bypassed.
+    # Together with the gateway-routed TTFT these separate the three things
+    # that a single latency number otherwise smears into one: the network to
+    # that device, the model on that device, and the gateway in between.
+    links: dict[str, dict] = {}
+    if not args.routing_only:
+        print(f"{GLYPH_WORK} {dim('measuring the link to each node (no inference)')}")
+        for n in healthy:
+            link_rtt = _link_probe(n["endpoint_url"])
+            direct = _probe_once(gateway, "Reply with exactly: OK", timeout=120,
+                                 direct_url=n["endpoint_url"], direct_model=n["model_name"])
+            links[n["name"]] = {
+                "link_rtt_ms": link_rtt,
+                "direct_ttft_ms": direct.get("ttft_ms") if direct.get("ok") else None,
+                "direct_ok": bool(direct.get("ok")),
+                "direct_error": direct.get("error"),
+            }
+            note = "" if direct.get("ok") else red("  (direct probe failed)")
+            print(dim(f"   {n['name']:<30} link {_fmt_ms(link_rtt):>7}   "
+                      f"direct ttft {_fmt_ms(direct.get('ttft_ms')):>7}") + note)
+        print()
+
     out_path = Path(args.out) if args.out else TEST_DIR / f"{run_id}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fh = out_path.open("w")
@@ -722,7 +797,7 @@ def cmd_test(gateway: str, args: argparse.Namespace) -> None:
 
     emit({
         "type": "manifest", "run_id": run_id, "started_at": started, "gateway": gateway,
-        "gateway_rtt_ms": rtt, "repeats": repeats,
+        "gateway_rtt_ms": rtt, "repeats": repeats, "links": links,
         "client": {"host": host, "os": platform.system(), "release": platform.release(),
                    "machine": platform.machine(), "python": platform.python_version()},
         "nodes": [{"name": n["name"], "model": n["model_name"], "operator": n.get("operator"),
@@ -787,9 +862,37 @@ def cmd_test(gateway: str, args: argparse.Namespace) -> None:
                       f"   ·   total p50 {_fmt_ms(_pct(totals, 50))}"
                       f"   ·   ~{round(sum(toks) / len(toks), 1) if toks else '—'} tok/s"
                       f"   ·   {n_correct}/{len(scored)} correct"))
+
+            # Split the observed TTFT into the three things it actually
+            # contains, so a slow node can be blamed on the right layer.
+            link = links.get(node["name"], {})
+            link_rtt, direct_ttft = link.get("link_rtt_ms"), link.get("direct_ttft_ms")
+            ttft_p50 = _pct(ttfts, 50)
+            parts = [f"link {_fmt_ms(link_rtt)}"]
+            if direct_ttft is not None and link_rtt is not None:
+                parts.append(f"model ~{_fmt_ms(max(direct_ttft - link_rtt, 0))}")
+            if direct_ttft is not None and ttft_p50 is not None:
+                parts.append(f"gateway ~{_fmt_ms(max(ttft_p50 - direct_ttft, 0))}")
+            print(dim(f"   where the time goes:   {'   ·   '.join(parts)}"))
+
+            g50 = [r["gap_p50_ms"] for r in ok if r.get("gap_p50_ms") is not None]
+            g90 = [r["gap_p90_ms"] for r in ok if r.get("gap_p90_ms") is not None]
+            gmx = [r["gap_max_ms"] for r in ok if r.get("gap_max_ms") is not None]
+            if g50:
+                stall = max(gmx) if gmx else 0
+                # max(..., 1) so a sub-millisecond p50 can't make every run
+                # look like it stalled.
+                jitter_note = red("   ← stalling, look at the link") if stall > 10 * max(_pct(g50, 50), 1) else ""
+                print(dim(f"   token gaps:   p50 {_fmt_ms(_pct(g50, 50))}   ·   "
+                          f"p90 {_fmt_ms(_pct(g90, 90))}   ·   max {_fmt_ms(stall)}") + jitter_note)
+
             for r in rs:
                 if not r["ok"]:
                     print(comment(f"{r['probe_id']} failed: {r.get('error')}"))
+        print()
+        print(comment("link = client→node, no inference (a proxy for the gateway→node leg,"))
+        print(comment("not the same path). model = direct-to-node ttft minus link."))
+        print(comment("gateway = routed ttft minus direct ttft: embedding, scoring, proxying."))
         print()
 
     # --- Routing summary ---

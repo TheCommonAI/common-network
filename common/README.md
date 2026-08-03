@@ -34,10 +34,29 @@ standing in a room with several machines:
    via `X-Common-Node` (which also disables gateway fallback, so a failure
    surfaces as *that node's* failure rather than being masked by the
    runner-up).
-2. **How fast is each one?** Time-to-first-token and total latency, reported
-   as p50/p90 — never means, because the distribution is long-tailed and a
-   mean hides exactly the cold-start behaviour that matters. Plus an
-   approximate tok/s.
+2. **How fast is each one, and *why*?** Time-to-first-token and total
+   latency as p50/p90 — never means, because the distribution is long-tailed
+   and a mean hides exactly the cold-start behaviour that matters. Then it
+   splits that TTFT into the three things it actually contains:
+
+   | Component | How it's measured |
+   |---|---|
+   | **link** | `GET <node>/models` — reaches the node, loads nothing, generates nothing. Pure tunnel + that operator's uplink. Min of 3. |
+   | **model** | direct-to-node TTFT (gateway bypassed) minus link |
+   | **gateway** | gateway-routed TTFT minus direct TTFT — embedding, scoring, proxying |
+
+   Plus **inter-token gaps** (p50/p90/max). A steady p50 with a fat p90/max
+   means the *link* is stalling, not the model — a model generates at a
+   roughly constant rate, a congested uplink does not. A max more than 10×
+   the p50 gets flagged.
+
+   This matters because raw latency ranks devices wrongly. A node with a
+   250ms link and a fast model can post a *better* TTFT than one with a 25ms
+   link and a slow model, while being the worse network participant. The
+   split tells you which you're looking at.
+
+   Caveat: link is measured client→node, whereas real traffic is
+   gateway→node. It's a proxy for that leg, not the same path.
 3. **Does routing work?** Runs the same probes through auto-routing and
    checks whether each domain landed on a node tagged for that domain.
 
