@@ -18,10 +18,53 @@ common peers              connected nodes and their coverage
 common contrib            your contribution ledger
 common whoami             your node identity
 common config             settings, and exactly what the network retains
+common test               benchmark every node + routing, log to jsonl
 common help [verb]        help, per verb
 ```
 
 Short alias: `cmn` does the same thing as `common`.
+
+## `common test`
+
+A network measurement, not a quality benchmark — `bench/` owns scoring
+against real datasets. This answers the three things you need while
+standing in a room with several machines:
+
+1. **Is every node reachable?** Sweeps every healthy node, forcing each one
+   via `X-Common-Node` (which also disables gateway fallback, so a failure
+   surfaces as *that node's* failure rather than being masked by the
+   runner-up).
+2. **How fast is each one?** Time-to-first-token and total latency, reported
+   as p50/p90 — never means, because the distribution is long-tailed and a
+   mean hides exactly the cold-start behaviour that matters. Plus an
+   approximate tok/s.
+3. **Does routing work?** Runs the same probes through auto-routing and
+   checks whether each domain landed on a node tagged for that domain.
+
+```bash
+common test                      # one pass over every healthy node
+common test --full               # 3 repeats per probe
+common test --repeats 5
+common test --nodes-only         # skip the routing check
+common test --routing-only       # skip the per-node sweep
+common test --out results.jsonl
+```
+
+Every measurement is written to `~/.common-network/tests/<run>.jsonl`
+(flushed per record, so a Ctrl+C mid-run still leaves usable data). The
+first line is a manifest: client machine, OS, gateway, gateway RTT, and the
+full node roster at run time.
+
+**Run it on every machine and merge the files.** Each one records its own
+client-side view — network asymmetry between participants is invisible from
+any single vantage point. Work is interleaved with a fixed seed rather than
+run node-by-node, so a slow node isn't confounded with time-of-day
+variation on someone's home uplink.
+
+Known gaps, both blocked on gateway-side work: token counts are approximated
+from SSE chunk counts (the gateway doesn't forward usage yet), and fallback
+events are invisible in the decisions log (a successful retry is recorded
+identically to a first-attempt success).
 
 ## Flags
 
@@ -39,6 +82,13 @@ Short alias: `cmn` does the same thing as `common`.
 -v / --verbose       extra routing detail
 --no-color           also honours the NO_COLOR env var and non-tty output
 --no-update          skip the self-update check (for local development)
+
+test only:
+--full               3 repeats per probe
+--repeats <n>        repeats per probe per node (default 1)
+--nodes-only         skip the routing check
+--routing-only       skip the per-node sweep
+--out <path>         results jsonl path
 ```
 
 ## What's not built yet

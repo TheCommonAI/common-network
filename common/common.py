@@ -13,7 +13,15 @@ Usage:
     common contrib                 your contribution ledger
     common whoami                  your node identity
     common config                  settings (all local, all editable)
+    common test                    benchmark every node + routing, log to jsonl
     common help [verb]             help, per verb
+
+`common test` sweeps every healthy node with a fixed probe set, measures
+time-to-first-token / total latency / approximate tok-s per node, checks
+whether routing lands each domain on a node tagged for it, and writes every
+measurement to ~/.common-network/tests/<run>.jsonl. Run it on each machine
+and merge the files -- each records its own client-side view of the network.
+Flags: --full (3 repeats), --repeats N, --nodes-only, --routing-only, --out.
 
 "synth" and "map" are recognised but not yet built -- see `common help synth`
 / `common help map`. This CLI checks GitHub for a newer version of itself on
@@ -23,6 +31,7 @@ import argparse
 import json
 import os
 import platform
+import random
 import socket
 import sys
 import time
@@ -528,6 +537,321 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
     os.execv(sys.executable, argv)
 
 
+# --- Test --------------------------------------------------------------------
+# `common test` is a *network* measurement, not a quality benchmark -- bench/
+# owns scoring against real datasets (GSM8K/HumanEval/MMLU). This answers the
+# three questions you need answered while standing in a room with several
+# machines: is every node actually reachable, how fast is each one, and does
+# routing land each domain on a node that claims that domain.
+#
+# Stdlib only, like the rest of this file, so it runs anywhere `common` does.
+# Every machine can run it independently -- results carry the client identity,
+# so merging the JSONL from each PC gives you each one's view of the network.
+
+TEST_DIR = INSTALL_DIR / "tests"
+
+# Short, deterministic, single-token-ish answers. `expect` is a smoke check
+# (substring, case-insensitive), NOT a benchmark score -- a probe marked
+# incorrect here means "look at this node", not "this model scores X".
+PROBES = [
+    {"id": "math-1",    "domain": "math",    "expect": "391",
+     "prompt": "What is 17 * 23? Reply with only the number."},
+    {"id": "math-2",    "domain": "math",    "expect": "5",
+     "prompt": "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How many cents does the ball cost? Reply with only the number."},
+    {"id": "code-1",    "domain": "code",    "expect": "def is_even",
+     "prompt": "Write a Python function is_even(n) that returns True when n is even. Reply with only code."},
+    {"id": "code-2",    "domain": "code",    "expect": "3",
+     "prompt": "In Python, what does len([1, 2, 3]) return? Reply with only the number."},
+    {"id": "general-1", "domain": "general", "expect": "canberra",
+     "prompt": "What is the capital of Australia? Reply with only the city name."},
+    {"id": "general-2", "domain": "general", "expect": "orwell",
+     "prompt": "Who wrote the novel 1984? Reply with only the author's surname."},
+    {"id": "reason-1",  "domain": "general", "expect": "1",
+     "prompt": "Sally has 3 brothers. Each brother has 2 sisters. How many sisters does Sally have? Reply with only the number."},
+    {"id": "legal-1",   "domain": "legal",   "expect": None,
+     "prompt": "In one sentence, what is the difference between civil law and criminal law?"},
+]
+
+
+def _pct(values: list[int], p: int) -> int | None:
+    """Linear-interpolated percentile. Report p50/p90, never means -- latency
+    distributions here are long-tailed and a mean hides exactly the cold-start
+    behaviour we care about."""
+    if not values:
+        return None
+    s = sorted(values)
+    k = (len(s) - 1) * (p / 100.0)
+    lo = int(k)
+    hi = min(lo + 1, len(s) - 1)
+    return int(round(s[lo] + (s[hi] - s[lo]) * (k - lo)))
+
+
+def _fmt_ms(ms: int | None) -> str:
+    if ms is None:
+        return "—"
+    return f"{ms}ms" if ms < 1000 else f"{ms / 1000:.1f}s"
+
+
+def _probe_once(gateway: str, prompt: str, node: str | None = None, timeout: float = 180.0) -> dict:
+    """One streamed request. Always returns a measurement dict, never raises.
+
+    Streams deliberately: with stream=False the only timing you get is total
+    duration, which mostly measures how long the answer was. Time-to-first-token
+    is the number that actually reflects routing + network + model load.
+    """
+    body = {"model": "auto", "messages": [{"role": "user", "content": prompt}], "stream": True}
+    headers = {"Content-Type": "application/json"}
+    if node:
+        # Forcing a node also disables the gateway's fallback (see gateway.py),
+        # which is what we want -- a failure here must surface as that node's
+        # failure, not get silently masked by the runner-up.
+        headers["X-Common-Node"] = node
+
+    req = urllib.request.Request(
+        f"{gateway}/v1/chat/completions", data=json.dumps(body).encode(), headers=headers, method="POST"
+    )
+    start = time.monotonic()
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "error": f"http {e.code}: {e.read().decode(errors='ignore')[:200]}",
+                "total_ms": int((time.monotonic() - start) * 1000)}
+    except (urllib.error.URLError, socket.timeout) as e:
+        return {"ok": False, "error": f"unreachable: {e}",
+                "total_ms": int((time.monotonic() - start) * 1000)}
+
+    served_by = resp.headers.get("X-Common-Node")
+    score = resp.headers.get("X-Common-Score")
+    ttft_ms: int | None = None
+    chunks = 0
+    text: list[str] = []
+
+    try:
+        with resp:
+            for raw in resp:
+                line = raw.decode("utf-8", errors="ignore").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+                if delta:
+                    if ttft_ms is None:
+                        ttft_ms = int((time.monotonic() - start) * 1000)
+                    chunks += 1
+                    text.append(delta)
+    except (urllib.error.URLError, socket.timeout, ConnectionError, OSError) as e:
+        return {"ok": False, "served_by": served_by, "error": f"stream broke: {e}",
+                "total_ms": int((time.monotonic() - start) * 1000), "ttft_ms": ttft_ms}
+
+    total_ms = int((time.monotonic() - start) * 1000)
+    answer = "".join(text)
+    gen_ms = (total_ms - ttft_ms) if ttft_ms is not None else 0
+    return {
+        "ok": bool(answer),
+        "served_by": served_by,
+        "score": score,
+        "ttft_ms": ttft_ms,
+        "total_ms": total_ms,
+        # One SSE content delta is ~1 token for Ollama and OpenAI-compatible
+        # servers, but it is an approximation -- the gateway does not yet
+        # forward usage counts (TODO: add tokens_in/tokens_out to decisions).
+        "out_tokens_approx": chunks,
+        "tok_s_approx": round(chunks / (gen_ms / 1000.0), 2) if gen_ms > 0 else None,
+        "answer": answer,
+        "error": None if answer else "empty response",
+    }
+
+
+def _probe_correct(expect: str | None, answer: str) -> bool | None:
+    if not expect:
+        return None  # unscored probe (open-ended) -- still measured for latency
+    return expect.lower() in (answer or "").lower()
+
+
+def cmd_test(gateway: str, args: argparse.Namespace) -> None:
+    repeats = 3 if args.full else max(1, args.repeats)
+    started = time.time()
+    host = socket.gethostname()
+    run_id = f"{time.strftime('%Y%m%d-%H%M%S', time.localtime(started))}-{host}"
+
+    try:
+        nodes = http_json("GET", f"{gateway}/nodes")
+    except (urllib.error.URLError, socket.timeout) as e:
+        print(red("✗ can't reach the network."), file=sys.stderr)
+        print(comment(f"{e}"), file=sys.stderr)
+        sys.exit(1)
+
+    healthy = [n for n in nodes if n["healthy"]]
+    if not healthy:
+        print(red("✗ no healthy nodes to test."), file=sys.stderr)
+        print(dim("  → put this machine on the commons:   common join"), file=sys.stderr)
+        sys.exit(1)
+
+    tags_by_name = {n["name"]: (n.get("domain_tags") or []) for n in nodes}
+
+    # Gateway round-trip, measured before any inference. Everything else in
+    # this run sits on top of this number, so it has to be recorded separately
+    # or you cannot tell gateway overhead from node slowness.
+    print(f"{GLYPH_WORK} {dim('measuring gateway round-trip')}")
+    rtts = []
+    for _ in range(5):
+        t = time.monotonic()
+        try:
+            http_json("GET", f"{gateway}/health", timeout=10)
+            rtts.append(int((time.monotonic() - t) * 1000))
+        except (urllib.error.URLError, socket.timeout):
+            pass
+    rtt = min(rtts) if rtts else None
+    print(dim(f"  gateway rtt   {_fmt_ms(rtt)}   ·   {len(healthy)} healthy node(s)   ·   "
+              f"{len(PROBES)} probe(s) × {repeats} repeat(s)"))
+    print()
+
+    out_path = Path(args.out) if args.out else TEST_DIR / f"{run_id}.jsonl"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = out_path.open("w")
+
+    def emit(rec: dict) -> None:
+        fh.write(json.dumps(rec) + "\n")
+        fh.flush()  # flush per record so a Ctrl+C mid-run still leaves usable data
+
+    emit({
+        "type": "manifest", "run_id": run_id, "started_at": started, "gateway": gateway,
+        "gateway_rtt_ms": rtt, "repeats": repeats,
+        "client": {"host": host, "os": platform.system(), "release": platform.release(),
+                   "machine": platform.machine(), "python": platform.python_version()},
+        "nodes": [{"name": n["name"], "model": n["model_name"], "operator": n.get("operator"),
+                   "region": n.get("region"), "domain_tags": n.get("domain_tags"),
+                   "healthy": n["healthy"], "avg_latency_ms": n.get("avg_latency_ms")} for n in nodes],
+    })
+
+    # Build the full work list up front, then shuffle it. Running all of node A
+    # then all of node B confounds the comparison with time-of-day: home uplinks
+    # are not the same at 4pm as at 9pm. Interleaving costs nothing and removes it.
+    work: list[tuple[str, str | None, dict, int]] = []
+    if not args.routing_only:
+        for node in healthy:
+            for probe in PROBES:
+                for r in range(repeats):
+                    work.append(("node", node["name"], probe, r))
+    if not args.nodes_only:
+        for probe in PROBES:
+            for r in range(repeats):
+                work.append(("routing", None, probe, r))
+    random.Random(1234).shuffle(work)  # fixed seed: same interleaving on every machine
+
+    results: list[dict] = []
+    tty = sys.stdout.isatty()
+    for i, (phase, node_name, probe, rep) in enumerate(work, 1):
+        if tty:
+            label = node_name or "auto-route"
+            status = f"{i}/{len(work)}  {label}  {probe['id']}"
+            print("\r" + GLYPH_WORK + " " + dim(f"{status:<66}"), end="", flush=True)
+        m = _probe_once(gateway, probe["prompt"], node=node_name)
+        rec = {
+            "type": "probe", "run_id": run_id, "phase": phase, "at": time.time(),
+            "forced_node": node_name, "probe_id": probe["id"], "domain": probe["domain"],
+            "repeat": rep, "correct": _probe_correct(probe["expect"], m.get("answer", "")),
+            "routed_tags": tags_by_name.get(m.get("served_by") or "", []),
+            **{k: v for k, v in m.items() if k != "answer"},
+            "answer": (m.get("answer") or "")[:600],
+        }
+        results.append(rec)
+        emit(rec)
+    if tty:
+        print("\r" + " " * 78 + "\r", end="")
+
+    fh.close()
+
+    # --- Node sweep summary ---
+    if not args.routing_only:
+        print(f"{GLYPH_ROUTE} {paper('node sweep', bold=True)}")
+        for node in healthy:
+            rs = [r for r in results if r["phase"] == "node" and r["forced_node"] == node["name"]]
+            if not rs:
+                continue
+            ok = [r for r in rs if r["ok"]]
+            ttfts = [r["ttft_ms"] for r in ok if r.get("ttft_ms") is not None]
+            totals = [r["total_ms"] for r in ok if r.get("total_ms") is not None]
+            toks = [r["tok_s_approx"] for r in ok if r.get("tok_s_approx")]
+            scored = [r for r in rs if r["correct"] is not None]
+            n_correct = sum(1 for r in scored if r["correct"])
+            badge = GLYPH_DONE if len(ok) == len(rs) else (GLYPH_FORMING if ok else GLYPH_FAILED)
+            print(f"{badge}  {paper(node['name'])}   {dim(node['model_name'])}")
+            print(dim(f"   {len(ok)}/{len(rs)} ok   ·   ttft p50 {_fmt_ms(_pct(ttfts, 50))} / p90 {_fmt_ms(_pct(ttfts, 90))}"
+                      f"   ·   total p50 {_fmt_ms(_pct(totals, 50))}"
+                      f"   ·   ~{round(sum(toks) / len(toks), 1) if toks else '—'} tok/s"
+                      f"   ·   {n_correct}/{len(scored)} correct"))
+            for r in rs:
+                if not r["ok"]:
+                    print(comment(f"{r['probe_id']} failed: {r.get('error')}"))
+        print()
+
+    # --- Routing summary ---
+    if not args.nodes_only:
+        print(f"{GLYPH_ROUTE} {paper('routing', bold=True)}")
+        routed = [r for r in results if r["phase"] == "routing"]
+        by_domain: dict[str, list[dict]] = {}
+        for r in routed:
+            by_domain.setdefault(r["domain"], []).append(r)
+        hits = misses = 0
+        for domain in sorted(by_domain):
+            rs = by_domain[domain]
+            landed = [r for r in rs if domain in (r.get("routed_tags") or [])]
+            hits += len(landed)
+            misses += len(rs) - len(landed)
+            mark = GLYPH_DONE if len(landed) == len(rs) else GLYPH_FORMING
+            print(f"  {mark}  {domain:10s} {dim(f'{len(landed)}/{len(rs)} landed on a node tagged {domain}')}")
+            for r in rs:
+                if domain not in (r.get("routed_tags") or []):
+                    where = r.get("served_by") or "nowhere"
+                    print(comment(f"{r['probe_id']} → {where} ({', '.join(r.get('routed_tags') or []) or 'untagged'})"))
+        total_routed = hits + misses
+        if total_routed:
+            pct = round(100 * hits / total_routed)
+            print(dim(f"  routing accuracy   {hits}/{total_routed}  ({pct}%)"))
+            print(comment("measured against node domain_tags, not answer quality -- "
+                          "run bench/ for that"))
+        print()
+
+    ok_n = sum(1 for r in results if r["ok"])
+    print(dim("─" * 63))
+    print(dim(f"{len(results)} request(s)   ·   {ok_n} ok   ·   {len(results) - ok_n} failed"
+              f"   ·   {int(time.time() - started)}s"))
+    print(dim(f"results   {out_path}"))
+    print(comment("run this on every machine, then merge the jsonl -- each one records"))
+    print(comment("its own client-side view, which is where network asymmetry shows up"))
+
+    if args.json:
+        print(json.dumps({"run_id": run_id, "out": str(out_path), "gateway_rtt_ms": rtt,
+                          "requests": len(results), "ok": ok_n}))
+
+
+def _parse_test_flags(args: argparse.Namespace) -> argparse.Namespace:
+    """The top-level parser puts everything after the verb into `rest`
+    (argparse.REMAINDER), so `common test --full` never reaches it -- the flag
+    lands in rest and is silently ignored. Re-parse the leftovers here so the
+    flags work in the position people actually type them."""
+    p = argparse.ArgumentParser(prog="common test", add_help=False)
+    p.add_argument("--gateway")
+    p.add_argument("--repeats", type=int)
+    p.add_argument("--full", action="store_true")
+    p.add_argument("--nodes-only", action="store_true")
+    p.add_argument("--routing-only", action="store_true")
+    p.add_argument("--out")
+    p.add_argument("--json", action="store_true")
+    sub, _ = p.parse_known_args(args.rest)
+    for key, value in vars(sub).items():
+        if value not in (None, False):  # only override what was actually passed
+            setattr(args, key, value)
+    return args
+
+
 def cmd_help(verb: str | None) -> None:
     if verb == "synth":
         print(dim("common synth <region>"))
@@ -553,7 +877,7 @@ def cmd_help(verb: str | None) -> None:
 def build_repl_help() -> str:
     return dim(
         "/ask (implicit: just type)  /join  /serve  /leave  /status\n"
-        "/demand  /peers  /contrib  /whoami  /config  /model  /local  /help  /exit"
+        "/demand  /peers  /contrib  /whoami  /config  /test  /model  /local  /help  /exit"
     )
 
 
@@ -596,6 +920,11 @@ def interactive_session(gateway: str, args: argparse.Namespace) -> None:
         if line == "/config":
             cmd_config(False, args)
             continue
+        if line.startswith("/test"):
+            # /test full -> the 3-repeat sweep, same as `common test --full`
+            args.full = "full" in line.split()[1:]
+            cmd_test(gateway, args)
+            continue
         if line == "/local":
             session_local = not session_local
             print(dim(f"local-only: {'on' if session_local else 'off'}"))
@@ -634,6 +963,12 @@ def main() -> None:
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--no-update", action="store_true", default=bool(os.environ.get("COMMON_NO_UPDATE")))
+    # `common test` only
+    parser.add_argument("--repeats", type=int, default=1, help="test: repeats per probe per node")
+    parser.add_argument("--full", action="store_true", help="test: 3 repeats per probe")
+    parser.add_argument("--nodes-only", action="store_true", help="test: skip the routing check")
+    parser.add_argument("--routing-only", action="store_true", help="test: skip the per-node sweep")
+    parser.add_argument("--out", default=None, help="test: results jsonl path")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--version", action="store_true")
     args = parser.parse_args()
@@ -675,6 +1010,9 @@ def main() -> None:
         cmd_contrib(gateway, args.json)
     elif args.verb == "config":
         cmd_config(args.json, args)
+    elif args.verb == "test":
+        args = _parse_test_flags(args)
+        cmd_test(args.gateway.rstrip("/"), args)
     elif args.verb == "join":
         cmd_join_or_serve("join", gateway, args)
     elif args.verb == "serve":
