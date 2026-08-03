@@ -670,7 +670,7 @@ def main() -> None:
     _enable_windows_ansi()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--gateway", default=os.environ.get("COMMON_GATEWAY_URL", DEFAULT_GATEWAY), help="Gateway base URL (default: the shared Common Network gateway)")
-    parser.add_argument("--model", default=None, help="Catalogue id (e.g. qwen2.5-coder-7b) or raw Ollama model tag. Default: probe hardware and ask the network what it needs most (see --auto, --list-catalogue)")
+    parser.add_argument("--model", default=None, help="Catalogue id (e.g. qwen2.5-coder-14b) or raw Ollama model tag. Default: probe hardware and ask the network what it needs most (see --auto, --list-catalogue)")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
     parser.add_argument("--name", default=f"{socket.gethostname()}-{os.environ.get('USER', 'node')}", help="Unique node name")

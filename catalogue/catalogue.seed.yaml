@@ -1,6 +1,15 @@
 # Common Network specialist catalogue.
 #
+# This file is the SOURCE OF TRUTH for what the network will auto-install on
+# a machine that runs `common join`. An entry removed from here is deleted
+# from the gateway on next boot (see seed_catalogue_from_file) -- it is not
+# merely hidden, so a node can never be assigned a model that isn't listed.
+#
 # This is a commons asset — PRs welcome. Add real, runnable models only.
+# Every `source: ollama:*` tag below was verified to resolve against
+# registry.ollama.ai before being added; a tag that 404s would fail the
+# pull on every machine assigned to it.
+#
 # `verified_in_lane: true` is earned by the v0.2 benchmark harness
 # (bench/) actually measuring a model beating a frontier model in its
 # domain — never set it because a model "should" be good. See
@@ -8,32 +17,36 @@
 #
 # min_ram_gb / min_vram_gb / needs_gpu gate what common-join will ever
 # recommend for a given machine — leave real headroom, a specialist that
-# swaps and times out is worse than a generalist that answers.
+# swaps and times out is worse than a generalist that answers. The figures
+# below are the measured download size plus room for KV cache and the OS;
+# common-join additionally applies a 0.8 headroom factor on top.
 
 models:
-  - id: qwen2.5-coder-7b
-    display_name: Qwen2.5 Coder 7B
-    source: "ollama:qwen2.5-coder:7b"
-    domain_tags: [code, python, programming]
+  - id: deepseek-r1-14b
+    display_name: DeepSeek-R1 14B
+    source: "ollama:deepseek-r1:14b"
+    domain_tags: [math, reasoning, logic, word-problems]
     capability_text: >
-      Qwen2.5 Coder 7B. Strong at code generation, debugging, and
-      structured reasoning across common languages. Runs comfortably on a
-      consumer laptop.
-    params_b: 7.6
-    min_ram_gb: 8
+      DeepSeek-R1 14B. Explicit chain-of-thought reasoning model — works
+      step by step through mathematics, logic puzzles, and multi-stage word
+      problems rather than answering in one pass. The network's strongest
+      maths and reasoning specialist.
+    params_b: 14.8
+    min_ram_gb: 16
     min_vram_gb: 0
     needs_gpu: false
     verified_in_lane: false
     lane_benchmark: null
-    licence: apache-2.0
+    licence: mit
 
   - id: qwen2.5-coder-14b
     display_name: Qwen2.5 Coder 14B
     source: "ollama:qwen2.5-coder:14b"
     domain_tags: [code, python, programming]
     capability_text: >
-      Qwen2.5 Coder 14B. Stronger code generation and multi-file reasoning
-      than the 7B tier, for machines with more RAM to spare.
+      Qwen2.5 Coder 14B. Code generation, debugging, and multi-file
+      reasoning across common languages. The network's dedicated
+      programming specialist.
     params_b: 14.8
     min_ram_gb: 16
     min_vram_gb: 0
@@ -42,14 +55,47 @@ models:
     lane_benchmark: null
     licence: apache-2.0
 
-  - id: qwen2-math-7b
-    display_name: Qwen2 Math 7B
-    source: "ollama:qwen2-math:7b"
-    domain_tags: [math, arithmetic, algebra, word-problems]
+  - id: gemma4-12b
+    display_name: Gemma 4 12B
+    source: "ollama:gemma4:12b"
+    domain_tags: [general, conversation, writing, reasoning]
     capability_text: >
-      Qwen2 Math 7B. Purpose-built for mathematical reasoning — arithmetic,
-      algebra, and grade-school-to-competition word problems.
-    params_b: 7.0
+      Gemma 4 12B. Strong general-purpose model — everyday conversation,
+      writing, summarisation, and world-knowledge questions, with solid
+      general reasoning.
+    params_b: 12.0
+    min_ram_gb: 12
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: gemma
+
+  - id: qwen3.5-9b
+    display_name: Qwen3.5 9B
+    source: "ollama:qwen3.5:9b"
+    domain_tags: [general, reasoning, multilingual, writing]
+    capability_text: >
+      Qwen3.5 9B. General-purpose model with strong multilingual coverage
+      and reasoning, at a lighter footprint than the 12B/14B tiers.
+    params_b: 9.0
+    min_ram_gb: 12
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: apache-2.0
+
+  - id: dolphin3-8b
+    display_name: Dolphin 3 8B
+    source: "ollama:dolphin3:8b"
+    domain_tags: [general, conversation, writing]
+    capability_text: >
+      Dolphin 3 8B. General-purpose instruction-following model for
+      conversation, writing, and everyday questions. The lightest-footprint
+      catalogue entry — the fallback for machines that cannot fit a
+      larger specialist.
+    params_b: 8.0
     min_ram_gb: 8
     min_vram_gb: 0
     needs_gpu: false
@@ -57,38 +103,12 @@ models:
     lane_benchmark: null
     licence: apache-2.0
 
-  - id: llama3.2-3b
-    display_name: Llama 3.2 3B
-    source: "ollama:llama3.2:3b"
-    domain_tags: [general, conversation, writing]
-    capability_text: >
-      Llama 3.2 3B. Small, fast general-purpose model — everyday
-      conversation, writing, and world-knowledge questions. The
-      lightest-footprint catalogue entry; runs on almost anything.
-    params_b: 3.2
-    min_ram_gb: 4
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: llama3.2
-
-  - id: llama3.1-8b
-    display_name: Llama 3.1 8B
-    source: "ollama:llama3.1:8b"
-    domain_tags: [general, conversation, writing, reasoning]
-    capability_text: >
-      Llama 3.1 8B. A stronger general-purpose catch-all than the 3B tier —
-      better reasoning and writing quality, for machines with a bit more
-      RAM to spare.
-    params_b: 8.0
-    min_ram_gb: 8
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: llama3.1
-
+  # Not a download. Kept because common-join cannot provision it anyway --
+  # `source: api:*` entries are explicitly rejected as local installs (see
+  # resolve_model in join/join.py), so this is not one of the auto-install
+  # options; it is the network's only `legal` coverage and the only
+  # verified-in-lane entry. Delete it only if you also intend to drop
+  # legal routing.
   - id: cgla-legal
     display_name: CGLA-Legal
     source: "api:cgla-legal"

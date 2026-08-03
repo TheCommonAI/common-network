@@ -32,7 +32,9 @@ async def seed_catalogue_from_file() -> None:
     with open(path) as f:
         data = yaml.safe_load(f) or {}
 
-    for m in data.get("models", []):
+    models = data.get("models", [])
+
+    for m in models:
         vec = embedder.embed(m["capability_text"])
         async with db.pool().acquire() as conn:
             await conn.execute(
@@ -60,6 +62,22 @@ async def seed_catalogue_from_file() -> None:
                 m.get("verified_in_lane", False),
                 _to_jsonb(m.get("lane_benchmark")), m.get("licence"),
             )
+
+    # The seed file is the source of truth for what the network offers, so an
+    # entry deleted from the YAML has to actually disappear. Upserting alone
+    # would leave a retired model assignable forever -- and /assign reads the
+    # table, not the file, so nobody would notice until a node pulled it.
+    # Guarded on a non-empty seed: an unreadable or truncated file must not
+    # be able to wipe the catalogue.
+    if models:
+        async with db.pool().acquire() as conn:
+            removed = await conn.fetch(
+                "delete from catalogue_models where id <> all($1::text[]) returning id",
+                [m["id"] for m in models],
+            )
+        if removed:
+            print(f"catalogue: retired {len(removed)} entry(s) no longer in the seed file: "
+                  f"{', '.join(r['id'] for r in removed)}")
 
 
 def _to_jsonb(value: Any) -> str | None:
