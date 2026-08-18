@@ -299,8 +299,18 @@ async def plan_installs(machines: list[float], window_days: int = 30) -> dict:
             best = max(best, base)
         if model["verified_in_lane"]:
             best *= 1.25
+        # A second copy of a model already assigned adds redundancy but no
+        # capability — two identical nodes are dominated by each other and the
+        # gateway will never seat both on a panel. So a not-yet-assigned
+        # specialist wins any close call. This is a strong discount rather than
+        # a ban because duplicates are genuinely worth having once the distinct
+        # lanes are filled: a lab where one machine is switched off should not
+        # lose a lane entirely.
+        if assigned_models.get(model["id"], 0):
+            best *= 0.3 ** assigned_models[model["id"]]
         return best
 
+    assigned_models: dict[str, int] = {}
     plan = []
     needs_aggregator = True
     for i, ram in enumerate(sorted(machines, reverse=True)):
@@ -321,6 +331,7 @@ async def plan_installs(machines: list[float], window_days: int = 30) -> dict:
             if generalists:
                 chosen = max(generalists, key=lambda m: float(m["params_b"] or 0))
                 needs_aggregator = False
+                assigned_models[chosen["id"]] = assigned_models.get(chosen["id"], 0) + 1
                 for tag in chosen["domain_tags"]:
                     assigned_count[tag] = assigned_count.get(tag, 0) + 1
                 plan.append({
@@ -335,6 +346,7 @@ async def plan_installs(machines: list[float], window_days: int = 30) -> dict:
                 continue
 
         chosen = max(runnable, key=score_model)
+        assigned_models[chosen["id"]] = assigned_models.get(chosen["id"], 0) + 1
         for tag in chosen["domain_tags"]:
             assigned_count[tag] = assigned_count.get(tag, 0) + 1
         lane = max(chosen["domain_tags"],
@@ -349,19 +361,69 @@ async def plan_installs(machines: list[float], window_days: int = 30) -> dict:
                           if demand_by_domain.get(lane) else " (no demand data yet — filling coverage)")),
         })
 
+    # Whether the planned network can compose is a question about distinct
+    # *models*, not distinct lane tags.
+    #
+    # Counting tags was wrong, and wrong in the direction that flatters the
+    # plan: a single model declaring four tags (phi4-mini-reasoning declares
+    # math, reasoning, logic and step-by-step) made four machines running that
+    # one model look like four specialist lanes. Four copies of one model is
+    # one specialist. The gateway's domination gate would correctly refuse to
+    # compose them — so the plan was promising something the resulting network
+    # provably cannot do. Found by standing the gateway up and reading the plan
+    # it actually produced for six 8GB machines.
+    specialist_models = {
+        entry["catalogue_id"] for entry in plan
+        if entry.get("role") == "specialist" and entry.get("catalogue_id")
+    }
     lanes = {t for entry in plan if entry.get("domain_tags")
              for t in entry["domain_tags"] if t.lower() not in excluded}
-    return {
-        "machines": len(machines),
-        "plan": plan,
-        "distinct_specialist_lanes": len(lanes),
-        "can_compose": len(lanes) >= settings.compose_min_domains and not needs_aggregator,
-        "note": (
+    can_compose = len(specialist_models) >= settings.compose_min_domains and not needs_aggregator
+
+    if can_compose:
+        note = (
             "A panel can only beat its best member if the members are non-dominated — each "
             "better than the others at something. That is why this plan spreads machines "
             "across lanes instead of giving every machine the best model it can hold. "
             "See testing/seam-findings.md §2."
-        ),
+        )
+    elif needs_aggregator:
+        note = ("No machine in this set can hold a generalist to aggregate with. A panel with "
+                "nobody to synthesise it degrades to passing through one member's answer.")
+    else:
+        # Almost always a hardware ceiling rather than a catalogue gap, so say
+        # which, and say what would fix it. "can_compose: false" on its own
+        # tells someone their lab won't work but not what to do about it.
+        fits_anywhere = {m["id"] for m in catalogue
+                         if any(_fits(m, ram) for ram in machines)
+                         and not any(t.lower() in excluded for t in m["domain_tags"])}
+        smallest_unreachable = sorted(
+            (m for m in catalogue
+             if m["id"] not in fits_anywhere
+             and not any(t.lower() in excluded for t in m["domain_tags"])),
+            key=lambda m: float(m["min_ram_gb"]),
+        )
+        need = smallest_unreachable[0] if smallest_unreachable else None
+        note = (
+            f"This set can only run {len(specialist_models)} distinct specialist "
+            f"({', '.join(sorted(specialist_models)) or 'none'}), so it cannot compose — a panel "
+            f"needs at least {settings.compose_min_domains} different specialists, and duplicates "
+            f"of one model add redundancy but not capability."
+        )
+        if need:
+            note += (f" The next specialist to become reachable is {need['display_name']}, which "
+                     f"needs {need['min_ram_gb']}GB (so ~"
+                     f"{need['min_ram_gb'] / settings.assignment_ram_headroom:.0f}GB available "
+                     f"after headroom). One larger machine would unlock composition for the "
+                     f"whole set.")
+
+    return {
+        "machines": len(machines),
+        "plan": plan,
+        "distinct_specialist_models": len(specialist_models),
+        "distinct_specialist_lanes": len(lanes),
+        "can_compose": can_compose,
+        "note": note,
     }
 
 

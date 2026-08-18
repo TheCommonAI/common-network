@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -144,8 +145,115 @@ def _pick_aggregator(scored: list[ScoredNode], panel_ids: set) -> tuple[dict | N
     return (scored[0].node, True) if scored else (None, False)
 
 
+def _relevant_domains(sims: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Which declared domains is this request actually about?
+
+    The test is **relative**, not absolute, and that is a measured decision
+    rather than a stylistic one. Against the real embedder, cosine between a
+    sentence and a short domain tag sits around 0.42-0.64 for everything —
+    a poem scores 0.553 on `math`, above an actual arithmetic question's 0.537.
+    On-topic and off-topic ranges overlap completely, so an absolute floor
+    composes every request or none.
+
+    What survives measurement is the shape of the ranking rather than its
+    values: a request that is really about something produces a sharp drop-off
+    after its top domain (0.172 on a rent question), while an off-topic request
+    is flat (largest early gap 0.026-0.038). So the test looks for that elbow.
+
+    Note what this can and cannot do. It reliably finds the ONE domain a request
+    is about; it does not reliably find a second, because the gap between the
+    second and third ranked domains is 0.010-0.038 whether or not the request
+    genuinely spans two. `has_quantitative_component` supplies the second lane
+    for the case that matters, without relying on the embedder at all.
+
+    Returns [] readily. Refusing to compose is the safe outcome — it falls back
+    to the v0.1 routing that already works.
+    """
+    if len(sims) < 2:
+        return []
+
+    if len(sims) >= settings.compose_domain_min_tags_for_relative:
+        # Find the elbow: the biggest drop-off within the first few positions.
+        # Everything above it is what this request is about.
+        #
+        # Restricted to the first `compose_max_panel` positions deliberately. A
+        # search over all positions finds the largest gap wherever it happens to
+        # be — on one measured request that was between rank 5 and rank 6, which
+        # would have seated five specialists for a single-domain question.
+        values = [s for _, s in sims]
+        best_k, best_gap = 0, 0.0
+        for k in range(1, min(settings.compose_max_panel, len(values) - 1) + 1):
+            gap = values[k - 1] - values[k]
+            if gap > best_gap:
+                best_gap, best_k = gap, k
+        if best_gap < settings.compose_domain_gap:
+            # No elbow — the request is similar to everything, or to nothing in
+            # particular. Either way there is no panel to form.
+            return []
+        relevant = sims[:best_k]
+    else:
+        # Too few declared domains for a standard deviation to mean anything.
+        #
+        # The first attempt here compared each domain against the mean of the
+        # *others*, and that was backwards: on a genuinely two-domain request
+        # both domains score highly, so each dragged the other's bar up to meet
+        # it and both were rejected. It refused exactly the case composition
+        # exists for.
+        #
+        # With two or three domains there is no background to measure against,
+        # so relative testing is not available at all and this falls back to the
+        # absolute floor — which the measurements show is a weak discriminator.
+        # That is the honest trade for a small network: a three-node lab
+        # composes a little too eagerly rather than never composing. The
+        # domination gate below still applies, and the cost of over-composing
+        # across two nodes is latency, not the Experiment 2 failure.
+        relevant = list(sims)
+
+    return [(d, s) for d, s in relevant if s >= settings.compose_domain_floor]
+
+
+# A quantitative component the request is asking someone to work out. Two or
+# more figures AND a phrase that asks for a calculation -- "8 weeks behind at
+# $340, how much do I owe" qualifies; "I have 2 eggs and 100g of guanciale"
+# does not.
+_FIGURE_RE = re.compile(r"(?<![\w.])[-+]?[$£€]?\s?\d[\d,]*(?:\.\d+)?%?")
+_CALC_CUE_RE = re.compile(
+    r"\b(how much|how many|calculat|total|owe[ds]?|worth|per week|per year|per month|"
+    r"percent|interest|sum|amount|cost|pay|payable|refund|balance|rate|entitled to)\b",
+    re.IGNORECASE,
+)
+
+
+def has_quantitative_component(text: str) -> bool:
+    """Is this request asking for a calculation, as well as whatever else?
+
+    Deterministic on purpose, and load-bearing because of a measured failure.
+    Detecting a *second* relevant domain from embeddings does not work with
+    BAAI/bge-small-en-v1.5: across on-topic and off-topic requests alike, the
+    gap between the second- and third-ranked domain sits at 0.010-0.038, so
+    there is no threshold that finds a genuine two-domain request without also
+    firing on a poem. Measured against both bare tags and full capability
+    paragraphs; neither separates.
+
+    What the embedder *can* do reliably is find the single domain a request is
+    about. So the second lane comes from a signal that does not depend on it at
+    all: a regex over figures and calculation cues, which separated 10 of 10
+    hand-checked requests.
+
+    This is also precisely the case worth composing. `seam-findings.md` measured
+    numeric precision as both the largest loss (0.719 before a handoff, 0.344
+    after) and the largest recoverable gain (+0.203 from recomputing at the
+    receiver, which app/verify.py does). A legal question with money in it is
+    the shape this network exists to answer well.
+    """
+    if not text:
+        return False
+    return len(_FIGURE_RE.findall(text)) >= 2 and bool(_CALC_CUE_RE.search(text))
+
+
 def plan_panel(scored: list[ScoredNode], request_embed: list[float],
-               mode_override: str | None = None) -> PanelPlan:
+               mode_override: str | None = None,
+               request_text: str | None = None) -> PanelPlan:
     """Decide whether this request should be composed, and by whom.
 
     The gate is the whole point. Every `compose=False` branch below corresponds
@@ -170,13 +278,34 @@ def plan_panel(scored: list[ScoredNode], request_embed: list[float],
     excluded = {t.strip().lower() for t in settings.compose_excluded_domains.split(",") if t.strip()}
     sims = [(d, s) for d, s in domain_similarities(nodes, request_embed)
             if d.lower() not in excluded]
-    # 'always' ignores the similarity floor as well as the gates below, so that
+    # 'always' ignores the relevance test as well as the gates below, so that
     # the experimental arm really is "compose wherever two different nodes lead
     # two different declared domains". A mode that still silently declined on a
     # threshold would make an A/B look like a null result when the treatment
     # never actually ran.
     matched = (sims[: settings.compose_max_panel] if mode == "always"
-               else [(d, s) for d, s in sims if s >= settings.compose_domain_floor])
+               else _relevant_domains(sims))
+
+    # The embedder reliably finds the one domain a request is about, and
+    # reliably cannot find the second (see has_quantitative_component). So when
+    # it has found exactly one, ask a deterministic question instead: does this
+    # request also require a calculation? If so, seat the arithmetic lane
+    # alongside — that is a second domain the embedding could not see.
+    quantitative = mode != "always" and has_quantitative_component(request_text or "")
+    if quantitative and len(matched) <= 1 and sims:
+        quant_tags = {t.strip().lower()
+                      for t in settings.compose_quantitative_tags.split(",") if t.strip()}
+        # When the elbow found nothing at all, fall back to the top-ranked
+        # domain as the leader. Safe here specifically because the quantitative
+        # check has already fired: this branch cannot be reached by a request
+        # that isn't asking for a calculation, so the poems and pleasantries
+        # that a bare top-1 rule would sweep up never arrive.
+        leader = matched or sims[:1]
+        already = {d.lower() for d, _ in leader}
+        candidates = [(d, s) for d, s in sims
+                      if d.lower() in quant_tags and d.lower() not in already]
+        if candidates:
+            matched = leader + [max(candidates, key=lambda pair: pair[1])]
 
     if len(matched) < settings.compose_min_domains and mode != "always":
         top = f"{matched[0][0]} ({matched[0][1]:.2f})" if matched else "none"
@@ -184,9 +313,9 @@ def plan_panel(scored: list[ScoredNode], request_embed: list[float],
             compose=False,
             matched_domains=sims[:4],
             reason=(
-                f"single-domain request — only {len(matched)} domain cleared the "
-                f"{settings.compose_domain_floor:.2f} floor (best: {top}). One "
-                f"specialist covers this; a panel would add cost and dilution, not coverage."
+                f"single-domain request — {len(matched)} domain stood out against this "
+                f"request's own similarity profile (best: {top}). One specialist covers "
+                f"this; a panel would add cost and dilution, not coverage."
             ),
         )
 
@@ -256,12 +385,16 @@ def plan_panel(scored: list[ScoredNode], request_embed: list[float],
                          reason="no node available to aggregate")
 
     domains = ", ".join(f"{m.domain} → {m.name}" for m in members)
+    why_quant = (" The arithmetic lane was seated because the request asks for a "
+                 "calculation — a deterministic check, not a similarity score."
+                 if quantitative else "")
     return PanelPlan(
         compose=True, members=members, aggregator=aggregator,
         aggregator_in_panel=in_panel, matched_domains=sims[:4],
         reason=(
             f"request spans {len(members)} domains with a different best node for each "
             f"({domains}); no single node dominates, so a panel can add what one cannot."
+            + why_quant
         ),
     )
 

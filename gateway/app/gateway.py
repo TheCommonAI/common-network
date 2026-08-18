@@ -343,6 +343,8 @@ async def chat_completions(request: Request):
         plan = compose.plan_panel(
             scored, request_embed,
             mode_override=compose_header if compose_header in {"auto", "always", "never"} else None,
+            # The quantitative check reads the request itself, not its embedding.
+            request_text=routing_text,
         )
 
         if plan.compose:

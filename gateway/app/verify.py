@@ -278,7 +278,12 @@ def check_arithmetic(text: str, source_node: str) -> list[ArithmeticCheck]:
 # whole cross-check.
 _LABELLED_RE = re.compile(
     r"(?P<label>(?:[A-Za-z][A-Za-z\-]*\s+){0,3}[A-Za-z][A-Za-z\-]*)"
-    r"\s*(?::|\bis\b|\bof\b|=)\s*"
+    # Separators. `are/was/were/comes to/totals` were added after an
+    # end-to-end run where two nodes genuinely disagreed -- one wrote
+    # "Arrears: 2720", the other "the arrears are 2900" -- and the
+    # cross-check silently saw only one of them, because `are` was not in this
+    # list. A disagreement detector that misses the copula misses most prose.
+    r"\s*(?::|=|\bis\b|\bare\b|\bwas\b|\bwere\b|\bof\b|\btotals?\b|\bcomes\s+to\b|\bequals\b)\s*"
     r"(?P<value>" + _NUM_RE + r")"
     # Must be a whole number, not a prefix of one. Without this guard the
     # engine backtracks around the operator lookahead below by shortening the

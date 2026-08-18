@@ -57,12 +57,34 @@ class Settings(BaseSettings):
     #            For experiments, not for production.
     compose_mode: str = "auto"
 
-    # A domain must match the request at least this well to seat a specialist.
-    # Calibrated against the same observations as routing_confidence_threshold:
-    # tag similarities ran ~0.35-0.40 for vague queries and ~0.47+ for clearly
-    # on-topic ones, so 0.42 sits between "plausibly related" and "actually
-    # about this". Set it too low and every request looks multi-domain.
-    compose_domain_floor: float = 0.42
+    # How big a drop-off separates "the domains this request is about" from the
+    # rest. Domains are ranked by similarity and the gateway looks for an elbow
+    # in the first few positions; everything above the elbow is relevant.
+    #
+    # A standard-deviation test was tried first and has a structural ceiling
+    # that makes it unusable here: with n declared domains of which k are
+    # relevant, the largest achievable z is sqrt((n-k)/k) — so on a four-lane
+    # network a genuine two-domain request tops out at z=1.0 exactly, and any
+    # threshold that rejects flat requests also rejects the real ones. The
+    # elbow is scale-free and has no such ceiling.
+    #
+    # Measured against the real embedder: off-topic requests ("write me a poem
+    # about the sea") produce a largest early gap of 0.026-0.038, while a
+    # genuinely on-topic request produces 0.172. 0.05 sits in that gap.
+    compose_domain_gap: float = 0.05
+
+    # Below this many declared domains there is no background to measure an
+    # elbow against, and the gateway falls back to the absolute floor.
+    compose_domain_min_tags_for_relative: int = 4
+
+    # Domain tags that count as "the arithmetic lane". When a request is about
+    # one clear domain AND asks for a calculation, the best node holding one of
+    # these is seated alongside — the second lane the embedder cannot see.
+    compose_quantitative_tags: str = "math,arithmetic,quantitative,calculation,word-problems,maths"
+
+    # A sanity floor, not a discriminator -- it only rejects domains that are
+    # unrelated on any reading. The work is done by the relative test above.
+    compose_domain_floor: float = 0.30
 
     # Below this many matched domains there is nothing to compose -- one
     # specialist covers the request and a panel adds cost, latency and
