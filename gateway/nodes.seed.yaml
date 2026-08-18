@@ -1,59 +1,76 @@
-# Demo nodes for Common Network v0.1.
+# Demo nodes for Common Network v0.1.1.
+#
 # Edit endpoint_url / model_name / api_key_ref to point at real, reachable
 # nodes before demoing. Ollama nodes need `ollama serve` running locally.
 # OpenRouter-wrapped nodes need OPENROUTER_API_KEY set in the gateway's env.
 # Keep local Ollama models at 7B or smaller — this is developed on a 16GB laptop.
+#
+# --- domain_tags are now load-bearing ------------------------------------
+#
+# In v0.1 these nodes had no domain tags and it didn't matter: routing was
+# similarity against capability_text. In v0.1.1 a panel seat is awarded by
+# *declared domain*, so an untagged node can never be composed with anything.
+# A demo seeded without tags would silently only ever single-route, and would
+# look exactly like composition not working.
+#
+# The set below is deliberately chosen so this demo network CAN compose:
+# two narrow specialists in different lanes, plus a generalist to aggregate.
+# `general` is excluded from panel seats (COMPOSE_EXCLUDED_DOMAINS), which is
+# why the generalist has no specialist tag — its job here is to combine, and
+# giving it a lane tag would put it on panels in lanes it doesn't lead.
 
 nodes:
-  - name: ollama-qwen-coder-local
+  - name: ollama-maths-local
+    operator: common-network-demo
+    endpoint_url: http://localhost:11434/v1
+    model_name: mathstral:7b
+    domain_tags: [math, arithmetic, quantitative]
+    capability_text: >
+      Mathstral 7B running locally via Ollama. Tuned for mathematical and
+      quantitative reasoning — arithmetic, algebra, multi-step word problems.
+      Narrow: weaker than a general model at conversation, stronger at
+      calculation. Free, self-hosted.
+    region: local
+    cost_per_1k: 0
+
+  - name: ollama-coder-local
     operator: common-network-demo
     endpoint_url: http://localhost:11434/v1
     model_name: qwen2.5-coder:7b
+    domain_tags: [code, programming, debugging]
     capability_text: >
-      Qwen2.5 Coder 7B running locally via Ollama. Strong at code generation,
-      structured reasoning, and math. Free, self-hosted, low cost.
+      Qwen2.5 Coder 7B running locally via Ollama. Code generation, debugging
+      and multi-file reasoning across common languages. Free, self-hosted.
     region: local
     cost_per_1k: 0
 
-  - name: ollama-qwen3.5-local
+  - name: ollama-generalist-local
     operator: common-network-demo
     endpoint_url: http://localhost:11434/v1
-    model_name: qwen3.5:4b
+    model_name: qwen3:8b
+    domain_tags: [general, conversation, writing]
+    # The aggregator. Combining several specialists' replies needs breadth and
+    # instruction-following rather than depth in any one lane.
+    can_aggregate: true
     capability_text: >
-      Qwen3.5 4B running locally via Ollama. Small, fast, general-purpose
-      model good at conversation, writing, and everyday knowledge questions.
+      Qwen3 8B running locally via Ollama. General-purpose — conversation,
+      writing, summarisation and world knowledge. Serves requests that don't
+      span domains, and combines the panel's answers when they do.
     region: local
     cost_per_1k: 0
 
-  - name: openrouter-mistral
-    operator: common-network-demo
-    endpoint_url: https://openrouter.ai/api/v1
-    model_name: mistralai/mistral-7b-instruct
-    api_key_ref: OPENROUTER_API_KEY
-    capability_text: >
-      Mistral 7B Instruct via OpenRouter. Fast, low-cost, good general
-      instruction following and summarisation.
-    region: global
-    cost_per_1k: 0.06
-
-  - name: openrouter-deepseek
-    operator: common-network-demo
-    endpoint_url: https://openrouter.ai/api/v1
-    model_name: deepseek/deepseek-chat
-    api_key_ref: OPENROUTER_API_KEY
-    capability_text: >
-      DeepSeek Chat via OpenRouter. Strong at math, logic, and multi-step
-      reasoning tasks. Moderate cost.
-    region: global
-    cost_per_1k: 0.14
-
-  - name: openrouter-gemma
-    operator: common-network-demo
-    endpoint_url: https://openrouter.ai/api/v1
-    model_name: google/gemma-2-9b-it
-    api_key_ref: OPENROUTER_API_KEY
-    capability_text: >
-      Gemma 2 9B via OpenRouter. Good at language, writing, and social/
-      emotional nuance in conversation. Low cost.
-    region: global
-    cost_per_1k: 0.04
+  # Remote nodes, for when the laptop can't hold everything at once. Commented
+  # out by default: they cost money and need a key, and a demo that silently
+  # bills you is a bad demo.
+  #
+  # - name: openrouter-deepseek
+  #   operator: common-network-demo
+  #   endpoint_url: https://openrouter.ai/api/v1
+  #   model_name: deepseek/deepseek-chat
+  #   api_key_ref: OPENROUTER_API_KEY
+  #   domain_tags: [reasoning, logic, planning]
+  #   capability_text: >
+  #     DeepSeek Chat via OpenRouter. Strong at multi-step reasoning and
+  #     planning. Moderate cost.
+  #   region: global
+  #   cost_per_1k: 0.14

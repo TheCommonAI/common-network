@@ -9,6 +9,7 @@ from app import db, embedder
 from app.catalogue import router as catalogue_router, seed_catalogue_from_file
 from app.config import settings
 from app.decisions import router as decisions_router
+from app.demand import router as demand_router
 from app.gateway import router as gateway_router
 from app.health import health_check_loop
 from app.registry import router as registry_router
@@ -30,8 +31,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Common Network Gateway",
-    description="Permissionless, transparent routing across contributed AI nodes.",
-    version="0.1.0",
+    description=(
+        "Permissionless, transparent routing and composition across contributed AI nodes. "
+        "A request that spans domains is answered by a panel of specialists in parallel, "
+        "verified deterministically, and synthesised into one reply."
+    ),
+    version="0.1.1",
     lifespan=lifespan,
 )
 
@@ -39,6 +44,7 @@ app.include_router(registry_router)
 app.include_router(gateway_router)
 app.include_router(decisions_router)
 app.include_router(catalogue_router)
+app.include_router(demand_router)
 
 
 @app.get("/health")

@@ -39,9 +39,57 @@ class Settings(BaseSettings):
     # cost/latency score (see app/router.py).
     w_tag_overlap: float = 0.15
 
-    # Node onboarding (v0.3): only ever assign a catalogue model if it leaves
-    # this much RAM headroom, so a specialist never swaps and times out.
+    # Node onboarding: only ever assign a catalogue model if it leaves this
+    # much RAM headroom, so a specialist never swaps and times out.
     assignment_ram_headroom: float = 0.8
+
+    # --- Composition (v0.1.1) -------------------------------------------
+    #
+    # 'auto'   — compose only where the preconditions from seam-findings.md
+    #            hold: the request spans domains, and different nodes are best
+    #            at them. The default, because composing unconditionally is
+    #            precisely what Experiment 2 did, and it lost.
+    # 'never'  — v0.1 behaviour exactly. Also the control arm for any A/B.
+    # 'always' — compose whenever two nodes declare two matched domains,
+    #            skipping the confidence and single-domain gates (the
+    #            domination gate still applies — composing a node with one it
+    #            dominates is not a stricter setting, it is a broken one).
+    #            For experiments, not for production.
+    compose_mode: str = "auto"
+
+    # A domain must match the request at least this well to seat a specialist.
+    # Calibrated against the same observations as routing_confidence_threshold:
+    # tag similarities ran ~0.35-0.40 for vague queries and ~0.47+ for clearly
+    # on-topic ones, so 0.42 sits between "plausibly related" and "actually
+    # about this". Set it too low and every request looks multi-domain.
+    compose_domain_floor: float = 0.42
+
+    # Below this many matched domains there is nothing to compose -- one
+    # specialist covers the request and a panel adds cost, latency and
+    # dilution without adding coverage.
+    compose_min_domains: int = 2
+
+    # Tags that describe breadth rather than a lane, and so can never earn a
+    # panel seat. Without this exclusion a generalist matches every request
+    # moderately well, `general` clears the floor on almost everything, and the
+    # gateway seats a generalist next to a specialist *in that specialist's own
+    # domain* — which is Experiment 2's exact mistake, rebuilt as a default.
+    # A generalist's job in a panel is to aggregate, and it is still chosen for
+    # that (see compose._pick_aggregator).
+    compose_excluded_domains: str = "general,conversation,chat,assistant,instruction-following"
+
+    # Hard ceiling on panel size. Every member is a full inference on someone's
+    # donated laptop, and the seam findings give no reason to expect returns
+    # from breadth beyond the domains a request actually spans.
+    compose_max_panel: int = 3
+
+    # Specialists are asked in parallel, so the panel costs one specialist's
+    # latency, not the sum -- but the slowest member sets the pace. Deliberately
+    # shorter than forward_timeout_seconds: a panel member that has not answered
+    # by now is dropped and the rest proceed, because a degraded answer beats a
+    # timed-out one. Development is on a 16GB laptop where a cold 7B model can
+    # take ~57s, so this is generous on purpose.
+    compose_member_timeout_seconds: float = 90.0
 
 
 settings = Settings()

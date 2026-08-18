@@ -59,19 +59,30 @@ def _tag_overlap_score(request_embed: list[float], domain_tags: list[str] | None
     return max(_cosine(request_embed, _tag_embed(t)) for t in domain_tags)
 
 
-def best_matched_domain(nodes: list[dict], request_embed: list[float], floor: float = 0.3) -> str | None:
-    """The single domain tag (across all candidate nodes) that best matches this
-    request, for logging as decisions.matched_domain -- the demand signal that
-    v0.3 assignment reads back. None if nothing clears the floor."""
+def domain_similarities(nodes: list[dict], request_embed: list[float]) -> list[tuple[str, float]]:
+    """Every domain the network declares, ranked by match against this request.
+
+    v0.1 only ever needed the single best domain, because a request went to a
+    single node. Composition needs the whole ranking: whether a request spans
+    two domains that *different* nodes are best at is exactly the question of
+    whether there is anything worth composing (see app/compose.py).
+    """
     all_tags: set[str] = set()
     for n in nodes:
         all_tags.update(n.get("domain_tags") or [])
-    if not all_tags:
+    ranked = [(t, _cosine(request_embed, _tag_embed(t))) for t in all_tags]
+    ranked.sort(key=lambda pair: pair[1], reverse=True)
+    return ranked
+
+
+def best_matched_domain(nodes: list[dict], request_embed: list[float], floor: float = 0.3) -> str | None:
+    """The single domain tag (across all candidate nodes) that best matches this
+    request, for logging as decisions.matched_domain -- the demand signal that
+    assignment reads back. None if nothing clears the floor."""
+    ranked = domain_similarities(nodes, request_embed)
+    if not ranked:
         return None
-    best_tag, best_sim = max(
-        ((t, _cosine(request_embed, _tag_embed(t))) for t in all_tags),
-        key=lambda pair: pair[1],
-    )
+    best_tag, best_sim = ranked[0]
     return best_tag if best_sim >= floor else None
 
 

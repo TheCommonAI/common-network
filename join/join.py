@@ -220,9 +220,14 @@ def die_with_fix(msg: str, fix: str) -> None:
     sys.exit(1)
 
 
-def check_binaries() -> None:
+def check_binaries(need_tunnel: bool = True) -> None:
     if shutil.which("ollama") is None:
         die_with_fix("ollama not found.", "install it from https://ollama.com/download, then run this again.")
+    # --lan needs no tunnel, which is most of the point of it: cloudflared is
+    # both an extra install and the thing a school network is most likely to
+    # block outright.
+    if not need_tunnel:
+        return
     if shutil.which("cloudflared") is None:
         system = platform.system()
         hint = {
@@ -483,6 +488,43 @@ def tunnel_is_healthy(tunnel_url: str) -> bool:
         return False
 
 
+def lan_ip() -> str | None:
+    """This machine's address on the local network.
+
+    Opens a UDP socket toward a public address and reads back which local
+    interface the routing table chose. Nothing is actually sent -- UDP connect
+    only fixes the socket's peer -- so this works with no internet access at
+    all, which matters because the network it describes may be offline by
+    design.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("10.255.255.255", 1))
+        return sock.getsockname()[0]
+    except OSError:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return None
+    finally:
+        sock.close()
+
+
+def ollama_reachable_on_lan(ip: str) -> bool:
+    """Can another machine on this LAN actually reach our Ollama?
+
+    Ollama binds 127.0.0.1 by default, which is invisible to every other
+    machine in the room. Registering anyway would put a node in the registry
+    that health-checks green from its own machine and fails for everyone else
+    -- the worst kind of broken, because the registry looks fine.
+    """
+    try:
+        http_json("GET", f"http://{ip}:11434/v1/models", timeout=5)
+        return True
+    except (urllib.error.URLError, socket.timeout, OSError):
+        return False
+
+
 def start_tunnel() -> tuple[subprocess.Popen, str]:
     # Cloudflare's quick tunnel forwards the public tunnel hostname as the
     # Host header by default. Some Ollama versions reject any request whose
@@ -537,6 +579,11 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
         argv += ["--capability", args.capability]
     if args.no_update:
         argv += ["--no-update"]
+    # Must be carried through, or a lab machine installed as a permanent
+    # service comes back after reboot trying to open a tunnel that its own
+    # network blocks -- and silently drops out of the lab.
+    if args.lan:
+        argv += ["--lan"]
     return argv
 
 
@@ -679,6 +726,7 @@ def main() -> None:
     parser.add_argument("--cost", type=float, default=0, help="Declared cost per 1k tokens (default: 0, it's free)")
     parser.add_argument("--capability", default=None, help="Override the auto-generated capability description")
     parser.add_argument("--no-update", action="store_true", default=bool(os.environ.get("COMMON_NO_UPDATE")), help="Skip the self-update check (useful when hacking on this script locally)")
+    parser.add_argument("--lan", action="store_true", help="Join over the local network instead of a Cloudflare tunnel. For a computer lab or anywhere the gateway is on the same network — no tunnel, nothing exposed to the internet")
     parser.add_argument("--permanent", action="store_true", help="Install as a background service that starts at login/boot and restarts if it crashes, then exit")
     parser.add_argument("--remove-permanent", action="store_true", help="Remove the background service installed by --permanent, then exit")
     args = parser.parse_args()
@@ -713,13 +761,34 @@ def main() -> None:
         install_permanent(args)
         return
 
-    check_binaries()
+    # LAN mode skips cloudflared entirely, so don't demand it be installed.
+    check_binaries(need_tunnel=not args.lan)
     ensure_ollama_running()
     ensure_model(ollama_tag)
 
-    working("opening a Cloudflare quick tunnel to your local Ollama...")
-    tunnel_proc, tunnel_url = start_tunnel()
-    print(f"{GLYPH_DONE} tunnel live at {blue(tunnel_url)}")
+    tunnel_proc = None
+    if args.lan:
+        ip = lan_ip()
+        if not ip:
+            die("couldn't work out this machine's LAN address — pass a tunnel join instead (drop --lan)")
+        if not ollama_reachable_on_lan(ip):
+            die_with_fix(
+                f"Ollama is running, but not reachable from the rest of the network on {ip}:11434.",
+                "Ollama binds to localhost only by default. Restart it bound to the LAN:\n"
+                "    macOS/Linux:  OLLAMA_HOST=0.0.0.0:11434 ollama serve\n"
+                "    Windows:      setx OLLAMA_HOST 0.0.0.0:11434   (then restart Ollama)\n\n"
+                "  If that's already set and this still fails, the network has client isolation\n"
+                "  turned on — machines on the same wifi can't talk to each other. That needs\n"
+                "  IT to disable it for this subnet.",
+            )
+        tunnel_url = f"http://{ip}:11434"
+        print(f"{GLYPH_DONE} serving on the local network at {blue(tunnel_url)}")
+        print(comment("no tunnel, nothing exposed to the internet — this machine is only "
+                      "reachable from your own network."))
+    else:
+        working("opening a Cloudflare quick tunnel to your local Ollama...")
+        tunnel_proc, tunnel_url = start_tunnel()
+        print(f"{GLYPH_DONE} tunnel live at {blue(tunnel_url)}")
 
     capability_text = args.capability or capability_text_default or (
         f"{ollama_tag} running locally via Ollama, contributed by {args.operator}. Free, community-hosted."
@@ -760,7 +829,8 @@ def main() -> None:
         except urllib.error.URLError:
             pass
         clear_identity()
-        tunnel_proc.terminate()
+        if tunnel_proc is not None:
+            tunnel_proc.terminate()
 
     def cleanup(signum=None, frame=None):
         print(f"\n{GLYPH_WORK} {dim('leaving the network...')}")
@@ -773,11 +843,28 @@ def main() -> None:
     last_update_check = time.monotonic()
     last_tunnel_check = time.monotonic()
     while True:
-        if tunnel_proc.poll() is not None:
+        if tunnel_proc is not None and tunnel_proc.poll() is not None:
             print(f"{GLYPH_FORMING} {red('tunnel dropped unexpectedly.')}")
             cleanup()
 
-        if time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
+        # A LAN node has no tunnel to rotate or restart, but its address can
+        # still change under it -- DHCP renewal on a school network reassigns
+        # addresses routinely, and a node registered at a stale IP is a node
+        # the gateway will mark unhealthy for reasons nobody can see.
+        if tunnel_proc is None and time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
+            last_tunnel_check = time.monotonic()
+            current = lan_ip()
+            if current and f"http://{current}:11434" != tunnel_url:
+                tunnel_url = f"http://{current}:11434"
+                payload["endpoint_url"] = f"{tunnel_url}/v1"
+                print(f"{GLYPH_FORMING} this machine's address changed — re-registering at {blue(tunnel_url)}")
+                try:
+                    node = http_json("POST", f"{gateway}/nodes", body=payload)
+                    node_id, node_token = node["id"], node["node_token"]
+                except urllib.error.HTTPError as e:
+                    print(f"{GLYPH_FAILED} {red(f'failed to re-register on the new address: {e.code}')}", file=sys.stderr)
+
+        if tunnel_proc is not None and time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
             last_tunnel_check = time.monotonic()
             if not tunnel_is_healthy(tunnel_url):
                 print(f"{GLYPH_FORMING} {red('tunnel is no longer reachable')} (quick tunnels can silently rotate hostnames) — restarting it...")

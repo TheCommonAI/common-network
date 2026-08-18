@@ -55,6 +55,21 @@ class DecisionOut(BaseModel):
     created_at: str
     matched_domain: str | None = None
 
+    # --- Composition (v0.1.1) ---
+    # 'single' | 'panel' | 'degraded'. Defaulted rather than optional so a row
+    # written by v0.1 reads back as what it was, not as a gap.
+    topology: str = "single"
+    panel: list[str] | None = None
+    aggregator_node_name: str | None = None
+    compose_reason: dict | None = None
+    # Verification counters, per decision rather than only in aggregate:
+    # "how often does the checker actually fire" is the question that reveals
+    # whether it still works. A fire rate that quietly falls to zero means the
+    # extractor broke, not that the models got better.
+    checks_run: int | None = None
+    checks_failed: int | None = None
+    disagreements: int | None = None
+
 
 # --- OpenAI-compatible passthrough ---
 # Deliberately untyped/loose (dict passthrough) — v0.1 forwards whatever the

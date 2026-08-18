@@ -9,12 +9,20 @@ Usage:
     common leave                   take this machine off the commons
     common status                  this node: health, position, requests served
     common demand                  live domain coverage gaps
+    common recommend               what specialist the network needs next
+    common recommend --machines 20 plan a whole computer lab at once
     common peers                   connected nodes and their coverage
     common contrib                 your contribution ledger
     common whoami                  your node identity
     common config                  settings (all local, all editable)
     common test                    benchmark every node + routing, log to jsonl
     common help [verb]             help, per verb
+
+A question that spans domains is answered by several specialists at once and
+combined into one reply — `common ask` shows you which machines answered.
+Composition only happens where it can actually help; `--no-compose` forces the
+old single-node behaviour and `-v` explains why a given request wasn't
+composed. See testing/compose-test for whether it is measurably better.
 
 `common test` sweeps every healthy node with a fixed probe set, measures
 time-to-first-token / total latency / approximate tok-s per node, checks
@@ -198,7 +206,8 @@ def read_identity() -> dict | None:
 # --- Commands ------------------------------------------------------------
 
 def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
-            local: bool, as_json: bool, quiet: bool, verbose: bool) -> None:
+            local: bool, as_json: bool, quiet: bool, verbose: bool,
+            compose: str | None = None) -> None:
     if local:
         _ask_local(question, model, as_json, quiet)
         return
@@ -228,6 +237,8 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
         headers["X-Common-Region"] = region
     if node_override:
         headers["X-Common-Node"] = node_override
+    if compose:
+        headers["X-Common-Compose"] = compose
 
     req = urllib.request.Request(f"{gateway}/v1/chat/completions", data=json.dumps(body).encode(), headers=headers, method="POST")
     start = time.monotonic()
@@ -247,14 +258,48 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
 
     node_name = resp.headers.get("X-Common-Node")
     score = resp.headers.get("X-Common-Score")
+    topology = resp.headers.get("X-Common-Topology", "single")
+    panel = resp.headers.get("X-Common-Panel")
+    aggregator = resp.headers.get("X-Common-Aggregator")
+    compose_reason = resp.headers.get("X-Common-Compose-Reason")
+    checks = resp.headers.get("X-Common-Checks")
+    checks_failed = resp.headers.get("X-Common-Checks-Failed")
+    disagreements = resp.headers.get("X-Common-Disagreements")
 
     if not quiet and not as_json:
-        score_str = f"   ·   {float(score):.2f} match" if score not in (None, "forced") else ""
-        weak = score not in (None, "forced") and float(score) < 0.5
-        marker = f"  {GLYPH_FORMING}" if weak else ""
-        print(f"{GLYPH_ROUTE} nearest node   {blue(node_name or 'unknown')}{score_str}{marker}")
-        if weak:
-            print(comment("nothing on the commons serves this well yet."))
+        if topology == "panel" and panel:
+            # The one thing worth showing plainly: this answer came from more
+            # than one machine. It is the entire difference between this and a
+            # chat window, and it should not be something you have to run
+            # `curl -i` to notice.
+            members = [p.strip() for p in panel.split(",") if p.strip()]
+            print(f"{GLYPH_ROUTE} {blue(str(len(members)), bold=True)} specialists answering in parallel")
+            for m in members:
+                print(dim(f"     ├─ {m}"))
+            print(dim(f"     └─ {aggregator or 'unknown'} ") + comment("combining"))
+            if checks and int(checks) > 0:
+                failed = int(checks_failed or 0)
+                if failed:
+                    print(f"     {GLYPH_FORMING} " + red(f"{failed} of {checks} calculations were wrong")
+                          + comment(" — recomputed and corrected"))
+                else:
+                    print(dim(f"     · {checks} calculations independently recomputed, all correct"))
+            if disagreements and int(disagreements) > 0:
+                print(f"     {GLYPH_FORMING} " + comment(f"{disagreements} figure(s) the specialists disagreed on"))
+            print()
+        elif topology == "degraded" and panel:
+            print(f"{GLYPH_ROUTE} a panel was selected but only {blue(node_name or 'one node')} answered")
+            print(comment("passing its answer through unaggregated."))
+            print()
+        else:
+            score_str = f"   ·   {float(score):.2f} match" if score not in (None, "forced") else ""
+            weak = score not in (None, "forced") and float(score) < 0.5
+            marker = f"  {GLYPH_FORMING}" if weak else ""
+            print(f"{GLYPH_ROUTE} nearest node   {blue(node_name or 'unknown')}{score_str}{marker}")
+            if weak:
+                print(comment("nothing on the commons serves this well yet."))
+            if verbose and compose_reason:
+                print(comment(f"not composed: {compose_reason}"))
         print(GLYPH_RECV + dim(" streaming"))
         print()
 
@@ -286,7 +331,13 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
     if as_json:
         print(json.dumps({
             "answer": "".join(full), "node": node_name, "score": score,
-            "latency_ms": latency_ms,
+            "latency_ms": latency_ms, "topology": topology,
+            "panel": [p.strip() for p in panel.split(",")] if panel else None,
+            "aggregator": aggregator,
+            "compose_reason": compose_reason,
+            "checks_run": int(checks) if checks else None,
+            "checks_failed": int(checks_failed) if checks_failed else None,
+            "disagreements": int(disagreements) if disagreements else None,
         }))
         return
 
@@ -294,11 +345,17 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
         print()
         print(dim("─" * 63))
         model_bit = f" ({model})" if model else ""
-        print(dim(f"served by   {node_name}{model_bit}"))
+        if topology == "panel" and panel:
+            n = len([p for p in panel.split(",") if p.strip()])
+            print(dim(f"composed by   {n} specialists + {aggregator}"))
+        else:
+            print(dim(f"served by   {node_name}{model_bit}"))
         retention = "embedding retained for demand analytics · no raw text stored"
         print(dim(f"routed in   {latency_ms}ms   ·   {retention}   ·   no one owns this"))
         if verbose:
             print(dim(f"  score: {score}"))
+            if compose_reason:
+                print(dim(f"  topology: {topology} — {compose_reason}"))
 
 
 def _ask_local(question: str, model: str | None, as_json: bool, quiet: bool) -> None:
@@ -330,6 +387,100 @@ def _ask_local(question: str, model: str | None, as_json: bool, quiet: bool) -> 
         print()
         print(dim("─" * 63))
         print(dim(f"served by   local ({chosen})   ·   never left this machine"))
+
+
+def cmd_recommend(gateway: str, as_json: bool, machines: int, ram_gb: float) -> None:
+    """What specialist does the network need next?
+
+    Two modes. Without `--machines`, it reports the network's current gaps and
+    what would fill them — for one person deciding what to contribute. With
+    `--machines N`, it plans a whole set at once, which is the computer-lab
+    case: twenty machines all installing the best model they can fit would
+    produce twenty copies of one generalist, and a network of clones cannot
+    beat its own best node however large it grows.
+    """
+    if machines > 1:
+        try:
+            plan = http_json("GET", f"{gateway}/demand/plan?machines={machines}&ram_gb={ram_gb}", timeout=30)
+        except (urllib.error.URLError, socket.timeout) as e:
+            print(red("✗ can't reach the network."), file=sys.stderr)
+            print(comment(f"{e}"), file=sys.stderr)
+            sys.exit(1)
+        if as_json:
+            print(json.dumps(plan))
+            return
+
+        print_banner_box(f"install plan for {machines} machines at {ram_gb:g}GB each")
+        print()
+        for entry in plan["plan"]:
+            if not entry.get("catalogue_id"):
+                print(f"  {entry['machine']:>3}.  " + red("nothing fits this machine"))
+                print(dim(f"        {entry['reason']}"))
+                continue
+            role = entry["role"]
+            badge = paper(" aggregator ", bold=True) if role == "aggregator" else blue(f" {role} ")
+            print(f"  {entry['machine']:>3}.  {blue(entry['display_name'], bold=True)}  {badge}")
+            print(dim(f"        common join --lan --model {entry['catalogue_id']}"))
+            print(comment(f"        {entry['reason']}"))
+            print()
+        lanes = plan["distinct_specialist_lanes"]
+        print(dim("─" * 63))
+        if plan["can_compose"]:
+            print(paper(f"✓ {lanes} distinct specialist lanes + an aggregator — this network can compose."))
+        else:
+            print(red(f"✗ only {lanes} specialist lane(s) — not enough to compose."))
+            print(comment("a panel needs at least two specialists who are each best at something."))
+        print(comment(plan["note"]))
+        return
+
+    try:
+        gaps = http_json("GET", f"{gateway}/demand/gaps", timeout=30)
+    except (urllib.error.URLError, socket.timeout) as e:
+        print(red("✗ can't reach the network."), file=sys.stderr)
+        print(comment(f"{e}"), file=sys.stderr)
+        sys.exit(1)
+
+    if as_json:
+        print(json.dumps(gaps))
+        return
+
+    print_banner_box("what the network is short of")
+    print()
+    if gaps["cold_start"]:
+        print(comment("no requests logged yet — these are coverage gaps, not measured demand."))
+        print()
+
+    shown = 0
+    for gap in gaps["domain_gaps"]:
+        rec = gap.get("recommended")
+        if not rec:
+            continue
+        shown += 1
+        if shown > 6:
+            break
+        print(f"  {blue(gap['domain'], bold=True)}")
+        print(dim(f"     {gap['demand']} recent request(s)  ·  {gap['coverage']} node(s) serving it"))
+        verified = paper("  ✓ verified in lane") if rec["verified_in_lane"] else ""
+        print(f"     → {rec['display_name']}{verified}")
+        print(dim(f"       common join --lan --model {rec['catalogue_id']}   ({rec['min_ram_gb']}GB+)"))
+        print()
+
+    if not shown:
+        print(comment("no gaps — every declared domain has a node serving it."))
+        print()
+
+    clusters = gaps.get("unserved_clusters") or []
+    if clusters:
+        print(dim("─" * 63))
+        print(red(f"{len(clusters)} cluster(s) of demand nothing in the catalogue covers:"))
+        for c in clusters[:3]:
+            print(dim(f"   · {c['requests']} requests — {c['verdict']}"))
+        print(comment("this is a demand vector cloud: people are asking for something"))
+        print(comment("the network has no specialist for. adding one to the catalogue"))
+        print(comment("is a pull request, not a code change."))
+    elif gaps["unserved_requests"]:
+        print(dim(f"{gaps['unserved_requests']} request(s) matched no domain, but none clustered "
+                  f"— scattered one-offs rather than a missing specialist."))
 
 
 def cmd_peers(gateway: str, as_json: bool) -> None:
@@ -980,7 +1131,7 @@ def cmd_help(verb: str | None) -> None:
 def build_repl_help() -> str:
     return dim(
         "/ask (implicit: just type)  /join  /serve  /leave  /status\n"
-        "/demand  /peers  /contrib  /whoami  /config  /test  /model  /local  /help  /exit"
+        "/demand  /recommend  /peers  /contrib  /whoami  /config  /test  /model  /local  /help  /exit"
     )
 
 
@@ -1013,6 +1164,13 @@ def interactive_session(gateway: str, args: argparse.Namespace) -> None:
             continue
         if line == "/demand":
             cmd_demand(gateway, False)
+            continue
+        if line == "/recommend" or line.startswith("/recommend "):
+            parts = line.split()
+            # `/recommend 20` plans twenty machines -- the lab case, without
+            # making anyone leave the session to type a flag.
+            count = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
+            cmd_recommend(gateway, False, count, args.ram if hasattr(args, "ram") else 8.0)
             continue
         if line == "/contrib":
             cmd_contrib(gateway, False)
@@ -1066,6 +1224,14 @@ def main() -> None:
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--no-update", action="store_true", default=bool(os.environ.get("COMMON_NO_UPDATE")))
+    # Composition control. Default (unset) leaves the gateway to decide per
+    # request; --no-compose forces v0.1 single-node behaviour, which is the
+    # control arm for any comparison you want to run yourself.
+    parser.add_argument("--no-compose", action="store_true", help="ask: force a single node, never a panel")
+    parser.add_argument("--compose", action="store_true", help="ask: compose wherever structurally possible")
+    # `common recommend` only
+    parser.add_argument("--machines", type=int, default=1, help="recommend: plan an install across N machines")
+    parser.add_argument("--ram", type=float, default=8.0, help="recommend: RAM per machine in GB (default 8)")
     # `common test` only
     parser.add_argument("--repeats", type=int, default=1, help="test: repeats per probe per node")
     parser.add_argument("--full", action="store_true", help="test: 3 repeats per probe")
@@ -1100,7 +1266,11 @@ def main() -> None:
         if not question:
             print(red("✗ ask needs a question: common ask \"...\""), file=sys.stderr)
             sys.exit(1)
-        cmd_ask(gateway, question, args.region, args.model, args.local, args.json, args.quiet, args.verbose)
+        compose_mode = "never" if args.no_compose else ("always" if args.compose else None)
+        cmd_ask(gateway, question, args.region, args.model, args.local, args.json,
+                args.quiet, args.verbose, compose=compose_mode)
+    elif args.verb == "recommend":
+        cmd_recommend(gateway, args.json, args.machines, args.ram)
     elif args.verb == "peers":
         cmd_peers(gateway, args.json)
     elif args.verb == "demand":

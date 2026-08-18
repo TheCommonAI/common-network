@@ -10,27 +10,92 @@
 # registry.ollama.ai before being added; a tag that 404s would fail the
 # pull on every machine assigned to it.
 #
-# `verified_in_lane: true` is earned by the v0.2 benchmark harness
-# (bench/) actually measuring a model beating a frontier model in its
-# domain — never set it because a model "should" be good. See
-# `lane_benchmark` for the measurement that earned it, and its `date`.
+# `verified_in_lane: true` is earned by the benchmark harness (bench/)
+# actually measuring a model beating a frontier model in its domain — never
+# set it because a model "should" be good. See `lane_benchmark` for the
+# measurement that earned it, and its `date`.
 #
 # min_ram_gb / min_vram_gb / needs_gpu gate what common-join will ever
 # recommend for a given machine — leave real headroom, a specialist that
 # swaps and times out is worse than a generalist that answers. The figures
 # below are the measured download size plus room for KV cache and the OS;
 # common-join additionally applies a 0.8 headroom factor on top.
+#
+# --- WHAT CHANGED IN v0.1.1, AND WHY -------------------------------------
+#
+# v0.1's catalogue was five general-purpose models and one API entry. Five
+# generalists cannot compose: the whole finding of `testing/seam-findings.md`
+# §2 is that combining models only pays when neither is dominated by the
+# other, and near-identical generalists dominate each other by turns on noise.
+# A catalogue of generalists guarantees the network can never beat its own
+# best node, no matter how many machines join.
+#
+# So this catalogue is now built around *narrow* specialists — models that are
+# clearly worse than a generalist at most things and clearly better at one.
+# That is an uncomfortable-looking selection rule, and it is the correct one:
+# a panel needs members who are each best at something, not members who are
+# each pretty good at everything.
+#
+# The pre-flight in seam-findings.md §3 concluded no viable specialist pair
+# existed, having searched all 411 OpenRouter model IDs and found zero
+# maths-tuned models. That conclusion is true of OpenRouter and false of the
+# actual world: `mathstral`, `phi4-mini-reasoning`, `sqlcoder`, `starcoder2`,
+# `meditron` and `openthinker` all resolve on registry.ollama.ai today, and
+# were each checked before being listed here. Narrow specialists are
+# unprofitable to host as a hosted API and free to host on donated hardware —
+# which is the network's thesis, arriving as a practical consequence.
 
 models:
+  # --- Maths and quantitative reasoning ---------------------------------
+  #
+  # The lane where the seam findings measured the largest failure (numeric
+  # precision: 0.719 before the handoff, 0.344 after) and the largest recovery
+  # (+0.203 from receiver-side re-derivation). It is also the lane where a
+  # small specialist most clearly beat a much larger generalist: 0.808 for an
+  # 8B reasoning-tuned model against 0.615 for a 70-72B general one.
+
+  - id: mathstral-7b
+    display_name: Mathstral 7B
+    source: "ollama:mathstral:7b"
+    domain_tags: [math, arithmetic, word-problems, quantitative]
+    capability_text: >
+      Mathstral 7B. A Mistral model tuned specifically for mathematical and
+      scientific reasoning — arithmetic, algebra, multi-step word problems and
+      quantitative analysis. Narrow by design: weaker than a general model at
+      conversation and writing, stronger at calculation.
+    params_b: 7.2
+    min_ram_gb: 8
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: apache-2.0
+
+  - id: phi4-mini-reasoning
+    display_name: Phi-4 Mini Reasoning
+    source: "ollama:phi4-mini-reasoning:latest"
+    domain_tags: [math, reasoning, logic, step-by-step]
+    capability_text: >
+      Phi-4 Mini Reasoning. Distilled for explicit step-by-step mathematical
+      and logical reasoning at a very small footprint. Shows its working, which
+      makes its arithmetic independently checkable by the gateway's verifier.
+    params_b: 3.8
+    min_ram_gb: 6
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: mit
+
   - id: deepseek-r1-14b
     display_name: DeepSeek-R1 14B
     source: "ollama:deepseek-r1:14b"
-    domain_tags: [math, reasoning, logic, word-problems]
+    domain_tags: [reasoning, logic, math, planning]
     capability_text: >
       DeepSeek-R1 14B. Explicit chain-of-thought reasoning model — works
-      step by step through mathematics, logic puzzles, and multi-stage word
-      problems rather than answering in one pass. The network's strongest
-      maths and reasoning specialist.
+      step by step through logic puzzles, multi-stage problems and planning
+      tasks rather than answering in one pass. The heaviest reasoning
+      specialist in the catalogue.
     params_b: 14.8
     min_ram_gb: 16
     min_vram_gb: 0
@@ -39,14 +104,36 @@ models:
     lane_benchmark: null
     licence: mit
 
+  # --- Code -------------------------------------------------------------
+  #
+  # Three entries at different footprints rather than one, because a school
+  # lab is heterogeneous: an 8GB machine and a 16GB machine should both be
+  # able to serve code, at different depths.
+
+  - id: qwen2.5-coder-7b
+    display_name: Qwen2.5 Coder 7B
+    source: "ollama:qwen2.5-coder:7b"
+    domain_tags: [code, programming, debugging]
+    capability_text: >
+      Qwen2.5 Coder 7B. Code generation, debugging and multi-file reasoning
+      across common languages. The default programming specialist — fits a
+      machine that cannot hold the 14B.
+    params_b: 7.6
+    min_ram_gb: 8
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: apache-2.0
+
   - id: qwen2.5-coder-14b
     display_name: Qwen2.5 Coder 14B
     source: "ollama:qwen2.5-coder:14b"
-    domain_tags: [code, python, programming]
+    domain_tags: [code, programming, debugging]
     capability_text: >
       Qwen2.5 Coder 14B. Code generation, debugging, and multi-file
-      reasoning across common languages. The network's dedicated
-      programming specialist.
+      reasoning across common languages. The network's deepest programming
+      specialist.
     params_b: 14.8
     min_ram_gb: 16
     min_vram_gb: 0
@@ -55,83 +142,162 @@ models:
     lane_benchmark: null
     licence: apache-2.0
 
-  - id: gemma4-12b
-    display_name: Gemma 4 12B
-    source: "ollama:gemma4:12b"
+  - id: sqlcoder-7b
+    display_name: SQLCoder 7B
+    source: "ollama:sqlcoder:7b"
+    domain_tags: [sql, databases, queries]
+    capability_text: >
+      SQLCoder 7B. Translates plain-English questions into SQL against a given
+      schema. Extremely narrow — it does essentially nothing else, and beats
+      general models of any size at the one thing it does.
+    params_b: 7.0
+    min_ram_gb: 8
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: cc-by-sa-4.0
+
+  # --- Legal ------------------------------------------------------------
+
+  # Not a plain model download, and no longer an API entry. CGLA-Legal is a
+  # causal graph over South Australian and federal statute, plus a general
+  # model that only extracts facts and narrates outcomes -- the legal reasoning
+  # is deterministic BFS over curated law, not generation. See
+  # ../../../CGLA-Legal/README.md.
+  #
+  # This is the network's most important entry, for a reason that is easy to
+  # miss. Its own benchmark shows it answering FEWER legal questions correctly
+  # than a frontier model (35/46 against Claude Sonnet's 40/46) -- and refusing
+  # 7 of 7 out-of-scope questions where Claude refused 0 of 7.
+  #
+  # That combination is the precondition the seam findings said was missing.
+  # A model that is worse on one axis and better on another is, exactly,
+  # non-dominated: there is something it contributes that no generalist can,
+  # so a panel containing it can be better than either member. Every generalist
+  # pair tested in seam-findings.md §3 failed this test. This one passes it,
+  # and it was sitting in the same parent directory the whole time.
+  - id: cgla-legal
+    display_name: CGLA-Legal (Common. Law)
+    source: "graph:cgla-legal"
+    base_model: "ollama:llama3.1:8b"
+    overlay:
+      kind: causal-graph
+      repo: "https://github.com/TheCommonAI/CGLA-Legal.git"
+      entrypoint: "adapter.py"
+      # CGLA speaks its own /query API, not OpenAI's. The adapter shipped in
+      # join/ wraps it so it can be an ordinary node on the network.
+      serves: "openai-compatible"
+      env:
+        LLM_MODEL: "llama3.1:8b"
+      disk_gb: 1
+    domain_tags: [legal, south-australia-law, statute, tenancy, employment]
+    capability_text: >
+      CGLA-Legal: statute-grounded South Australian and federal Australian law.
+      Legal reasoning is deterministic traversal of a curated causal graph over
+      statute — the model only extracts facts from plain English and narrates
+      the graph's outcome, so every answer carries the section it came from and
+      nothing outside the graph is answered at all. Refuses out-of-scope
+      questions rather than guessing. Not a general chat model.
+    params_b: 8.0
+    # 8GB for llama3.1:8b, plus the graph (a ~200KB SQLite file) and Python.
+    min_ram_gb: 10
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: true
+    lane_benchmark:
+      benchmark: "53 colloquial SA/federal law questions, judged by google/gemini-2.5-flash"
+      score: "35/46 in-scope, 7/7 out-of-scope refused"
+      vs_frontier: "Claude Sonnet 4.5: 40/46 in-scope, 0/7 out-of-scope refused"
+      date: null
+      note: >
+        Deliberately NOT recorded as beating frontier on capability — it does
+        not, and the README says so. It is verified_in_lane on the axis that
+        matters for composition: it is the only entry in this catalogue known
+        to be better than a frontier model at something (refusing what it
+        cannot ground), while being worse at something else. That is what
+        makes it a viable panel member rather than a redundant one.
+        Reproduce with CGLA-Legal/run_paraphrase_benchmark.py.
+    licence: null
+
+  # --- Medicine ---------------------------------------------------------
+  #
+  # Listed because the lane is real and no generalist covers it safely, NOT
+  # because these models are good. Both are old and weak. They are here as
+  # honest placeholders for a domain the network should cover, and neither is
+  # verified_in_lane. Treat any answer as a research artifact.
+
+  - id: meditron-7b
+    display_name: Meditron 7B
+    source: "ollama:meditron:7b"
+    domain_tags: [medical, clinical, biomedical]
+    capability_text: >
+      Meditron 7B. Llama-2 adapted on biomedical literature and clinical
+      guidelines. Research use only — not clinically validated, not a source
+      of medical advice, and older than most of this catalogue.
+    params_b: 7.0
+    min_ram_gb: 8
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: llama2
+
+  # --- Generalists ------------------------------------------------------
+  #
+  # Still needed, for two jobs neither of which is being on a panel:
+  #   1. answering requests that don't span domains (most of them), and
+  #   2. AGGREGATING a panel's answers into one reply.
+  # The `general` tag is excluded from panel seats entirely
+  # (COMPOSE_EXCLUDED_DOMAINS) -- a generalist sitting next to a specialist in
+  # that specialist's own lane is the Experiment 2 pairing that lost.
+
+  - id: qwen3-8b
+    display_name: Qwen3 8B
+    source: "ollama:qwen3:8b"
     domain_tags: [general, conversation, writing, reasoning]
     capability_text: >
-      Gemma 4 12B. Strong general-purpose model — everyday conversation,
-      writing, summarisation, and world-knowledge questions, with solid
-      general reasoning.
-    params_b: 12.0
-    min_ram_gb: 12
+      Qwen3 8B. Strong general-purpose model — conversation, writing,
+      summarisation and world knowledge, with solid general reasoning. The
+      default aggregator: combining several specialists' replies needs breadth
+      and instruction-following rather than depth in any one lane.
+    params_b: 8.2
+    min_ram_gb: 10
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: apache-2.0
+
+  - id: gemma3-12b
+    display_name: Gemma 3 12B
+    source: "ollama:gemma3:12b"
+    domain_tags: [general, conversation, writing]
+    capability_text: >
+      Gemma 3 12B. General-purpose model for everyday conversation, writing
+      and world-knowledge questions. The heaviest generalist here — prefer it
+      as an aggregator on a machine with room for it.
+    params_b: 12.2
+    min_ram_gb: 14
     min_vram_gb: 0
     needs_gpu: false
     verified_in_lane: false
     lane_benchmark: null
     licence: gemma
 
-  - id: qwen3.5-9b
-    display_name: Qwen3.5 9B
-    source: "ollama:qwen3.5:9b"
-    domain_tags: [general, reasoning, multilingual, writing]
+  - id: llama3.2-3b
+    display_name: Llama 3.2 3B
+    source: "ollama:llama3.2:3b"
+    domain_tags: [general, conversation]
     capability_text: >
-      Qwen3.5 9B. General-purpose model with strong multilingual coverage
-      and reasoning, at a lighter footprint than the 12B/14B tiers.
-    params_b: 9.0
-    min_ram_gb: 12
+      Llama 3.2 3B. Small general-purpose model for conversation and everyday
+      questions. The lightest entry in the catalogue — the fallback for a
+      machine that cannot fit any specialist, so that an old laptop can still
+      contribute rather than being turned away.
+    params_b: 3.2
+    min_ram_gb: 4
     min_vram_gb: 0
     needs_gpu: false
     verified_in_lane: false
     lane_benchmark: null
-    licence: apache-2.0
-
-  - id: dolphin3-8b
-    display_name: Dolphin 3 8B
-    source: "ollama:dolphin3:8b"
-    domain_tags: [general, conversation, writing]
-    capability_text: >
-      Dolphin 3 8B. General-purpose instruction-following model for
-      conversation, writing, and everyday questions. The lightest-footprint
-      catalogue entry — the fallback for machines that cannot fit a
-      larger specialist.
-    params_b: 8.0
-    min_ram_gb: 8
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: apache-2.0
-
-  # Not a download. Kept because common-join cannot provision it anyway --
-  # `source: api:*` entries are explicitly rejected as local installs (see
-  # resolve_model in join/join.py), so this is not one of the auto-install
-  # options; it is the network's only `legal` coverage and the only
-  # verified-in-lane entry. Delete it only if you also intend to drop
-  # legal routing.
-  - id: cgla-legal
-    display_name: CGLA-Legal
-    source: "api:cgla-legal"
-    domain_tags: [legal, south-australia-law]
-    capability_text: >
-      CGLA-Legal: neurosymbolic South Australian law reasoning across 14
-      domains (residential tenancy, unfair dismissal, family violence,
-      consumer protection, debt hardship, and others). Structurally
-      cannot hallucinate. Grounded legal reasoning only — not a general
-      chat model, will not answer outside SA law.
-    params_b: null
-    min_ram_gb: 0
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: true
-    lane_benchmark:
-      benchmark: "22 SA-law scenarios (internal CGLA evaluation, pre-v0.2)"
-      score: "100%"
-      vs_frontier: "31.8%"
-      date: null
-      note: >
-        This number comes from CGLA's own prior evaluation, not yet
-        independently reproduced by the v0.2 harness -- that reproduction
-        is blocked on the CGLA adapter and dataset (see bench/data/README.md).
-        Treat as provisional until bench/ confirms it directly.
-    licence: null
+    licence: llama3.2

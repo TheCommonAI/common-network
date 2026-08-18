@@ -42,8 +42,9 @@ async def seed_catalogue_from_file() -> None:
                 insert into catalogue_models
                     (id, display_name, source, domain_tags, capability_text,
                      params_b, min_ram_gb, min_vram_gb, needs_gpu,
-                     verified_in_lane, lane_benchmark, licence)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                     verified_in_lane, lane_benchmark, licence,
+                     base_model, overlay)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 on conflict (id) do update set
                     display_name = excluded.display_name,
                     source = excluded.source,
@@ -55,12 +56,15 @@ async def seed_catalogue_from_file() -> None:
                     needs_gpu = excluded.needs_gpu,
                     verified_in_lane = excluded.verified_in_lane,
                     lane_benchmark = excluded.lane_benchmark,
-                    licence = excluded.licence
+                    licence = excluded.licence,
+                    base_model = excluded.base_model,
+                    overlay = excluded.overlay
                 """,
                 m["id"], m["display_name"], m["source"], m["domain_tags"], m["capability_text"],
                 m.get("params_b"), m["min_ram_gb"], m.get("min_vram_gb", 0), m.get("needs_gpu", False),
                 m.get("verified_in_lane", False),
                 _to_jsonb(m.get("lane_benchmark")), m.get("licence"),
+                m.get("base_model"), _to_jsonb(m.get("overlay")),
             )
 
     # The seed file is the source of truth for what the network offers, so an

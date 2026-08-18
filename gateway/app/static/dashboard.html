@@ -95,6 +95,12 @@
   .badge.good .dot { background: var(--good); }
   .badge.critical { color: var(--critical); }
   .badge.critical .dot { background: var(--critical); }
+  /* A degraded panel isn't a failure — the user got a real answer — but it
+     also isn't composition working, so it must not read as either. Amber,
+     defined here rather than reusing --critical, so a lab full of degraded
+     panels looks like what it is: something to look into, not an outage. */
+  .badge.warn { color: #b7791f; }
+  .badge.warn .dot { background: #b7791f; }
 
   .bar-row { display: grid; grid-template-columns: 140px 1fr 44px; align-items: center; gap: 10px; padding: 6px 0; }
   .bar-row .name { font-size: 13px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -190,12 +196,22 @@ function renderStats(nodes, decisions) {
   const healthy = nodes.filter(n => n.healthy).length;
   const unhealthy = nodes.length - healthy;
   const ok = decisions.filter(d => d.ok).length;
+  const panels = decisions.filter(d => d.topology === 'panel').length;
+  const degraded = decisions.filter(d => d.topology === 'degraded').length;
+  // Verification fire rate. Worth a tile of its own rather than a footnote:
+  // a rate that quietly falls to zero means the extractor stopped matching,
+  // not that the models stopped making arithmetic errors.
+  const checks = decisions.reduce((a, d) => a + (d.checks_run || 0), 0);
+  const failed = decisions.reduce((a, d) => a + (d.checks_failed || 0), 0);
   const tiles = [
     ['Total nodes', nodes.length],
     ['Healthy', healthy],
     ['Unhealthy', unhealthy],
     ['Recent decisions', decisions.length],
     ['Successful', `${ok}/${decisions.length}`],
+    ['Composed', decisions.length ? `${panels}/${decisions.length}` : '—'],
+    ['Degraded panels', degraded],
+    ['Figures corrected', checks ? `${failed}/${checks}` : '—'],
   ];
   document.getElementById('stats').innerHTML = tiles.map(([label, value]) => `
     <div class="stat-tile">
@@ -322,17 +338,43 @@ function renderDecisions(decisions) {
     el.innerHTML = '<div class="empty">No decisions logged yet.</div>';
     return;
   }
+  // "Answered by" rather than "chosen node": under composition there may be no
+  // single chosen node, and a column that shows only the aggregator would hide
+  // the specialists that did the work.
+  const answeredBy = (d) => {
+    if (d.topology === 'panel' && d.panel && d.panel.length) {
+      const members = d.panel.map(p => `<span class="tag-chip">${escapeHtml(p)}</span>`).join('');
+      const agg = d.aggregator_node_name ? ` → ${escapeHtml(d.aggregator_node_name)}` : '';
+      return members + agg;
+    }
+    return escapeHtml(d.chosen_node_name || '—');
+  };
+
+  const topologyBadge = (d) => {
+    if (d.topology === 'panel') return '<span class="badge good"><span class="dot"></span>panel</span>';
+    if (d.topology === 'degraded') return '<span class="badge warn"><span class="dot"></span>degraded</span>';
+    return '<span class="badge"><span class="dot"></span>single</span>';
+  };
+
+  const verification = (d) => {
+    if (!d.checks_run) return '—';
+    const bits = [`${d.checks_failed || 0}/${d.checks_run}`];
+    if (d.disagreements) bits.push(`${d.disagreements} disputed`);
+    return bits.join(' · ');
+  };
+
   el.innerHTML = `
     <table>
       <thead><tr>
-        <th>Time</th><th>Chosen node</th><th>Score</th><th>Latency</th><th>Result</th>
+        <th>Time</th><th>Topology</th><th>Answered by</th><th>Verified</th><th>Latency</th><th>Result</th>
       </tr></thead>
       <tbody>
         ${decisions.map(d => `
-          <tr>
+          <tr title="${escapeHtml((d.compose_reason && d.compose_reason.reason) || '')}">
             <td>${fmtTime(d.created_at)}</td>
-            <td>${escapeHtml(d.chosen_node_name || '—')}</td>
-            <td>${d.score != null ? d.score.toFixed(3) : '—'}</td>
+            <td>${topologyBadge(d)}</td>
+            <td>${answeredBy(d)}</td>
+            <td>${verification(d)}</td>
             <td>${d.latency_ms != null ? d.latency_ms + ' ms' : '—'}</td>
             <td>${d.ok
               ? '<span class="badge good"><span class="dot"></span>ok</span>'
@@ -341,6 +383,11 @@ function renderDecisions(decisions) {
         `).join('')}
       </tbody>
     </table>
+    <div class="empty" style="text-align:left; padding-top:12px;">
+      Hover a row to see why it was or wasn't composed. Latency is unadjusted —
+      a panel waits for the slowest specialist and then an aggregator, so it is
+      expected to be slower than a single node.
+    </div>
   `;
 }
 
