@@ -18,12 +18,29 @@ from app.seed import seed_from_file
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Each step is announced before it runs, not after.
+    #
+    # This startup once hung on `embedder.load()` -- SentenceTransformer
+    # checking huggingface.co for a newer snapshot on a container that could
+    # not reach it -- and the only evidence anywhere was uvicorn's "Waiting for
+    # application startup." followed by silence. Diagnosing it needed an
+    # external check of the database's connection count to prove the hang was
+    # before db.connect(). A log line would have said so immediately.
+    #
+    # Announcing *before* rather than after is the whole point: a step that
+    # never completes only shows up in the log if its start was already
+    # printed.
+    print("startup: loading embedding model...", flush=True)
     embedder.load()
+    print("startup: connecting to database...", flush=True)
     await db.connect()
     if settings.seed_on_startup:
+        print("startup: seeding nodes...", flush=True)
         await seed_from_file()
+    print("startup: seeding catalogue...", flush=True)
     await seed_catalogue_from_file()
     health_task = asyncio.create_task(health_check_loop())
+    print("startup: ready", flush=True)
     yield
     health_task.cancel()
     await db.disconnect()
