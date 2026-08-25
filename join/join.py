@@ -453,6 +453,63 @@ def print_catalogue(gateway: str, hw: dict) -> None:
             print(comment("this machine is below the smallest entry in the catalogue."))
 
 
+def _stronger_if_freed(catalogue: list[dict], hw: dict, chosen_id: str | None) -> dict | None:
+    """The best model this machine could run if memory were freed — when that
+    is materially better than what fits right now.
+
+    The network asks `/assign` what to run, and `/assign` only knows how much
+    RAM is *available*, so a 16GB laptop with a browser open is assigned a
+    1.5B model and joins as a permanently weak node. Nobody is told that
+    closing a few tabs would have contributed an 8B one instead.
+
+    Free memory is the most recoverable constraint a contributor has. It is
+    worth one line, because the decision it changes lasts as long as the node
+    does.
+
+    Deliberately quiet about small gains: a suggestion has to be worth acting
+    on or it becomes noise that gets ignored when it matters. The bar is
+    roughly double the parameters, or +3B, whichever is higher.
+    """
+    now = hw["available_ram_gb"] * 0.8
+    potential = hw["total_ram_gb"] * 0.8
+
+    def size(m: dict) -> float:
+        return float(m["params_b"] or 0)
+
+    chosen = next((m for m in catalogue if m["id"] == chosen_id), None)
+    chosen_size = size(chosen) if chosen else 0.0
+
+    candidates = [
+        m for m in catalogue
+        if source_to_ollama_tag(m["source"])                      # installable
+        and m["min_ram_gb"] > now                                 # doesn't fit now
+        and m["min_ram_gb"] <= potential                          # would fit freed
+        and (not m["needs_gpu"] or hw["gpu_present"])
+        and size(m) >= max(chosen_size * 2, chosen_size + 3)      # materially better
+    ]
+    return max(candidates, key=size) if candidates else None
+
+
+def _warn_if_underpowered(gateway: str, hw: dict, chosen_id: str | None, chosen_name: str) -> None:
+    try:
+        catalogue = fetch_catalogue(gateway)
+    except (urllib.error.URLError, socket.timeout):
+        return
+    better = _stronger_if_freed(catalogue, hw, chosen_id)
+    if not better:
+        return
+    needed = better["min_ram_gb"] / 0.8
+    print(f"{GLYPH_FORMING} {red('this machine can do much better than that.')}")
+    print(comment(f"{better['display_name']} needs about {needed:.0f}GB free. you have "
+                  f"{hw['total_ram_gb']}GB of RAM but only {hw['available_ram_gb']}GB is free "
+                  f"right now, so the network is offering you a smaller model than your "
+                  f"hardware deserves."))
+    print(comment("a node keeps whatever model it joined with, so this is worth fixing first."))
+    print(dim(f"  → close some apps, then re-run:   common join"))
+    print(dim(f"  → or continue with {chosen_name} anyway"))
+    print()
+
+
 def resolve_model(gateway: str, args: argparse.Namespace) -> tuple[str, list[str] | None, str | None, str | None]:
     """Returns (ollama_tag, domain_tags, catalogue_id, capability_text_default)."""
     if args.model:
@@ -475,6 +532,12 @@ def resolve_model(gateway: str, args: argparse.Namespace) -> tuple[str, list[str
     print(f"{GLYPH_ROUTE} recommended   {blue(assignment['display_name'], bold=True)}")
     print(comment(assignment["reason"]))
     print()
+
+    # Before anyone agrees to provision, say whether free memory is what is
+    # holding this machine back. /assign cannot know -- it is only told how
+    # much RAM is available, not how much exists.
+    _warn_if_underpowered(gateway, hw, assignment.get("catalogue_id"),
+                          assignment["display_name"])
 
     ollama_tag = source_to_ollama_tag(assignment["source"])
     if not ollama_tag:
