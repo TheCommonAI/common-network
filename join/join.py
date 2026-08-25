@@ -395,7 +395,30 @@ def prompt_yes_no(question: str, default_yes: bool = True) -> bool:
     suffix = "[Y/n]" if default_yes else "[y/N]"
     if not sys.stdin.isatty():
         return default_yes
-    answer = input(f"{question} {suffix} ").strip().lower()
+
+    # Write the question and flush it BEFORE reading, rather than handing it to
+    # input() as its prompt argument.
+    #
+    # On Windows, input()'s own prompt bypasses Python's stdout buffer, so it
+    # can appear on screen before everything printed above it. The reported
+    # symptom is exactly that: the cursor lands on a fresh line, the joining
+    # output arrives afterwards, and the y/n question ends up scrolled above
+    # the cursor with no obvious way to answer it.
+    #
+    # Flushing everything first, then writing the question, then reading,
+    # forces the order the user actually sees to match the order it was
+    # printed.
+    sys.stdout.write(f"{question} {suffix} ")
+    sys.stdout.flush()
+    try:
+        answer = sys.stdin.readline()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if not answer:          # EOF -- stdin closed under us
+        print()
+        return default_yes
+    answer = answer.strip().lower()
     if not answer:
         return default_yes
     return answer.startswith("y")

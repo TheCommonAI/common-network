@@ -390,6 +390,26 @@ async def chat_completions(request: Request):
             headers = {
                 "X-Common-Node": candidate.node["name"],
                 "X-Common-Score": "forced" if forced_node_name else f"{candidate.score:.4f}",
+                # How many nodes this was actually chosen from, and by how much
+                # it beat the next one.
+                #
+                # X-Common-Score on its own is not a relevance measure and must
+                # not be shown as one. It is a blend of similarity, cost and
+                # latency, and the similarity part barely moves: measured
+                # against this embedder, "write a poem about the sea" scored
+                # 0.5856 and the literal gibberish "asdfgh qwerty zxcvbn"
+                # scored 0.5781, both ABOVE a real code question at 0.5741.
+                # A client that renders that as "0.58 match" is telling the
+                # user the network assessed their request and is fairly
+                # confident. It did not, and it is not.
+                #
+                # The count and the margin are true statements about a choice
+                # that really happened, so those are what the CLI shows.
+                "X-Common-Candidates": str(len(scored)),
+                "X-Common-Margin": (
+                    f"{scored[0].score - scored[1].score:.4f}"
+                    if not forced_node_name and len(scored) > 1 else ""
+                ),
                 "X-Common-Topology": "single",
                 # Why this request was *not* composed. The negative case is the
                 # one worth explaining -- "why did only one node answer this?"

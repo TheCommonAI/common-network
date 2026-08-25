@@ -5,6 +5,11 @@
 # Always installs `common-chat` (talk to the network — needs nothing but
 # Python). Also installs `common-join` (contribute a node) if Ollama is
 # present, installing cloudflared automatically if needed.
+#
+# The wrappers run python with -u (unbuffered). Windows block-buffers Python's
+# stdout when it goes through a .cmd wrapper, which puts printed output out of
+# order with interactive prompts: the y/n question scrolls above the cursor and
+# looks unanswerable. -u makes what you see match what was printed.
 
 $ErrorActionPreference = "Stop"
 
@@ -30,7 +35,7 @@ Invoke-WebRequest -Uri "$Raw/chat/chat.py" -OutFile "$InstallDir\chat.py"
 
 $chatWrapper = @"
 @echo off
-python "$InstallDir\chat.py" %*
+python -u "$InstallDir\chat.py" %*
 "@
 Set-Content -Path "$BinDir\common-chat.cmd" -Value $chatWrapper
 
@@ -41,7 +46,7 @@ Invoke-WebRequest -Uri "$Raw/common/common.py" -OutFile "$InstallDir\common.py"
 $commonWrapper = @"
 @echo off
 set PATH=$BinDir;%PATH%
-python "$InstallDir\common.py" %*
+python -u "$InstallDir\common.py" %*
 "@
 Set-Content -Path "$BinDir\common.cmd" -Value $commonWrapper
 Set-Content -Path "$BinDir\cmn.cmd" -Value $commonWrapper
@@ -63,7 +68,7 @@ if ($ollama) {
     $joinWrapper = @"
 @echo off
 set PATH=$BinDir;%PATH%
-python "$InstallDir\join.py" %*
+python -u "$InstallDir\join.py" %*
 "@
     Set-Content -Path "$BinDir\common-join.cmd" -Value $joinWrapper
     $joinInstalled = $true

@@ -275,6 +275,8 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
     node_name = resp.headers.get("X-Common-Node")
     score = resp.headers.get("X-Common-Score")
     topology = resp.headers.get("X-Common-Topology", "single")
+    candidates_hdr = resp.headers.get("X-Common-Candidates")
+    margin_hdr = resp.headers.get("X-Common-Margin")
     panel = resp.headers.get("X-Common-Panel")
     aggregator = resp.headers.get("X-Common-Aggregator")
     compose_reason = resp.headers.get("X-Common-Compose-Reason")
@@ -308,14 +310,50 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
             print(comment("passing its answer through unaggregated."))
             print()
         else:
-            score_str = f"   ·   {float(score):.2f} match" if score not in (None, "forced") else ""
-            weak = score not in (None, "forced") and float(score) < 0.5
-            marker = f"  {GLYPH_FORMING}" if weak else ""
-            print(f"{GLYPH_ROUTE} nearest node   {blue(node_name or 'unknown')}{score_str}{marker}")
-            if weak:
-                print(comment("nothing on the commons serves this well yet."))
-            if verbose and compose_reason:
-                print(comment(f"not composed: {compose_reason}"))
+            # Deliberately NOT "0.59 match".
+            #
+            # That number was the blended routing score, and it does not
+            # measure whether the network can answer you. Measured against the
+            # live gateway with one node: a poem scored 0.5856, the gibberish
+            # "asdfgh qwerty zxcvbn" scored 0.5781, and a genuine Python
+            # question scored 0.5741. Gibberish outranked real questions.
+            # Printing that as a "match" percentage tells the user the network
+            # assessed their request and was reasonably confident, which is
+            # false in a way they cannot detect.
+            #
+            # So show only what is true: which node answered, and how many it
+            # was chosen from. The raw score stays available under -v for
+            # debugging, where its meaning is understood.
+            try:
+                n_candidates = int(candidates_hdr) if candidates_hdr else 0
+            except ValueError:
+                n_candidates = 0
+
+            if score == "forced":
+                detail = "   ·   you asked for this one"
+            elif n_candidates > 1:
+                detail = f"   ·   closest of {n_candidates} nodes"
+            elif n_candidates == 1:
+                detail = "   ·   the only node online"
+            else:
+                detail = ""
+
+            print(f"{GLYPH_ROUTE} answered by   {blue(node_name or 'unknown')}{detail}")
+
+            # A one-node network has no routing to speak of, and saying so is
+            # more honest than any number. Not when the node was forced,
+            # though -- then the user made the choice and does not need telling
+            # there was none to make.
+            if n_candidates == 1 and score != "forced":
+                print(comment("with one node there is no choice to make — it answers everything."))
+
+            if verbose:
+                if score not in (None, "forced"):
+                    print(comment(f"routing score {score} (similarity+cost+latency, not a relevance measure)"))
+                if margin_hdr:
+                    print(comment(f"beat the runner-up by {margin_hdr}"))
+                if compose_reason:
+                    print(comment(f"not composed: {compose_reason}"))
         print(GLYPH_RECV + dim(" streaming"))
         print()
 
@@ -351,6 +389,8 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
             "panel": [p.strip() for p in panel.split(",")] if panel else None,
             "aggregator": aggregator,
             "compose_reason": compose_reason,
+            "candidates": int(candidates_hdr) if candidates_hdr else None,
+            "margin_over_runner_up": float(margin_hdr) if margin_hdr else None,
             "checks_run": int(checks) if checks else None,
             "checks_failed": int(checks_failed) if checks_failed else None,
             "disagreements": int(disagreements) if disagreements else None,
