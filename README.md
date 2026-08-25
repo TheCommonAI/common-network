@@ -147,7 +147,7 @@ common join --lan           # over the local network — no tunnel, nothing expo
 It skips `cloudflared` entirely, and refuses to register if Ollama is bound to
 localhost only — otherwise you get a node that health-checks green from its own
 machine and is invisible to every other one. See
-`../SCHOOL-NETWORK-REQUIREMENTS.md`.
+[`SCHOOL-NETWORK-REQUIREMENTS.md`](SCHOOL-NETWORK-REQUIREMENTS.md).
 
 ### What should I install?
 
@@ -189,16 +189,24 @@ tag is excluded from panel seats entirely — a generalist sitting next to a
 specialist in that specialist's own lane is the pairing that lost in
 Experiment 2.
 
-**CGLA-Legal** is the most important entry. It is not a plain model download and
-no longer an API: it is a causal graph over South Australian and federal statute
-plus a local Llama model that only extracts facts and narrates outcomes. Its own
-benchmark shows it answering *fewer* legal questions correctly than a frontier
-model (35/46 vs Claude Sonnet's 40/46) while refusing **7/7** out-of-scope
-questions where Claude refused **0/7**.
+**CGLA-Legal is temporarily commented out** of `catalogue.seed.yaml` (2026-08-25).
+Uncomment the block to restore it; nothing else needs changing. While it is out,
+the network has **no legal coverage at all** — a legal question routes to a
+generalist that will answer confidently and without grounding, which is the
+failure CGLA exists to prevent.
 
-Worse on one axis, better on another is exactly what *non-dominated* means. It
-is the precondition v0.1 concluded no available model pair satisfied — and it
-was in the next directory over the whole time.
+It is worth restoring, because it is the catalogue's only genuinely
+non-dominated specialist. It is not a plain model download and not an API: it is
+a causal graph over South Australian and federal statute plus a local Llama model
+that only extracts facts and narrates outcomes. Its own benchmark shows it
+answering *fewer* legal questions correctly than a frontier model (35/46 vs
+Claude Sonnet's 40/46) while refusing **7/7** out-of-scope questions where Claude
+refused **0/7**.
+
+Worse on one axis, better on another is exactly what *non-dominated* means — the
+precondition v0.1 concluded no available model pair satisfied. Note that
+`testing/compose-test/` is built around SA-law cases and needs this entry back
+before its result means what it is designed to mean.
 
 ## Scope (v0.1.1)
 

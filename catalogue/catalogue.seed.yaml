@@ -159,66 +159,77 @@ models:
     licence: cc-by-sa-4.0
 
   # --- Legal ------------------------------------------------------------
-
-  # Not a plain model download, and no longer an API entry. CGLA-Legal is a
-  # causal graph over South Australian and federal statute, plus a general
-  # model that only extracts facts and narrates outcomes -- the legal reasoning
-  # is deterministic BFS over curated law, not generation. See
-  # ../../../CGLA-Legal/README.md.
   #
-  # This is the network's most important entry, for a reason that is easy to
-  # miss. Its own benchmark shows it answering FEWER legal questions correctly
-  # than a frontier model (35/46 against Claude Sonnet's 40/46) -- and refusing
-  # 7 of 7 out-of-scope questions where Claude refused 0 of 7.
+  # ==================================================================
+  # TEMPORARILY REMOVED — CGLA-Legal, 2026-08-25.
   #
-  # That combination is the precondition the seam findings said was missing.
-  # A model that is worse on one axis and better on another is, exactly,
-  # non-dominated: there is something it contributes that no generalist can,
-  # so a panel containing it can be better than either member. Every generalist
-  # pair tested in seam-findings.md §3 failed this test. This one passes it,
-  # and it was sitting in the same parent directory the whole time.
-  - id: cgla-legal
-    display_name: CGLA-Legal (Common. Law)
-    source: "graph:cgla-legal"
-    base_model: "ollama:llama3.1:8b"
-    overlay:
-      kind: causal-graph
-      repo: "https://github.com/TheCommonAI/CGLA-Legal.git"
-      entrypoint: "adapter.py"
-      # CGLA speaks its own /query API, not OpenAI's. The adapter shipped in
-      # join/ wraps it so it can be an ordinary node on the network.
-      serves: "openai-compatible"
-      env:
-        LLM_MODEL: "llama3.1:8b"
-      disk_gb: 1
-    domain_tags: [legal, south-australia-law, statute, tenancy, employment]
-    capability_text: >
-      CGLA-Legal: statute-grounded South Australian and federal Australian law.
-      Legal reasoning is deterministic traversal of a curated causal graph over
-      statute — the model only extracts facts from plain English and narrates
-      the graph's outcome, so every answer carries the section it came from and
-      nothing outside the graph is answered at all. Refuses out-of-scope
-      questions rather than guessing. Not a general chat model.
-    params_b: 8.0
-    # 8GB for llama3.1:8b, plus the graph (a ~200KB SQLite file) and Python.
-    min_ram_gb: 10
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: true
-    lane_benchmark:
-      benchmark: "53 colloquial SA/federal law questions, judged by google/gemini-2.5-flash"
-      score: "35/46 in-scope, 7/7 out-of-scope refused"
-      vs_frontier: "Claude Sonnet 4.5: 40/46 in-scope, 0/7 out-of-scope refused"
-      date: null
-      note: >
-        Deliberately NOT recorded as beating frontier on capability — it does
-        not, and the README says so. It is verified_in_lane on the axis that
-        matters for composition: it is the only entry in this catalogue known
-        to be better than a frontier model at something (refusing what it
-        cannot ground), while being worse at something else. That is what
-        makes it a viable panel member rather than a redundant one.
-        Reproduce with CGLA-Legal/run_paraphrase_benchmark.py.
-    licence: null
+  # To restore: uncomment the block below. Nothing else needs changing;
+  # the gateway re-seeds it on next boot and `graph:` support is still
+  # in the schema (migrations/006) and in the seeder.
+  #
+  # Two consequences while it is out, so they are not discovered later:
+  #
+  #   1. The network has NO legal coverage. `legal`, `tenancy`,
+  #      `statute` and `employment` are no longer declared by any
+  #      catalogue entry, so a legal request routes to a generalist
+  #      that will answer it confidently and without grounding. That
+  #      is the failure mode CGLA exists to prevent (it refused 7/7
+  #      out-of-scope questions where a frontier model refused 0/7).
+  #
+  #   2. Nothing in the catalogue is verified_in_lane any more. The
+  #      preference for proven specialists in app/catalogue.py and
+  #      app/demand.py still runs, it just has nothing to prefer.
+  #
+  # Also note: testing/compose-test/ is built around SA-law cases with
+  # arithmetic in them, because CGLA was the one specialist measured to
+  # be non-dominated (worse at answering law, better at knowing where
+  # law stops). With it out, that harness has no legal specialist to
+  # compose with and its result would not mean what it is designed to
+  # mean. Restore this entry before running compose-test.
+  # ==================================================================
+  #
+  # - id: cgla-legal
+  #   display_name: CGLA-Legal (Common. Law)
+  #   source: "graph:cgla-legal"
+  #   base_model: "ollama:llama3.1:8b"
+  #   overlay:
+  #     kind: causal-graph
+  #     repo: "https://github.com/TheCommonAI/CGLA-Legal.git"
+  #     entrypoint: "adapter.py"
+  #     # CGLA speaks its own /query API, not OpenAI's. The adapter shipped
+  #     # in join/ wraps it so it can be an ordinary node on the network.
+  #     serves: "openai-compatible"
+  #     env:
+  #       LLM_MODEL: "llama3.1:8b"
+  #     disk_gb: 1
+  #   domain_tags: [legal, south-australia-law, statute, tenancy, employment]
+  #   capability_text: >
+  #     CGLA-Legal: statute-grounded South Australian and federal Australian
+  #     law. Legal reasoning is deterministic traversal of a curated causal
+  #     graph over statute — the model only extracts facts from plain English
+  #     and narrates the graph's outcome, so every answer carries the section
+  #     it came from and nothing outside the graph is answered at all. Refuses
+  #     out-of-scope questions rather than guessing. Not a general chat model.
+  #   params_b: 8.0
+  #   # 8GB for llama3.1:8b, plus the graph (a ~200KB SQLite file) and Python.
+  #   min_ram_gb: 10
+  #   min_vram_gb: 0
+  #   needs_gpu: false
+  #   verified_in_lane: true
+  #   lane_benchmark:
+  #     benchmark: "53 colloquial SA/federal law questions, judged by google/gemini-2.5-flash"
+  #     score: "35/46 in-scope, 7/7 out-of-scope refused"
+  #     vs_frontier: "Claude Sonnet 4.5: 40/46 in-scope, 0/7 out-of-scope refused"
+  #     date: null
+  #     note: >
+  #       Deliberately NOT recorded as beating frontier on capability — it
+  #       does not, and the README says so. It is verified_in_lane on the axis
+  #       that matters for composition: it is the only entry in this catalogue
+  #       known to be better than a frontier model at something (refusing what
+  #       it cannot ground), while being worse at something else. That is what
+  #       makes it a viable panel member rather than a redundant one.
+  #       Reproduce with CGLA-Legal/run_paraphrase_benchmark.py.
+  #   licence: null
 
   # --- Medicine ---------------------------------------------------------
   #

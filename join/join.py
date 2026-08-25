@@ -397,13 +397,51 @@ def print_catalogue(gateway: str, hw: dict) -> None:
     headroom_ram = hw["available_ram_gb"] * 0.8
     print(dim(f"your machine: {hw['total_ram_gb']}GB RAM ({hw['available_ram_gb']}GB available), "
               f"{'GPU present' if hw['gpu_present'] else 'no GPU'}, {hw['cpu_cores']} CPU cores, {hw['os']}\n"))
+
+    installable_count = 0
+    fits_if_freed = []
+
     for m in catalogue:
-        runnable = m["min_ram_gb"] <= headroom_ram and (not m["needs_gpu"] or hw["gpu_present"])
-        mark = f"{GLYPH_DONE} runnable" if runnable else f"{GLYPH_FAILED} {red('needs more RAM/GPU')}"
+        # Three distinct states, not two. The old version computed "runnable"
+        # from RAM and GPU alone, so an entry this tool cannot install at all
+        # (an `api:` or `graph:` source, which resolve_model rejects outright)
+        # displayed as "runnable" whenever its min_ram_gb was low -- and the
+        # old api:cgla-legal entry declared 0GB, so it showed as the ONE
+        # runnable option on a machine where nothing else fit. Advertising a
+        # model and then refusing to install it is worse than not listing it.
+        provisionable = source_to_ollama_tag(m["source"]) is not None
+        fits = m["min_ram_gb"] <= headroom_ram and (not m["needs_gpu"] or hw["gpu_present"])
+
+        if not provisionable:
+            kind = m["source"].split(":", 1)[0]
+            mark = f"{GLYPH_FAILED} {dim(f'not installable by common-join ({kind} source)')}"
+        elif fits:
+            mark = f"{GLYPH_DONE} runnable"
+            installable_count += 1
+        else:
+            mark = f"{GLYPH_FAILED} {red('needs more RAM/GPU')}"
+            if not m["needs_gpu"] and m["min_ram_gb"] <= hw["total_ram_gb"] * 0.8:
+                fits_if_freed.append(m)
+
         verified = blue("  [verified beats frontier in lane]") if m["verified_in_lane"] else ""
         print(f"  {m['id']:20s} {mark}{verified}")
         print(dim(f"    {m['capability_text'].strip()}"))
         print(dim(f"    tags: {', '.join(m['domain_tags'])}  ·  min RAM: {m['min_ram_gb']}GB  ·  source: {m['source']}\n"))
+
+    # "Everything failed" is not a useful place to leave someone. Almost always
+    # the machine has the RAM and something else is holding it -- this box has
+    # 16GB total and 4.1GB free, which fits nothing while the total would fit
+    # most of the catalogue.
+    if installable_count == 0:
+        print(red("nothing here can run on this machine right now."))
+        if fits_if_freed:
+            smallest = min(fits_if_freed, key=lambda m: m["min_ram_gb"])
+            need = smallest["min_ram_gb"] / 0.8
+            print(comment(f"you have {hw['total_ram_gb']}GB of RAM but only "
+                          f"{hw['available_ram_gb']}GB free. closing some apps would be enough — "
+                          f"{smallest['id']} needs about {need:.0f}GB available."))
+        else:
+            print(comment("this machine is below the smallest entry in the catalogue."))
 
 
 def resolve_model(gateway: str, args: argparse.Namespace) -> tuple[str, list[str] | None, str | None, str | None]:
