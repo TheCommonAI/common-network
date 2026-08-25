@@ -91,16 +91,44 @@ async def _update_latency(node_id, latency_ms: int) -> None:
         )
 
 
+# Typographic characters this codebase actually writes, mapped to ASCII that
+# means the same thing. Everything here appears in real compose reasons and
+# capability text.
+_ASCII_FALLBACKS = str.maketrans({
+    "\u2014": "-",    # em dash
+    "\u2013": "-",    # en dash
+    "\u2212": "-",    # minus sign
+    "\u2018": "'",    # left single quote
+    "\u2019": "'",    # right single quote / apostrophe
+    "\u201c": '"',    # left double quote
+    "\u201d": '"',    # right double quote
+    "\u2026": "...",  # ellipsis
+    "\u2192": "->",   # right arrow
+    "\u00d7": "x",    # multiplication sign
+    "\u00b7": "-",    # middle dot
+    "\u2265": ">=",
+    "\u2264": "<=",
+    "\u00a0": " ",    # non-breaking space
+})
+
+
 def _header_safe(value: str, limit: int = 400) -> str:
     """HTTP headers are latin-1 and must not contain newlines.
 
     The composition reason is written for humans and can be long; the full
     version is on the decisions row. This is the version you can see with
     `curl -i`, which is where most people will actually look.
+
+    Transliterate rather than replace. `encode("ascii", "replace")` turned
+    every em-dash into a literal '?', so a reason written as "only one healthy
+    node — nothing to compose with" reached the user as "...node ? nothing to
+    compose with", which reads like the gateway is unsure rather than like a
+    character was dropped. These strings exist to be read, so mangling them
+    defeats the point of sending them.
     """
-    flat = " ".join(str(value).split())
+    flat = " ".join(str(value).split()).translate(_ASCII_FALLBACKS)
     if len(flat) > limit:
-        flat = flat[: limit - 1] + "…"
+        flat = flat[: limit - 3] + "..."
     return flat.encode("ascii", "replace").decode("ascii")
 
 
