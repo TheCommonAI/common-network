@@ -254,6 +254,54 @@ models:
     lane_benchmark: null
     licence: llama2
 
+  # --- Lightweight tier -------------------------------------------------
+  #
+  # Added because the catalogue had a floor problem: the smallest entry needed
+  # 4GB, and common-join applies a 0.8 headroom factor, so a machine had to
+  # have 5GB *free* to run anything at all. A 16GB laptop with a browser open
+  # was told "no locally-runnable catalogue model fits this machine" — which
+  # is true and useless. A school lab is full of machines in exactly that
+  # state.
+  #
+  # These are still specialists, not toys. DeepScaleR is RL-tuned for maths
+  # and Qwen2.5-Coder 1.5B for code, so a machine that can only spare 3GB can
+  # still hold a *lane* rather than being turned away or parked on a
+  # generalist. That matters more than it looks: a panel needs distinct lanes,
+  # and a lab where half the machines can only run a generalist cannot compose.
+
+  - id: deepscaler-1.5b
+    display_name: DeepScaleR 1.5B
+    source: "ollama:deepscaler:1.5b"
+    domain_tags: [math, arithmetic, word-problems]
+    capability_text: >
+      DeepScaleR 1.5B. Reinforcement-tuned specifically for mathematical
+      reasoning and competition-style word problems. Tiny, and narrow — it is
+      a maths model, not a conversationalist. The smallest way to hold the
+      maths lane on a constrained machine.
+    params_b: 1.5
+    min_ram_gb: 3
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: mit
+
+  - id: qwen2.5-coder-1.5b
+    display_name: Qwen2.5 Coder 1.5B
+    source: "ollama:qwen2.5-coder:1.5b"
+    domain_tags: [code, programming, debugging]
+    capability_text: >
+      Qwen2.5 Coder 1.5B. Code completion and small-scale debugging. Clearly
+      weaker than the 7B tier, and still a code specialist rather than a
+      generalist — the smallest way to hold the code lane.
+    params_b: 1.5
+    min_ram_gb: 3
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: apache-2.0
+
   # --- Generalists ------------------------------------------------------
   #
   # Still needed, for two jobs neither of which is being on a panel:
@@ -296,15 +344,31 @@ models:
     lane_benchmark: null
     licence: gemma
 
+  - id: llama3.2-1b
+    display_name: Llama 3.2 1B
+    source: "ollama:llama3.2:1b"
+    domain_tags: [general, conversation]
+    capability_text: >
+      Llama 3.2 1B. The smallest entry in the catalogue and the floor of the
+      network — for a machine with almost nothing to spare. Weak on its own,
+      but it can still aggregate a panel's answers, which is the job a
+      constrained machine is most useful for.
+    params_b: 1.2
+    min_ram_gb: 2
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: llama3.2
+
   - id: llama3.2-3b
     display_name: Llama 3.2 3B
     source: "ollama:llama3.2:3b"
     domain_tags: [general, conversation]
     capability_text: >
       Llama 3.2 3B. Small general-purpose model for conversation and everyday
-      questions. The lightest entry in the catalogue — the fallback for a
-      machine that cannot fit any specialist, so that an old laptop can still
-      contribute rather than being turned away.
+      questions. A good aggregator for a machine that cannot hold a larger
+      generalist.
     params_b: 3.2
     min_ram_gb: 4
     min_vram_gb: 0
