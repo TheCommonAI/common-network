@@ -34,11 +34,25 @@ async def lifespan(app: FastAPI):
     embedder.load()
     print("startup: connecting to database...", flush=True)
     await db.connect()
-    if settings.seed_on_startup:
-        print("startup: seeding nodes...", flush=True)
-        await seed_from_file()
-    print("startup: seeding catalogue...", flush=True)
-    await seed_catalogue_from_file()
+
+    # Seeding is best-effort. It refreshes rows that are already in the
+    # database from the last deploy, so failing it is not a reason to refuse
+    # to serve -- and a gateway that serves a slightly stale catalogue is
+    # strictly better than one that will not start.
+    #
+    # This gateway hung here once, mid-seed, and took the whole service down
+    # with it. The db-level timeouts now turn that into an exception; this
+    # turns the exception into a degraded start rather than an outage.
+    try:
+        if settings.seed_on_startup:
+            print("startup: seeding nodes...", flush=True)
+            await seed_from_file()
+        print("startup: seeding catalogue...", flush=True)
+        await seed_catalogue_from_file()
+    except Exception as exc:
+        print(f"startup: WARNING seeding failed ({type(exc).__name__}: {exc}) — "
+              f"serving with whatever is already in the database", flush=True)
+
     health_task = asyncio.create_task(health_check_loop())
     print("startup: ready", flush=True)
     yield

@@ -6,6 +6,13 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql://localhost/common_network"
 
+    # Bounds on every database wait. asyncpg has no defaults here, and an
+    # unbounded await on a dead socket is a silent permanent hang rather than
+    # an error -- see the note in app/db.py, which this gateway hit in
+    # production. Generous enough never to fire in normal operation.
+    db_connect_timeout_seconds: float = 20.0
+    db_command_timeout_seconds: float = 30.0
+
     embed_model_name: str = "BAAI/bge-small-en-v1.5"
     embed_dim: int = 384
 
