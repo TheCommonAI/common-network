@@ -8,13 +8,13 @@ as easy as installing Ollama itself.
 **Mac / Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/robot-time/common-network/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.sh | sh
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/robot-time/common-network/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.ps1 | iex
 ```
 
 This installs `cloudflared` if you don't have it, downloads the join

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Install the Common Network CLI tools (macOS / Linux).
 #
-#   curl -fsSL https://raw.githubusercontent.com/robot-time/common-network/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.sh | sh
 #
 # Always installs `common-chat` (talk to the network — needs nothing but
 # Python). Also installs `common-join` (contribute a node) if Ollama is
 # present, installing cloudflared automatically if needed.
 set -euo pipefail
 
-REPO="robot-time/common-network"
+REPO="TheCommonAI/common-network"
 INSTALL_DIR="$HOME/.common-network"
 BIN_DIR="$INSTALL_DIR/bin"
 RAW="https://raw.githubusercontent.com/$REPO/main"

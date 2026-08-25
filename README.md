@@ -12,7 +12,7 @@ which machines answered it, and why. The commons should be legible.
 Or just use `common` — a terminal client, no API knowledge required:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/robot-time/common-network/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.sh | sh
 common ask "What's a good way to learn recursion?"
 ```
 
@@ -138,7 +138,7 @@ suites stub what they need, so there is no reason not to run them.
 ## Contributing a node
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/robot-time/common-network/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.sh | sh
 common join                 # over a Cloudflare tunnel
 common join --lan           # over the local network — no tunnel, nothing exposed
 ```

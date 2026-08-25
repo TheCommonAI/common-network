@@ -8,12 +8,12 @@ you have this as `common-chat`.
 
 **Mac / Linux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/robot-time/common-network/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.sh | sh
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/robot-time/common-network/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.ps1 | iex
 ```
 
 The installer always sets up `common-chat` — Ollama and cloudflared are

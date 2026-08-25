@@ -53,7 +53,7 @@ from pathlib import Path
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
-REPO = "robot-time/common-network"
+REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/common/common.py"
 JOIN_SCRIPT_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
 INSTALL_DIR = Path.home() / ".common-network"

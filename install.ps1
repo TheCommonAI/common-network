@@ -1,6 +1,6 @@
 # Install the Common Network CLI tools (Windows).
 #
-#   irm https://raw.githubusercontent.com/robot-time/common-network/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.ps1 | iex
 #
 # Always installs `common-chat` (talk to the network — needs nothing but
 # Python). Also installs `common-join` (contribute a node) if Ollama is
@@ -8,7 +8,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "robot-time/common-network"
+$Repo = "TheCommonAI/common-network"
 $InstallDir = "$env:USERPROFILE\.common-network"
 $BinDir = "$InstallDir\bin"
 $Raw = "https://raw.githubusercontent.com/$Repo/main"

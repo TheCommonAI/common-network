@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
-REPO = "robot-time/common-network"
+REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/chat/chat.py"
 
 BANNER = r"""
