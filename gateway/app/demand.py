@@ -349,16 +349,33 @@ async def plan_installs(machines: list[float], window_days: int = 30) -> dict:
         assigned_models[chosen["id"]] = assigned_models.get(chosen["id"], 0) + 1
         for tag in chosen["domain_tags"]:
             assigned_count[tag] = assigned_count.get(tag, 0) + 1
-        lane = max(chosen["domain_tags"],
-                   key=lambda t: demand_by_domain.get(t, 0) if t.lower() not in excluded else -1)
+
+        # A model whose every tag is excluded holds no lane and can never take
+        # a panel seat, so calling it a specialist is simply false -- and it
+        # was being counted toward distinct_specialist_models, inflating
+        # can_compose. Same class of over-promise as counting tags instead of
+        # models: the plan claimed a capability the resulting network would not
+        # have. On a lab of 8GB machines this labelled llama3.2-1b, a
+        # generalist, as a specialist twice over.
+        own_lanes = [t for t in chosen["domain_tags"] if t.lower() not in excluded]
+        if own_lanes:
+            lane = max(own_lanes, key=lambda t: demand_by_domain.get(t, 0))
+            role = "specialist"
+            reason = (f"fills the '{lane}' lane"
+                      + (f", which {demand_by_domain.get(lane, 0)} recent request(s) needed"
+                         if demand_by_domain.get(lane) else " (no demand data yet — filling coverage)"))
+        else:
+            role = "spare generalist"
+            reason = ("no specialist this machine can run is still unfilled, so it holds a "
+                      "generalist — useful as a second aggregator and as cover when another "
+                      "machine drops out, but it cannot take a panel seat.")
+
         plan.append({
             "machine": i + 1, "available_ram_gb": ram,
             "catalogue_id": chosen["id"], "display_name": chosen["display_name"],
             "source": chosen["source"], "domain_tags": chosen["domain_tags"],
-            "role": "specialist",
-            "reason": (f"fills the '{lane}' lane"
-                       + (f", which {demand_by_domain.get(lane, 0)} recent request(s) needed"
-                          if demand_by_domain.get(lane) else " (no demand data yet — filling coverage)")),
+            "role": role,
+            "reason": reason,
         })
 
     # Whether the planned network can compose is a question about distinct
