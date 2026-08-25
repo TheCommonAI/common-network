@@ -106,6 +106,13 @@ def self_update() -> None:
     try:
         with urllib.request.urlopen(UPDATE_URL, timeout=5) as resp:
             remote = resp.read()
+    except urllib.error.HTTPError as e:
+        # See the note in common/common.py: offline stays silent, but a
+        # 401/403/404 means the update channel is broken everywhere at once.
+        if e.code in (401, 403, 404):
+            print(f"note: updates unreachable ({e.code}) — running the installed version.",
+                  file=sys.stderr)
+        return
     except (urllib.error.URLError, socket.timeout):
         return
 

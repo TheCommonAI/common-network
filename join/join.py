@@ -186,6 +186,15 @@ def fetch_update() -> bytes | None:
     try:
         with urllib.request.urlopen(UPDATE_URL, timeout=5) as resp:
             remote = resp.read()
+    except urllib.error.HTTPError as e:
+        # See the matching note in common/common.py. Offline is normal and
+        # silent; a 401/403/404 means the update channel is broken for every
+        # machine at once, which is worth one line rather than nothing.
+        if e.code in (401, 403, 404):
+            print(f"{GLYPH_FORMING} {dim(f'updates unreachable ({e.code}) — running the installed version.')}",
+                  file=sys.stderr)
+            print(comment(f"source: {UPDATE_URL}"), file=sys.stderr)
+        return None
     except (urllib.error.URLError, socket.timeout):
         return None  # offline or GitHub unreachable — carry on with the current version
 

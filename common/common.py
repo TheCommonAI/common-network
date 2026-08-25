@@ -172,8 +172,24 @@ def self_update() -> None:
     try:
         with urllib.request.urlopen(UPDATE_URL, timeout=5) as resp:
             remote = resp.read()
-    except (urllib.error.URLError, socket.timeout):
+    except urllib.error.HTTPError as e:
+        # Being offline is normal and stays silent. A 401/403/404 is not
+        # transient: the update channel itself is broken -- the repo is
+        # private, was renamed, or the path moved -- and every machine running
+        # this CLI is frozen at whatever version it installed.
+        #
+        # This used to be swallowed. HTTPError is a subclass of URLError, so
+        # the single `except (URLError, socket.timeout): return` below caught
+        # 404s too and returned silently, which made a permanently broken
+        # update channel indistinguishable from a working one. That is exactly
+        # how it went unnoticed on every installed copy at once.
+        if e.code in (401, 403, 404):
+            print(dim(f"note: updates unreachable ({e.code}) — running the installed version."),
+                  file=sys.stderr)
+            print(comment(f"source: {UPDATE_URL}"), file=sys.stderr)
         return
+    except (urllib.error.URLError, socket.timeout):
+        return  # offline — carry on quietly with the version already here
     if not remote.strip():
         return
     local_path = os.path.abspath(__file__)
