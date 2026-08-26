@@ -23,13 +23,13 @@ nodes:
   - name: ollama-maths-local
     operator: common-network-demo
     endpoint_url: http://localhost:11434/v1
-    model_name: mathstral:7b
+    model_name: mightykatun/qwen2.5-math:7b
     domain_tags: [math, arithmetic, quantitative]
     capability_text: >
-      Mathstral 7B running locally via Ollama. Tuned for mathematical and
-      quantitative reasoning — arithmetic, algebra, multi-step word problems.
-      Narrow: weaker than a general model at conversation, stronger at
-      calculation. Free, self-hosted.
+      Qwen2.5 Math 7B (mightykatun) running locally via Ollama. A Qwen model
+      fine-tuned for mathematical reasoning — arithmetic, algebra, multi-step
+      word problems. Narrow: weaker than a general model at conversation,
+      stronger at calculation. Free, self-hosted.
     region: local
     cost_per_1k: 0
 

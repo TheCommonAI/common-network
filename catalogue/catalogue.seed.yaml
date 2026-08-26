@@ -71,6 +71,39 @@ models:
     lane_benchmark: null
     licence: apache-2.0
 
+  - id: qwen2.5-math-7b
+    display_name: Qwen2.5 Math 7B (mightykatun)
+    source: "ollama:mightykatun/qwen2.5-math:7b"
+    domain_tags: [math, arithmetic, word-problems, quantitative]
+    capability_text: >
+      Qwen2.5 Math 7B by mightykatun. A Qwen model fine-tuned specifically for
+      mathematical reasoning — arithmetic, algebra, and multi-step word problems.
+      The strongest math specialist available on Ollama for this footprint and
+      the one used for the school-lab thesis test.
+    params_b: 7.6
+    min_ram_gb: 10
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: apache-2.0
+
+  - id: qwen2.5-math-1.5b
+    display_name: Qwen2.5 Math 1.5B (mightykatun)
+    source: "ollama:mightykatun/qwen2.5-math:1.5b"
+    domain_tags: [math, arithmetic, word-problems, quantitative]
+    capability_text: >
+      Qwen2.5 Math 1.5B by mightykatun. The smallest weight-specialized math
+      model on Ollama. Useful for holding the math lane on a constrained machine
+      where the 7B variant will not fit.
+    params_b: 1.5
+    min_ram_gb: 3
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: apache-2.0
+
   - id: phi4-mini-reasoning
     display_name: Phi-4 Mini Reasoning
     source: "ollama:phi4-mini-reasoning:latest"
@@ -327,6 +360,22 @@ models:
     verified_in_lane: false
     lane_benchmark: null
     licence: apache-2.0
+
+  - id: llama3.1-8b
+    display_name: Llama 3.1 8B
+    source: "ollama:llama3.1:8b"
+    domain_tags: [general, conversation, writing]
+    capability_text: >
+      Llama 3.1 8B. Reliable general-purpose model for conversation, writing,
+      summarisation and world knowledge. A good alternative aggregator when
+      qwen3:8b is unavailable or already assigned elsewhere in the lab.
+    params_b: 8.0
+    min_ram_gb: 10
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: llama3.1
 
   - id: gemma3-12b
     display_name: Gemma 3 12B
