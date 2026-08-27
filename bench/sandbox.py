@@ -19,8 +19,25 @@ MEMORY_LIMIT_BYTES = 512 * 1024 * 1024  # 512MB
 
 
 def _limit_resources():
-    resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT_BYTES, MEMORY_LIMIT_BYTES))
-    resource.setrlimit(resource.RLIMIT_CPU, (DEFAULT_TIMEOUT_SECONDS, DEFAULT_TIMEOUT_SECONDS))
+    """Best-effort caps. Never raise: anything thrown in a preexec_fn comes back
+    as SubprocessError, which run_program reports as a failed program -- so a
+    limit that cannot be applied would score every correct completion as wrong.
+
+    RLIMIT_AS is the specific hazard and is Linux-only here: CPython on macOS
+    reserves more address space than a 512MB cap allows and dies before running
+    a line, so on a Mac this made run_program return False for *every* input,
+    correct or not. The wall-clock timeout in run_program is what actually
+    bounds a runaway program.
+    """
+    try:
+        resource.setrlimit(resource.RLIMIT_CPU, (DEFAULT_TIMEOUT_SECONDS, DEFAULT_TIMEOUT_SECONDS))
+    except (ValueError, OSError):
+        pass
+    if sys.platform.startswith("linux"):
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT_BYTES, MEMORY_LIMIT_BYTES))
+        except (ValueError, OSError):
+            pass
 
 
 def run_program(source: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> tuple[bool, str]:
