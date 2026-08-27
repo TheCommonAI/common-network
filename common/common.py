@@ -37,6 +37,13 @@ panel, best-member, replication -- on ground-truth cases and reports whether
 composition beats the best individual specialist. This is the test to run
 on the school lab if the question is "does the thesis work".
 
+The three composition-shaped cases are scored against a rubric of independent,
+lane-tagged components rather than substring presence, so an answer that
+combines two specialists scores above one that emits a single specialist's
+part. Scoring executes the model-written code it is judging; `--no-exec`
+skips that at the cost of resolution. The report's COMPOSITION CASES block
+isolates those cases and breaks each arm down by lane.
+
 "synth" and "map" are recognised but not yet built -- see `common help synth`
 / `common help map`. This CLI checks GitHub for a newer version of itself on
 every run and updates in place (pass --no-update to skip).
@@ -49,13 +56,23 @@ import random
 import re
 import socket
 import statistics
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+# Not available on Windows. Only used to cap CPU/memory when executing
+# model-generated code during thesis scoring; absence degrades to a plain
+# wall-clock timeout rather than disabling the check.
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover - Windows
+    _resource = None
 
 # --- Identity ---------------------------------------------------------------
 # join.py owns writing/clearing this file (it runs the actual registration).
@@ -965,10 +982,214 @@ class _ThesisCase:
     expect_refusal: bool = False
     domains: tuple[str, ...] = ("math", "code")
     note: str = ""
+    rubric: list["_Rubric"] = field(default_factory=list)
 
 
 def _money(value) -> Decimal:
     return Decimal(str(value)).quantize(Decimal("0.01"))
+
+
+# --- Rubric scoring for composition-shaped cases ------------------------------
+# `expect_any` substring matching is adequate for "code that emits a number":
+# the number carries the signal and is checked against a Decimal ground truth.
+# It is useless for the cases that actually test composition. `explain-function`
+# asks for a function AND an explanation AND an example; a code model that emits
+# only the function contains "def is_palindrome" and scores exactly what a
+# genuine synthesis scores. The harness could not distinguish "composition
+# worked" from "composition did nothing" on precisely the three cases it exists
+# to adjudicate.
+#
+# A rubric splits a case into independent components, each tagged with the lane
+# that is supposed to supply it. This follows essay-test/scoring.py: axes stay
+# separate, because "fluent prose with a broken function" and "a correct
+# function with no explanation" are different failures and averaging them into
+# one number hides the effect being looked for. Tagging by lane also makes the
+# question "did both specialists actually contribute?" directly measurable --
+# a lone code model should score the code components and near-zero on writing.
+#
+# Every check is deterministic. No model judges another model here: the
+# aggregator being tested is on the network under test, so scoring with it
+# would be circular. The cost is that this measures whether an explanation is
+# present, coherent and correct, not whether it is elegant.
+
+# Set False by `--no-exec`. Executing model-generated code is the strongest
+# available quality signal for the code lane -- structural checks cannot tell a
+# working function from a plausible-looking broken one -- but it is still
+# running generated code on the lab's machines. Same bar as bench/sandbox.py:
+# acceptable for known, trusted models in a controlled run. When off, the
+# execution components drop out of the denominator rather than scoring zero.
+_THESIS_EXEC = True
+
+_FENCE_RE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_DEF_RE = re.compile(r"^\s*(?:def |import |from |class )")
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_CONNECTIVES = [
+    "because", "therefore", "so that", "since", "which means", "this means",
+    "in other words", "as a result", "the reason", "that is why", "hence",
+    "thus", "if ", "when ", "then ", "by ", "checks", "compares", "returns",
+]
+_BUG_MARKERS = ["bug", "wrong", "incorrect", "error", "mistake", "should not",
+                "shouldn't", "problem", "issue", "adds", "extra"]
+
+
+@dataclass
+class _Rubric:
+    """One independently-checkable component of an answer.
+
+    `check` returns True/False, or None when the component could not be
+    assessed (execution disabled). None drops the component from the
+    denominator so a skipped check never reads as a failure.
+    """
+    name: str
+    lane: str
+    weight: float
+    check: callable
+
+
+def _code_blocks(text: str) -> str:
+    """Python source from an answer, fenced blocks preferred, in order.
+
+    Concatenated rather than picking one: `debug-and-describe` legitimately
+    contains the buggy original and the correction, and in Python the later
+    definition wins. That is the honest reading of an answer that ends with its
+    corrected version, and correctly fails one that ends with the bug.
+    """
+    fenced = _FENCE_RE.findall(text or "")
+    if fenced:
+        return "\n\n".join(block.strip("\n") for block in fenced)
+
+    # No fences. Take contiguous runs starting at a def/import line.
+    out, run, in_run = [], [], False
+    for line in (text or "").splitlines():
+        if _DEF_RE.match(line):
+            in_run = True
+        elif in_run and line.strip() and not line.startswith((" ", "\t")):
+            out.append("\n".join(run))
+            run, in_run = [], False
+        if in_run:
+            run.append(line)
+    if run:
+        out.append("\n".join(run))
+    return "\n\n".join(out)
+
+
+def _prose_of(text: str) -> str:
+    """The answer with code removed, so prose checks cannot be satisfied by code."""
+    stripped = _FENCE_RE.sub(" ", text or "")
+    kept = [ln for ln in stripped.splitlines()
+            if not _DEF_RE.match(ln) and not ln.startswith(("    ", "\t", ">>>"))]
+    return "\n".join(kept)
+
+
+def _sentences(text: str) -> list[str]:
+    """Sentences of real prose. Short fragments and bare labels do not count."""
+    return [s.strip() for s in _SENT_SPLIT_RE.split(text or "")
+            if len(s.strip()) >= 25 and " " in s.strip()]
+
+
+def _run_python(source: str, timeout: float = 10.0) -> bool:
+    """Run a self-contained program in a subprocess. True iff it exits clean.
+
+    Mirrors bench/sandbox.py, inlined because `common` ships as one
+    self-updating file and cannot import from the repo.
+    """
+    def _limits():
+        # Best-effort, and deliberately never fatal: anything raised here
+        # surfaces as SubprocessError and would score a perfectly good answer as
+        # a failed execution. An address-space cap is the specific hazard --
+        # CPython on macOS reserves more than 512MB at startup, so RLIMIT_AS
+        # kills the interpreter before it runs a line. The wall-clock timeout on
+        # subprocess.run is what actually bounds a runaway program.
+        if _resource is None:
+            return
+        try:
+            _resource.setrlimit(_resource.RLIMIT_CPU, (int(timeout), int(timeout)))
+        except (ValueError, OSError):
+            pass
+        if sys.platform.startswith("linux"):
+            cap = 512 * 1024 * 1024
+            try:
+                _resource.setrlimit(_resource.RLIMIT_AS, (cap, cap))
+            except (ValueError, OSError):
+                pass
+
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(source)
+            path = f.name
+        result = subprocess.run(
+            [sys.executable, path], capture_output=True, text=True, timeout=timeout,
+            preexec_fn=_limits if (_resource and sys.platform != "win32") else None,
+        )
+        return result.returncode == 0
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return False
+    finally:
+        if path:
+            Path(path).unlink(missing_ok=True)
+
+
+def _exec_check(answer: str, calls: list[tuple[str, object]]) -> bool | None:
+    """Does the answer's code produce the right values? None if exec is off."""
+    if not _THESIS_EXEC:
+        return None
+    source = _code_blocks(answer)
+    if not source.strip():
+        return False
+    asserts = "\n".join(f"assert ({expr}) == ({value!r}), {expr!r}" for expr, value in calls)
+    return _run_python(f"{source}\n\n{asserts}\n")
+
+
+def _explains(answer: str, *, min_sentences: int = 2) -> bool:
+    """Genuine explanatory prose outside the code, not a restated signature."""
+    prose = _prose_of(answer)
+    if len(_sentences(prose)) < min_sentences:
+        return False
+    return any(c in prose.lower() for c in _CONNECTIVES)
+
+
+def _mentions_any(answer: str, terms: list[str], *, prose_only: bool = False) -> bool:
+    hay = (_prose_of(answer) if prose_only else (answer or "")).lower()
+    return any(t.lower() in hay for t in terms)
+
+
+def _shows_example(answer: str) -> bool:
+    """A concrete worked example: a quoted input and a stated boolean result."""
+    prose = _prose_of(answer).lower()
+    quoted = re.search(r"['\"][a-z0-9 ]{1,40}['\"]", prose)
+    return bool(quoted) and ("true" in prose or "false" in prose)
+
+
+_EQUATION_RE = re.compile(r"(\d+)\s*\+\s*(\d+)\s*=\s*(\d+)")
+
+
+def _odd_sum_example_verified(answer: str) -> bool:
+    """An example of two odds summing to an even, checked arithmetically.
+
+    The substring rule scored "3 + 5" as grounding without ever checking that
+    the addends were odd or that the arithmetic held. This rejects "3 + 5 = 9"
+    and "2 + 4 = 6", both of which the old check accepted.
+    """
+    for a, b, total in _EQUATION_RE.findall(answer or ""):
+        a, b, total = int(a), int(b), int(total)
+        if a % 2 and b % 2 and a + b == total and total % 2 == 0:
+            return True
+    return False
+
+
+def _general_argument(answer: str) -> bool:
+    """Generality, not one lucky example: algebraic form or an explicit claim."""
+    lowered = (answer or "").lower()
+    algebraic = re.search(r"2\s*[knm]\s*\+\s*1", lowered) or re.search(r"2\s*\(\s*[knm]", lowered)
+    claimed = any(p in lowered for p in ["for any", "any two odd", "in general",
+                                         "always", "every odd", "all odd"])
+    return bool(algebraic or claimed)
+
+
+def _concludes_even(answer: str) -> bool:
+    prose = _prose_of(answer).lower()
+    return "even" in prose and not re.search(r"sum\s+(?:is|will be)\s+(?:always\s+)?odd", prose)
 
 
 def _thesis_cases_math_code() -> list[_ThesisCase]:
@@ -1044,6 +1265,22 @@ def _thesis_cases_math_code() -> list[_ThesisCase]:
             domains=("code", "writing"),
             note="Code plus a written explanation. The code model cannot write well; "
                  "the writing model cannot write code.",
+            rubric=[
+                _Rubric("code_present", "code", 1.0,
+                        lambda a: _mentions_any(a, ["def is_palindrome"])),
+                _Rubric("code_correct", "code", 2.0,
+                        lambda a: _exec_check(a, [
+                            ('is_palindrome("racecar")', True),
+                            ('is_palindrome("hello")', False),
+                            ('is_palindrome("abba")', True),
+                            ('is_palindrome("ab")', False),
+                        ])),
+                _Rubric("explanation_prose", "writing", 2.0, _explains),
+                _Rubric("mechanism_named", "writing", 1.0,
+                        lambda a: _mentions_any(a, ["reverse", "backwards", "[::-1]",
+                                                    "two pointer", "compare"], prose_only=True)),
+                _Rubric("example_given", "writing", 1.0, _shows_example),
+            ],
         ),
         _ThesisCase(
             id="math-essay",
@@ -1056,6 +1293,13 @@ def _thesis_cases_math_code() -> list[_ThesisCase]:
             domains=("math", "writing"),
             note="Mathematical correctness + readable prose. The math model gives the "
                  "logic; the writing model gives the paragraph.",
+            rubric=[
+                _Rubric("general_argument", "math", 2.0, _general_argument),
+                _Rubric("example_verified", "math", 2.0, _odd_sum_example_verified),
+                _Rubric("conclusion_correct", "math", 1.0, _concludes_even),
+                _Rubric("paragraph_prose", "writing", 2.0,
+                        lambda a: _explains(a, min_sentences=3)),
+            ],
         ),
         _ThesisCase(
             id="debug-and-describe",
@@ -1071,6 +1315,23 @@ def _thesis_cases_math_code() -> list[_ThesisCase]:
             domains=("code", "writing"),
             note="Bug identification + corrected code + explanation. A code specialist "
                  "and a writing specialist must both contribute.",
+            rubric=[
+                _Rubric("bug_identified", "code", 2.0,
+                        lambda a: _mentions_any(a, ["len(items)", "len (items)"], prose_only=True)
+                        and _mentions_any(a, _BUG_MARKERS, prose_only=True)),
+                _Rubric("decision_stated", "code", 1.0,
+                        lambda a: _mentions_any(a, ["remove", "delete", "drop", "get rid of"],
+                                                prose_only=True)),
+                _Rubric("fixed_code_present", "code", 1.0,
+                        lambda a: _mentions_any(a, ["def total"])),
+                _Rubric("fixed_code_correct", "code", 2.0,
+                        lambda a: _exec_check(a, [
+                            ("total([1, 2, 3])", 6),
+                            ("total([])", 0),
+                            ("total([5])", 5),
+                        ])),
+                _Rubric("explanation_prose", "writing", 2.0, _explains),
+            ],
         ),
 
         # Out-of-scope cases: the network should decline rather than answer.
@@ -1262,6 +1523,9 @@ def _matches_figure(expected: Decimal, found: Decimal) -> bool:
 class _ThesisScore:
     case_id: str
     arm: str
+    # Which pass of the run this came from. Needed to pair `single` against the
+    # `replication` produced in the *same* pass -- see _thesis_noise_floor.
+    repeat: int = 0
     figures_expected: int = 0
     figures_correct: int = 0
     refusal_expected: bool = False
@@ -1273,6 +1537,12 @@ class _ThesisScore:
     topology: str | None = None
     panel: list[str] = field(default_factory=list)
     error: str | None = None
+    # Rubric results, when the case carries one. `rubric_hits` keeps every
+    # component for audit (None = not assessed); the headline uses the weights.
+    rubric_hits: dict[str, bool | None] = field(default_factory=dict)
+    rubric_earned: float = 0.0
+    rubric_possible: float = 0.0
+    lane_scores: dict[str, float] = field(default_factory=dict)
 
     @property
     def score(self) -> float:
@@ -1280,6 +1550,8 @@ class _ThesisScore:
             return 0.0
         if self.refusal_expected:
             return 1.0 if self.refusal_given else 0.0
+        if self.rubric_possible > 0:
+            return self.rubric_earned / self.rubric_possible
         if not self.figures_expected:
             return 1.0 if self.grounding_present else 0.0
         numeric = self.figures_correct / self.figures_expected
@@ -1295,11 +1567,41 @@ def _looks_like_refusal(text: str) -> bool:
     return not answered
 
 
+def _score_rubric(case: _ThesisCase, answer: str, result: "_ThesisScore") -> None:
+    """Evaluate a case's rubric onto `result`, in place.
+
+    A check returning None (execution disabled) is recorded for audit but left
+    out of both numerator and denominator, so switching `--no-exec` on changes
+    the resolution of the score without silently converting skipped checks into
+    failures. Per-lane means are kept alongside the headline: they are how you
+    see whether a panel actually combined two contributions or just relayed one.
+    """
+    lane_earned: dict[str, float] = {}
+    lane_possible: dict[str, float] = {}
+    for item in case.rubric:
+        try:
+            hit = item.check(answer)
+        except Exception:  # a scorer bug must not abort a lab run
+            hit = False
+        result.rubric_hits[item.name] = hit
+        if hit is None:
+            continue
+        result.rubric_possible += item.weight
+        lane_possible[item.lane] = lane_possible.get(item.lane, 0.0) + item.weight
+        if hit:
+            result.rubric_earned += item.weight
+            lane_earned[item.lane] = lane_earned.get(item.lane, 0.0) + item.weight
+    result.lane_scores = {
+        lane: round(lane_earned.get(lane, 0.0) / possible, 4)
+        for lane, possible in lane_possible.items() if possible
+    }
+
+
 def _score_thesis_case(case: _ThesisCase, answer: str, arm: str, *, latency_ms: int | None = None,
                        topology: str | None = None, panel: list[str] | None = None,
-                       error: str | None = None) -> _ThesisScore:
+                       error: str | None = None, repeat: int = 0) -> _ThesisScore:
     result = _ThesisScore(
-        case_id=case.id, arm=arm, refusal_expected=case.expect_refusal,
+        case_id=case.id, arm=arm, repeat=repeat, refusal_expected=case.expect_refusal,
         answer_chars=len(answer or ""), latency_ms=latency_ms, topology=topology,
         panel=panel or [], error=error,
     )
@@ -1312,6 +1614,12 @@ def _score_thesis_case(case: _ThesisCase, answer: str, arm: str, *, latency_ms: 
     if case.expect_refusal:
         result.refusal_given = _looks_like_refusal(answer)
         result.extra_figures = len(found)
+        return result
+
+    if case.rubric:
+        _score_rubric(case, answer, result)
+        result.extra_figures = len(found)
+        result.grounding_present = any(m.lower() in lowered for m in case.expect_any)
         return result
 
     result.figures_expected = len(case.expected)
@@ -1337,6 +1645,12 @@ class _ThesisSummary:
     median_answer_chars: int
     median_latency_ms: int | None
     errors: int
+    # Mean score per lane across rubric-scored cases, and the mean over just
+    # those cases. Composition is claimed on the rubric cases specifically, so
+    # the blended headline dilutes it with seven cases it was never about.
+    composition_mean: float = 0.0
+    composition_n: int = 0
+    lane_means: dict[str, float] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return self.__dict__.copy()
@@ -1356,6 +1670,13 @@ def _summarise_thesis(scores: list[_ThesisScore], arm: str) -> _ThesisSummary:
         return _ThesisSummary(arm, 0, 0.0, 0.0, 0.0, 0, None, 0)
     in_scope = [s for s in rows if not s.refusal_expected]
     oos = [s for s in rows if s.refusal_expected]
+
+    composed = [s for s in rows if s.rubric_possible > 0]
+    lane_totals: dict[str, list[float]] = {}
+    for s in composed:
+        for lane, value in s.lane_scores.items():
+            lane_totals.setdefault(lane, []).append(value)
+
     return _ThesisSummary(
         arm=arm,
         n=len(rows),
@@ -1365,6 +1686,10 @@ def _summarise_thesis(scores: list[_ThesisScore], arm: str) -> _ThesisSummary:
         median_answer_chars=int(_median([s.answer_chars for s in rows]) or 0),
         median_latency_ms=int(_median([s.latency_ms for s in rows if s.latency_ms]) or 0) or None,
         errors=sum(1 for s in rows if s.error),
+        composition_mean=(sum(s.score for s in composed) / len(composed)) if composed else 0.0,
+        composition_n=len(composed),
+        lane_means={lane: round(statistics.fmean(vals), 4)
+                    for lane, vals in sorted(lane_totals.items())},
     )
 
 
@@ -1467,7 +1792,7 @@ def _run_thesis_arm(gateway: str, arm: str, repeat: int, network: dict,
                         answer, meta = _ask_thesis(gateway, case.prompt, node=node_name)
                         per_member.append(_score_thesis_case(
                             case, answer, arm, latency_ms=meta["latency_ms"],
-                            topology="forced", panel=[node_name]))
+                            topology="forced", panel=[node_name], repeat=repeat))
                 if not per_member:
                     continue
                 best = max(per_member, key=lambda s: s.score)
@@ -1478,31 +1803,56 @@ def _run_thesis_arm(gateway: str, arm: str, repeat: int, network: dict,
             compose = {"single": "never", "replication": "never", "panel": "always"}[arm]
             answer, meta = _ask_thesis(gateway, case.prompt, compose=compose)
             score = _score_thesis_case(case, answer, arm, latency_ms=meta["latency_ms"],
-                                       topology=meta["topology"], panel=meta["panel"])
+                                       topology=meta["topology"], panel=meta["panel"],
+                                       repeat=repeat)
             scores.append(score)
             topo = meta["topology"]
             extra = f" [{topo}]" if topo else ""
             print(f"  {label}: {score.score:.3f}{extra}")
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
-            scores.append(_score_thesis_case(case, "", arm, error=str(e)))
+            scores.append(_score_thesis_case(case, "", arm, error=str(e), repeat=repeat))
             print(f"  {label}: ERROR {e}")
     return scores
 
 
 def _thesis_noise_floor(single: list[_ThesisScore], replication: list[_ThesisScore]) -> dict:
-    by_case = {s.case_id: s for s in replication}
-    diffs = [s.score - by_case[s.case_id].score for s in single if s.case_id in by_case]
-    if not diffs:
+    """Spread between two identical runs, as the bar a real effect must clear.
+
+    Pairs on (repeat, case_id), not case_id alone. Keying by case_id collapsed
+    `replication` to one row per case -- the last pass to be written -- and then
+    diffed all N passes of `single` against that single survivor. With --full
+    that produced 30 diffs from 10 independent comparisons and divided by √30,
+    shrinking the floor by ~1.7x. Every "REAL" verdict was measured against a
+    bar that was too low, biasing the whole instrument toward reporting success
+    the network had not earned.
+
+    `stdev` (sample) rather than `pstdev`: these pairs are a sample of the
+    run-to-run variation, not the population of it.
+    """
+    by_key = {(s.repeat, s.case_id): s for s in replication}
+    pairs = [(s, by_key[(s.repeat, s.case_id)]) for s in single
+             if (s.repeat, s.case_id) in by_key]
+    if not pairs:
         return {"available": False}
+    diffs = [a.score - b.score for a, b in pairs]
     n = len(diffs)
-    sd = statistics.pstdev(diffs) if n > 1 else 0.0
+    sd = statistics.stdev(diffs) if n > 1 else 0.0
+    disagreement = sum(1 for d in diffs if abs(d) > 1e-9) / n
+
+    # A floor of exactly zero is not a tight measurement, it is an absent one:
+    # every non-zero delta then clears it and every verdict reads REAL. At
+    # temperature 0 identical runs often agree perfectly, so this is the common
+    # case, not an edge case. Report it as unmeasured and let the verdict say so.
+    degenerate = n < 2 or sd == 0.0
     return {
         "available": True,
         "n": n,
+        "pairs": n,
         "mean_difference": round(statistics.fmean(diffs), 4),
         "per_case_sd": round(sd, 4),
-        "floor": round(1.96 * sd / (n ** 0.5), 4) if n else None,
-        "self_disagreement_rate": round(sum(1 for d in diffs if abs(d) > 1e-9) / n, 3),
+        "floor": None if degenerate else round(1.96 * sd / (n ** 0.5), 4),
+        "degenerate": degenerate,
+        "self_disagreement_rate": round(disagreement, 3),
     }
 
 
@@ -1521,12 +1871,21 @@ def _render_thesis_report(payload: dict) -> str:
 
     if floor.get("available"):
         lines += [
-            "NOISE FLOOR (single vs an identical re-run)",
+            "NOISE FLOOR (single vs an identical re-run, paired by pass and case)",
             f"  mean difference        {floor['mean_difference']:+.4f}",
             f"  self-disagreement      {floor['self_disagreement_rate']:.0%}",
-            f"  floor                  ±{floor['floor']:.4f} at n={floor['n']}",
-            "",
         ]
+        if floor.get("floor") is None:
+            lines += [
+                f"  floor                  UNMEASURED at n={floor['n']} paired runs",
+                "  ⚠ the two runs never disagreed, so run-to-run spread is 0 and any",
+                "    difference below would clear a zero bar. Treat the deltas as",
+                "    undertested, not as significant. More repeats (--full) or a",
+                "    non-zero temperature would give this a real floor.",
+            ]
+        else:
+            lines.append(f"  floor                  ±{floor['floor']:.4f} at n={floor['n']} paired runs")
+        lines.append("")
 
     panel = s.get("panel", {}).get("mean")
     single = s.get("single", {}).get("mean")
@@ -1547,9 +1906,15 @@ def _render_thesis_report(payload: dict) -> str:
             d = panel - best
             lines.append(f"  panel − best member    {d:+.3f}   {call(d)}")
             lines.append("")
-            if f is not None and d > f:
+            if f is None:
+                # Without a floor there is no bar to clear, so no verdict is
+                # available. Previously this fell through to the DENIED branch
+                # and reported an unmeasured run as evidence against the thesis.
+                lines.append("  → No noise floor could be measured, so this delta cannot be called either way.")
+                lines.append("    Thesis UNTESTED on this run — fix the floor before reporting a result.")
+            elif d > f:
                 lines.append("  → Composition beats its own best member. Thesis SUPPORTED for these cases/models.")
-            elif f is not None and abs(d) <= f:
+            elif abs(d) <= f:
                 lines.append("  → Composition is indistinguishable from its best member. The panel is not adding")
                 lines.append("    anything; check the specialists are genuinely non-dominated before concluding")
                 lines.append("    anything about composition itself. Thesis INCONCLUSIVE.")
@@ -1559,6 +1924,26 @@ def _render_thesis_report(payload: dict) -> str:
         else:
             lines.append("")
             lines.append("  best-member arm not run — 'panel beats single' is a weaker claim than the thesis.")
+
+    # The composition-shaped cases, isolated. These are the only cases where a
+    # panel can express an advantage at all, and the blended headline averages
+    # them with seven cases that are one specialist's work by construction.
+    composed = {arm: row for arm, row in s.items() if row.get("composition_n")}
+    if composed:
+        lanes = sorted({lane for row in composed.values() for lane in row["lane_means"]})
+        lines += ["", f"COMPOSITION CASES ONLY (n={next(iter(composed.values()))['composition_n']} per arm)"]
+        header = f"  {'arm':<14}{'score':>8}" + "".join(f"{lane:>10}" for lane in lanes)
+        lines.append(header)
+        for arm, row in composed.items():
+            cells = "".join(f"{row['lane_means'].get(lane, float('nan')):>10.3f}" for lane in lanes)
+            lines.append(f"  {arm:<14}{row['composition_mean']:>8.3f}{cells}")
+        c_panel = composed.get("panel", {}).get("composition_mean")
+        c_best = composed.get("best-member", {}).get("composition_mean")
+        if c_panel is not None and c_best is not None:
+            lines.append("")
+            lines.append(f"  panel − best member on composition cases: {c_panel - c_best:+.3f}")
+            lines.append("  Per-lane columns say whether the panel combined two contributions or")
+            lines.append("  relayed one: a lone specialist scores its own lane and near-zero elsewhere.")
 
     lengths = {arm: row["median_answer_chars"] for arm, row in s.items()}
     if len(lengths) > 1 and min(lengths.values()) > 0:
@@ -1581,6 +1966,9 @@ def _render_thesis_report(payload: dict) -> str:
 
 def _cmd_test_thesis(gateway: str, args: argparse.Namespace, emit: callable) -> None:
     """Run the thesis benchmark and append results to the same jsonl."""
+    global _THESIS_EXEC
+    _THESIS_EXEC = not getattr(args, "no_exec", False)
+
     cases = _thesis_cases_legal() if args.thesis_cases == "legal" else _thesis_cases_math_code()
     arms = ["single", "panel", "best-member", "replication"]
     repeats = 3 if args.full else max(1, args.repeats)
@@ -1588,6 +1976,8 @@ def _cmd_test_thesis(gateway: str, args: argparse.Namespace, emit: callable) -> 
     print()
     print(f"{GLYPH_ROUTE} {paper('thesis test', bold=True)}")
     print(comment("does a panel of specialists beat the best individual specialist?"))
+    if not _THESIS_EXEC:
+        print(comment("--no-exec: model-written code is not run; code-correctness checks are skipped"))
     print()
     print(f"{GLYPH_WORK} {dim('preflight: checking the network can compose')}")
     network = _thesis_preflight(gateway, cases)
@@ -1609,11 +1999,15 @@ def _cmd_test_thesis(gateway: str, args: argparse.Namespace, emit: callable) -> 
         "gateway": gateway,
         "case_set": args.thesis_cases,
         "repeats": repeats,
+        "exec_enabled": _THESIS_EXEC,
         "network": {"lanes": {k: v for k, v in network["lanes"].items()},
                     "generalists": network["generalists"]},
         "summaries": summaries,
         "noise_floor": floor,
-        "scores": [s.__dict__ for s in all_scores],
+        # `score` is a property, so it never landed in __dict__ and the jsonl
+        # recorded every input to the score without the score itself. Rubric
+        # results are only auditable alongside the number they produced.
+        "scores": [dict(s.__dict__, score=round(s.score, 4)) for s in all_scores],
     }
     emit(payload)
 
@@ -1850,6 +2244,7 @@ def _parse_test_flags(args: argparse.Namespace) -> argparse.Namespace:
     p.add_argument("--json", action="store_true")
     p.add_argument("--thesis", action="store_true")
     p.add_argument("--thesis-cases")
+    p.add_argument("--no-exec", action="store_true")
     sub, _ = p.parse_known_args(args.rest)
     for key, value in vars(sub).items():
         if value not in (None, False):  # only override what was actually passed
@@ -1991,6 +2386,7 @@ def main() -> None:
     parser.add_argument("--out", default=None, help="test: results jsonl path")
     parser.add_argument("--thesis", action="store_true", help="test: run the thesis benchmark (single vs panel vs best-member)")
     parser.add_argument("--thesis-cases", default="math-code", choices=["math-code", "legal"], help="test: which ground-truth case set to use (default: math-code)")
+    parser.add_argument("--no-exec", action="store_true", help="test: don't execute model-written code when scoring (lower resolution, nothing runs locally)")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--version", action="store_true")
     args = parser.parse_args()
