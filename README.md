@@ -4,6 +4,67 @@
 
 **The Common Network Alpha — v0.1.2**
 
+## Install and set up
+
+**1. Install [Ollama](https://ollama.com/download)** — the program that runs the
+AI model on your machine. Install it before step 2 so the installer can find it.
+
+**2. Install Common.**
+
+macOS / Linux — paste into Terminal:
+
+```bash
+curl -fsSL https://commonai.com.au/install.sh | sh
+```
+
+Windows — paste into PowerShell:
+
+```powershell
+irm https://commonai.com.au/install.ps1 | iex
+```
+
+**3. Close your terminal and open a new one.** The old window can't see the new
+command yet.
+
+**4. Donate a machine.** This picks a model that fits your computer, downloads
+it, and puts you on the network:
+
+```bash
+common join
+```
+
+Leave that window open — it's your machine being part of the network. (Or run
+`common join --permanent` to have it run quietly in the background and start
+itself at login.)
+
+**5. Ask the network something.** In a second window:
+
+```bash
+common ask "What's a good way to learn recursion?"
+```
+
+Or run `common` on its own for a back-and-forth session.
+
+**Why join first?** The network answers its contributors — asking requires a
+machine that's donating. `common join` sets that up for you and stores the
+credential; you don't have to handle it yourself.
+
+### Useful commands
+
+```bash
+common peers          # who else is on the network right now
+common status         # your node: health, position, requests served
+common recommend      # what specialist the network is short of
+common leave          # take your machine off the network
+common help           # everything else
+```
+
+Using an OpenAI SDK instead? Point it at the gateway and pass your node token
+(printed by `common join`, stored in `~/.common-network/identity.json`) as the
+API key.
+
+---
+
 The AI intelligence layer is being enclosed by a handful of corporations — the
 same way English common land was enclosed and privatised. **Common** is the
 counter-enclosure: a permissionless network where anyone can contribute a
@@ -13,13 +74,6 @@ not by a corporate gatekeeper.
 Common speaks the OpenAI API. Point any existing OpenAI SDK client at the
 gateway and pass your node token as the API key — every response tells you
 exactly which machines answered it, and why. The commons should be legible.
-Or just use `common` — a terminal client, no API knowledge required:
-
-```bash
-curl -fsSL https://commonai.com.au/install.sh | sh
-common join      # donate a machine: one model, auto-selected, auto-started
-common ask "What's a good way to learn recursion?"
-```
 
 **This is the Alpha: a model-donation platform.** Anyone can donate a machine
 and a model — a school lab, a spare laptop, a desktop with a spare GPU — and
@@ -120,7 +174,10 @@ derivation rules would be needed, it does nothing, because where those rules
 come from at scale is the honest open research question — not something to
 paper over.
 
-## Quickstart
+## Running your own gateway
+
+Everything above joins the shared network. This section is for running a
+gateway of your own — a school, a lab, a fork.
 
 Requirements: Python 3.11+, PostgreSQL with `pgvector`.
 
@@ -163,12 +220,15 @@ cd gateway && python tests/run_all.py
 No pytest, no database, no network beyond localhost, no embedding model — the
 suites stub what they need, so there is no reason not to run them.
 
-## Contributing a node
+## Contributing a node: the other options
+
+[Install and set up](#install-and-set-up) covers the normal path. `common join`
+also takes flags for labs and long-running machines:
 
 ```bash
-curl -fsSL https://commonai.com.au/install.sh | sh
-common join                 # over a Cloudflare tunnel
+common join                 # over a Cloudflare tunnel (the default)
 common join --lan           # over the local network — no tunnel, nothing exposed
+common join --permanent     # run in the background, start at login
 ```
 
 `--lan` is for computer labs and anywhere the gateway is on the same network.
