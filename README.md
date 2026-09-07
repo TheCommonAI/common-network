@@ -257,6 +257,9 @@ everything.
 |---|---|
 | `POST /v1/chat/completions` | OpenAI-compatible. `X-Common-Compose: never\|auto\|always` overrides composition per request. Contribution-gated by default: send a registered node's token (`X-Common-Node-Token`, or the `Authorization: Bearer` API-key slot). |
 | `GET /nodes`, `POST /nodes`, `DELETE /nodes/{id}` | The registry. Registration is permissionless. |
+| `GET /dashboard` | Public status: nodes, coverage, catalogue, routing, recent decisions. |
+| `GET /admin?token=…` | Operators view: failing nodes, error rates, limiter state. 404s unless `ADMIN_TOKEN` is set. |
+| `GET /source` | The repository this instance was built from (AGPL §13). |
 | `GET /decisions/recent?topology=panel` | The routing log, filterable by topology. |
 | `GET /decisions/composition` | How often each topology runs, and what the verifier caught. |
 | `GET /demand/gaps` | Under-served domains, and demand nothing in the catalogue covers. |

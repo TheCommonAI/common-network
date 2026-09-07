@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Common Network — Operators</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --muted:          #898781;
+    --gridline:       #e1e0d9;
+    --border:         rgba(11,11,11,0.10);
+    --good:           #0ca30c;
+    --warn:           #eda100;
+    --critical:       #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page:           #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --muted:          #898781;
+      --gridline:       #2c2c2a;
+      --border:         rgba(255,255,255,0.10);
+      --good:           #0ca30c;
+      --warn:           #c98500;
+      --critical:       #d03b3b;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --page:           #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --muted:          #898781;
+    --gridline:       #2c2c2a;
+    --border:         rgba(255,255,255,0.10);
+    --good:           #0ca30c;
+    --warn:           #c98500;
+    --critical:       #d03b3b;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .viz-root {
+    padding: 32px 24px 64px; max-width: 1100px; margin: 0 auto;
+    min-height: 100%; background: var(--page); color: var(--text-primary);
+  }
+
+  header { margin-bottom: 20px; }
+  header h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+  header p { margin: 0; color: var(--text-secondary); font-size: 14px; }
+  .release { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+             font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+  .private-note {
+    border: 1px solid var(--border); border-left: 3px solid var(--warn);
+    background: var(--surface-1); border-radius: 8px;
+    padding: 12px 14px; font-size: 13px; color: var(--text-secondary);
+    margin-bottom: 28px;
+  }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 28px; }
+  .stat-tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .stat-tile .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .stat-tile .value { font-size: 28px; font-weight: 600; font-variant-numeric: proportional-nums; }
+  .stat-tile .value.bad { color: var(--critical); }
+  .stat-tile .sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  section { margin-bottom: 32px; }
+  section h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  section .hint { font-size: 12px; color: var(--muted); margin: 0 0 12px; }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 4px 16px 8px; }
+
+  /* Tables scroll inside their own container so the page never scrolls sideways. */
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th { text-align: left; font-weight: 500; color: var(--text-secondary);
+       font-size: 12px; padding: 10px 12px 10px 0; border-bottom: 1px solid var(--gridline); white-space: nowrap; }
+  td { padding: 10px 12px 10px 0; border-bottom: 1px solid var(--gridline); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .muted { color: var(--muted); }
+  .trunc { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; }
+  .dot.up { background: var(--good); }
+  .dot.down { background: var(--critical); }
+  .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+          border: 1px solid var(--border); color: var(--text-secondary); margin-right: 4px; }
+  .pill.on { border-color: var(--good); color: var(--good); }
+  .pill.off { border-color: var(--warn); color: var(--warn); }
+  .bad { color: var(--critical); }
+
+  .empty { color: var(--muted); font-size: 13px; padding: 14px 0; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 36px; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <header>
+    <h1>Operators</h1>
+    <p>What <a href="/dashboard">/dashboard</a> doesn't show: failing nodes, error rates, and limiter state.</p>
+    <p class="release" id="release"></p>
+  </header>
+
+  <div class="private-note">
+    <strong>Not a public page.</strong> This view includes endpoint URLs and
+    client addresses. <code>/dashboard</code> is the one to share.
+  </div>
+
+  <section>
+    <h2>Configuration</h2>
+    <p class="hint">What this gateway is actually running with, read from its live settings.</p>
+    <div class="card"><div id="config" style="padding:14px 0;"></div></div>
+  </section>
+
+  <div class="stats" id="stats"></div>
+
+  <section>
+    <h2>Nodes</h2>
+    <p class="hint">Unhealthy first. Failure rate and measured latency are the last 24 hours.</p>
+    <div class="card scroll"><div id="nodes"></div></div>
+  </section>
+
+  <section>
+    <h2>Recent failed requests</h2>
+    <p class="hint">Requests that errored. No request text is recorded, by design.</p>
+    <div class="card scroll"><div id="failures"></div></div>
+  </section>
+
+  <section>
+    <h2>Rate limiter</h2>
+    <p class="hint">
+      This worker's in-process buckets — not network-wide, and empty after a restart.
+    </p>
+    <div class="card scroll"><div id="buckets"></div></div>
+  </section>
+
+  <footer>Auto-refreshes every 10s · <span id="last-updated"></span></footer>
+</div>
+
+<script>
+// The token came in via ?token=... to open this page; reuse it for the data
+// fetches so an operator pastes the URL once.
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const ago = iso => {
+  if (!iso) return '—';
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return Math.round(s) + 's ago';
+  if (s < 3600) return Math.round(s / 60) + 'm ago';
+  if (s < 86400) return Math.round(s / 3600) + 'h ago';
+  return Math.round(s / 86400) + 'd ago';
+};
+
+function table(headers, rows, emptyMsg) {
+  if (!rows.length) return `<div class="empty">${esc(emptyMsg)}</div>`;
+  return `<table><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead>`
+       + `<tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+}
+
+function renderConfig(c) {
+  const pill = (on, label, onText, offText) =>
+    `<span class="pill ${on ? 'on' : 'off'}">${esc(label)}: ${esc(on ? onText : offText)}</span>`;
+  document.getElementById('config').innerHTML =
+    pill(c.require_contribution, 'access', 'contributors only', 'OPEN TO ANYONE')
+    + pill(c.rate_limit_per_minute > 0, 'rate limit',
+           c.rate_limit_per_minute + '/min', 'disabled')
+    + pill(!c.allow_loopback_node_endpoints, 'loopback endpoints',
+           'blocked', 'ALLOWED — set false in public')
+    + `<span class="pill">compose: ${esc(c.compose_mode)}</span>`
+    + `<span class="pill">health every ${esc(c.health_check_interval_seconds)}s</span>`;
+}
+
+function renderStats(s, nodes) {
+  const down = nodes.filter(n => !n.healthy).length;
+  const failRate = s.requests ? (s.failures / s.requests) : 0;
+  const tile = (label, value, sub, bad) =>
+    `<div class="stat-tile"><div class="label">${esc(label)}</div>`
+    + `<div class="value${bad ? ' bad' : ''}">${esc(value)}</div>`
+    + (sub ? `<div class="sub">${esc(sub)}</div>` : '') + `</div>`;
+  document.getElementById('stats').innerHTML =
+      tile('Nodes down', down, down ? 'of ' + nodes.length : 'all ' + nodes.length + ' healthy', down > 0)
+    + tile('Requests 24h', s.requests, null, false)
+    + tile('Failures 24h', s.failures, s.requests ? (failRate * 100).toFixed(1) + '%' : null, s.failures > 0)
+    + tile('Panels 24h', s.panels, s.degraded ? s.degraded + ' degraded' : null, false)
+    + tile('Checks failed', s.checks_failed, 'of ' + s.checks_run + ' run', false)
+    + tile('Disagreements', s.disagreements, 'cross-specialist', false);
+}
+
+function renderNodes(nodes) {
+  const rows = nodes.map(n => {
+    const rate = n.failure_rate === null ? '—'
+      : `<span class="${n.failure_rate > 0.1 ? 'bad' : ''}">${(n.failure_rate * 100).toFixed(0)}%</span>`;
+    const lat = n.measured_latency_ms ? n.measured_latency_ms + 'ms'
+      : (n.avg_latency_ms ? `<span class="muted">${n.avg_latency_ms}ms declared</span>` : '—');
+    return [
+      `<span class="dot ${n.healthy ? 'up' : 'down'}"></span>${esc(n.name)}`
+        + (n.has_token ? '' : ' <span class="pill off">no token</span>')
+        + (n.can_aggregate ? ' <span class="pill">agg</span>' : ''),
+      esc(n.operator || '—'),
+      `<span class="mono">${esc(n.model)}</span>`,
+      `<div class="mono trunc" title="${esc(n.endpoint)}">${esc(n.endpoint)}</div>`,
+      n.requests_24h,
+      rate,
+      lat,
+      `<span class="muted">${esc(ago(n.last_heartbeat))}</span>`,
+    ];
+  });
+  document.getElementById('nodes').innerHTML = table(
+    ['Node', 'Operator', 'Model', 'Endpoint', 'Reqs 24h', 'Fail', 'Latency', 'Heartbeat'],
+    rows, 'No nodes registered.');
+}
+
+function renderFailures(fails) {
+  const rows = fails.map(f => [
+    `<span class="muted">${esc(ago(f.at))}</span>`,
+    esc(f.node),
+    `<span class="mono">${esc(f.topology)}</span>`,
+    f.latency_ms ? f.latency_ms + 'ms' : '—',
+  ]);
+  document.getElementById('failures').innerHTML = table(
+    ['When', 'Node', 'Topology', 'Latency'], rows, 'No failed requests. Good.');
+}
+
+function renderBuckets(buckets, limitOn) {
+  if (!limitOn) {
+    document.getElementById('buckets').innerHTML =
+      '<div class="empty">Rate limiting is disabled (RATE_LIMIT_REQUESTS_PER_MINUTE=0).</div>';
+    return;
+  }
+  const rows = buckets.map(b => [
+    `<span class="mono">${esc(b.client)}</span>`,
+    b.throttled ? '<span class="bad">throttled</span>' : 'ok',
+    esc(b.tokens_left),
+    `<span class="muted">${esc(ago(new Date(Date.now() - b.idle_seconds * 1000).toISOString()))}</span>`,
+  ]);
+  document.getElementById('buckets').innerHTML = table(
+    ['Client', 'State', 'Requests left', 'Last seen'], rows,
+    'No clients tracked since this worker started.');
+}
+
+async function refresh() {
+  const stamp = document.getElementById('last-updated');
+  try {
+    const res = await fetch('/admin/state?token=' + encodeURIComponent(TOKEN));
+    if (res.status === 401) { stamp.textContent = 'bad admin token — check the URL'; return; }
+    if (!res.ok) { stamp.textContent = 'update failed (' + res.status + ') — retrying…'; return; }
+    const d = await res.json();
+    document.getElementById('release').textContent = d.release + ' — v' + d.version;
+    renderConfig(d.config);
+    renderStats(d.totals_24h, d.nodes);
+    renderNodes(d.nodes);
+    renderFailures(d.recent_failures);
+    renderBuckets(d.rate_limit_buckets, d.config.rate_limit_per_minute > 0);
+    stamp.textContent = 'updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    stamp.textContent = 'update failed — retrying…';
+  }
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

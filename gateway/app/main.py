@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
 from app import db, embedder
+from app.admin import router as admin_router
 from app.catalogue import router as catalogue_router, seed_catalogue_from_file
 from app.config import settings
 from app.decisions import router as decisions_router
@@ -76,6 +77,7 @@ app.include_router(gateway_router)
 app.include_router(decisions_router)
 app.include_router(catalogue_router)
 app.include_router(demand_router)
+app.include_router(admin_router)
 
 
 @app.get("/health")

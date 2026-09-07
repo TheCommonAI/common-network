@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     # visible from the gateway's own machine.
     allow_loopback_node_endpoints: bool = True
 
+    # Password for the operators view at /admin. Empty (the default) disables
+    # those routes entirely — they 404 exactly as if they did not exist, so a
+    # deployment that never sets this cannot leak operational detail no matter
+    # who guesses the path. Set it to a long random string on any gateway you
+    # actually operate; the page shows failing nodes, error rates and client
+    # rate-limit state, which is not public information the way /dashboard is.
+    admin_token: str = ""
+
     # Where GET /source sends people. AGPL section 13 requires that users
     # interacting with this software over a network are offered its source; a
     # public repository satisfies that for an unmodified deployment. Fork and

@@ -62,7 +62,12 @@ to a public deployment**. On a public gateway:
    compute away to anonymous traffic.
 3. **Keep the database private.** Request embeddings live in the `decisions`
    table; the API doesn't expose them, but a public Postgres would.
-4. **Pin the CLI install to a tag** if you fork this. `install.sh` and the
+4. **Set `ADMIN_TOKEN`** if you want the operators view at `/admin` (failing
+   nodes, error rates, client rate-limit state). Left empty — the default —
+   those routes 404 as though the feature did not exist. Use a long random
+   value (`openssl rand -hex 24`); it is a password, and it appears in the URL
+   when you open the page in a browser, so it will be in your history.
+5. **Pin the CLI install to a tag** if you fork this. `install.sh` and the
    CLI's self-update fetch from `main` by default; `main` is fine while it is
    this repository, but it means whoever controls the repo controls every
    installed machine's CLI. The short install URL (`commonai.com.au/install.sh`)
@@ -99,6 +104,12 @@ to a public deployment**. On a public gateway:
 - **No CORS configuration.** Browsers cannot call the API cross-origin (the
   default is deny), which is the safe direction; the CLI and curl are
   unaffected.
+- **The operators view authenticates with one shared password, in the URL.**
+  `/admin` has no accounts, no sessions and no audit of who looked; anyone
+  with the link has it until you rotate `ADMIN_TOKEN`. Adequate for a page
+  one or two people open on their own machines, which is what it is for —
+  not a control panel to hand around. It is read-only: nothing on it changes
+  the network.
 
 ## Reporting a problem
 
