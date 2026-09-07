@@ -142,7 +142,9 @@ async def main() -> None:
             node("generalist", ["general"], VECTORS["general"], agg.url),
         ]
         scored = score_nodes(nodes, SPANNING)
-        plan = plan_panel(scored, SPANNING)
+        # mode pinned: this suite tests the panel machinery, and the shipped
+        # default is `never` in Alpha (donation platform — no panel by default).
+        plan = plan_panel(scored, SPANNING, mode_override="auto")
 
         print("\nplanning")
         check("composes", plan.compose, True)
@@ -212,7 +214,7 @@ async def main() -> None:
                 score_nodes([node("slow", ["math"], VECTORS["math"], slow.url),
                              node("cgla2", ["legal"], VECTORS["legal"], agg.url),
                              node("gen2", ["general"], VECTORS["general"], agg.url)], SPANNING),
-                SPANNING)
+                SPANNING, mode_override="auto")
             out = await run_panel(slow_plan, BODY)
             check("slow member dropped, fast member kept", "slow" in out, False)
             check("the request still produced an answer", len(out) >= 1, True)

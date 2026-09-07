@@ -7,11 +7,61 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app import compose, db, embedder, upstream
+from app import compose, db, embedder, ratelimit, upstream
 from app.compose import PanelPlan
 from app.config import settings
 from app.router import ScoredNode, best_matched_domain, score_nodes
 from app.verify import VerificationReport, verify
+
+
+# --- Access control ---------------------------------------------------------
+
+_CONTRIBUTOR_GUIDANCE = (
+    "the network answers its contributors. Join a machine first (`common join`), "
+    "then ask from that machine — the token it prints is your key. Operators of "
+    "open/trusted deployments can set REQUIRE_CONTRIBUTION=false."
+)
+
+
+def contributor_token(headers) -> str | None:
+    """The credential that says 'I'm currently donating to this network'.
+
+    Two spellings, on purpose: X-Common-Node-Token (what the CLI sends — it is
+    the same token that authorises re-registration and deregistration), and
+    Authorization: Bearer (what any OpenAI SDK client sends, so existing
+    clients work by putting their node token where the API key would go).
+    """
+    custom = headers.get("x-common-node-token")
+    if custom:
+        return custom.strip()
+    auth = headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip() or None
+    return None
+
+
+async def _require_contributor(request: Request) -> None:
+    """Enforce REQUIRE_CONTRIBUTION: no donated compute for non-donators.
+
+    The check is *registration*, not health: a node whose laptop closed its
+    lid mid-question still belongs to the network, and health is a routing
+    signal, not membership — flapping access on every DHCP blip would make
+    the gate feel broken rather than merely strict. What the token grants is
+    scoped: access only while its own node is registered, and control of that
+    node only (see SECURITY.md).
+    """
+    token = contributor_token(request.headers)
+    if not token:
+        raise HTTPException(status_code=401, detail=_CONTRIBUTOR_GUIDANCE)
+    async with db.pool().acquire() as conn:
+        row = await conn.fetchrow("select 1 from nodes where node_token = $1", token)
+    if row is None:
+        raise HTTPException(
+            status_code=401,
+            detail="this token doesn't match any registered node — the node it "
+                   "belongs to is deregistered (or never was on this gateway). "
+                   + _CONTRIBUTOR_GUIDANCE,
+        )
 
 router = APIRouter()
 
@@ -340,6 +390,20 @@ async def _handle_composed(
 async def chat_completions(request: Request):
     body = await request.json()
     stream = bool(body.get("stream", False))
+
+    # Access control before any work: a request that isn't allowed must not
+    # cost the donors anything, not even the embedding call.
+    if settings.require_contribution:
+        await _require_contributor(request)
+    retry_after = ratelimit.check_rate_limit(request)
+    if retry_after > 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"rate limit — one request every "
+                   f"{60 / max(1, settings.rate_limit_requests_per_minute):.0f}s "
+                   f"sustained. This protects donated hardware from bulk traffic.",
+            headers={"Retry-After": str(max(1, int(retry_after) + 1))},
+        )
 
     nodes = await _fetch_healthy_nodes()
     if not nodes:

@@ -50,19 +50,49 @@ class Settings(BaseSettings):
     # much RAM headroom, so a specialist never swaps and times out.
     assignment_ram_headroom: float = 0.8
 
+    # Whether nodes may register loopback endpoints (http://localhost:11434).
+    # True by default because the seed demo and same-machine development both
+    # use it. A gateway reachable from the internet should set this to false —
+    # see SECURITY.md — so a stranger can't point the network at services only
+    # visible from the gateway's own machine.
+    allow_loopback_node_endpoints: bool = True
+
+    # --- Access control (Alpha: the network answers its contributors) ----
+    #
+    # If true, a request to /v1/chat/completions must carry the node token of
+    # a currently *registered* node — donate a machine (`common join`), then
+    # use the network from that machine. The shipped default is true because
+    # that is the product: donated compute is for donors, not for anonymous
+    # bulk traffic from strangers. Set false only for trusted/open deployments
+    # (a local demo whose seed nodes have no tokens, a lab gateway everyone
+    # already contributes to). See SECURITY.md.
+    require_contribution: bool = True
+
+    # Per-client token bucket on /v1/chat/completions: requests per minute,
+    # 0 disables. A brake on bulk abuse of donated compute — best-effort, not
+    # a security boundary (a client rotating source IPs gets one bucket each;
+    # the contribution gate is the real control). The local .env sets 0 so
+    # `common test` sweeps unimpeded; public deployments keep the default.
+    rate_limit_requests_per_minute: int = 20
+
     # --- Composition (v0.1.1) -------------------------------------------
     #
+    # 'never'  — the Alpha default. v0.1 behaviour exactly: one request, one
+    #            node. Alpha is a model-donation platform — its job is to
+    #            answer from the best donated machine, and to make donating
+    #            easy. Composition stays in the code but off, because compose
+    #            -test has not run against live models: until a non-dominated
+    #            panel has measurably beaten its own best member, the network
+    #            does not claim to be more than the sum of its donations.
     # 'auto'   — compose only where the preconditions from seam-findings.md
     #            hold: the request spans domains, and different nodes are best
-    #            at them. The default, because composing unconditionally is
-    #            precisely what Experiment 2 did, and it lost.
-    # 'never'  — v0.1 behaviour exactly. Also the control arm for any A/B.
+    #            at them. For experiments (what testing/compose-test runs).
     # 'always' — compose whenever two nodes declare two matched domains,
     #            skipping the confidence and single-domain gates (the
     #            domination gate still applies — composing a node with one it
     #            dominates is not a stricter setting, it is a broken one).
     #            For experiments, not for production.
-    compose_mode: str = "auto"
+    compose_mode: str = "never"
 
     # How big a drop-off separates "the domains this request is about" from the
     # rest. Domains are ranked by similarity and the gateway looks for an elbow

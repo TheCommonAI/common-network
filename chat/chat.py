@@ -140,6 +140,19 @@ def self_update() -> None:
     os.execv(sys.executable, [sys.executable, local_path] + sys.argv[1:])
 
 
+def _contributor_headers() -> dict:
+    """The node token of the machine this client runs on, if it has joined
+    (see `common join`). A gateway running REQUIRE_CONTRIBUTION passes a
+    request only while the machine asking is also a machine donating; on open
+    gateways the header is simply ignored."""
+    try:
+        with open(os.path.expanduser("~/.common-network/identity.json")) as f:
+            token = json.load(f).get("node_token")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return {}
+    return {"X-Common-Node-Token": token} if token else {}
+
+
 def stream_chat(gateway: str, messages: list[dict], region: str | None, target_node: str | None) -> tuple[str, str | None, str | None]:
     body = {"model": "auto", "messages": messages, "stream": True}
     headers = {"Content-Type": "application/json"}
@@ -147,6 +160,7 @@ def stream_chat(gateway: str, messages: list[dict], region: str | None, target_n
         headers["X-Common-Region"] = region
     if target_node:
         headers["X-Common-Node"] = target_node
+    headers.update(_contributor_headers())
 
     req = urllib.request.Request(
         f"{gateway}/v1/chat/completions", data=json.dumps(body).encode(), headers=headers, method="POST",
@@ -155,6 +169,11 @@ def stream_chat(gateway: str, messages: list[dict], region: str | None, target_n
         resp = urllib.request.urlopen(req, timeout=180)
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="ignore")
+        if e.code == 401:
+            raise RuntimeError(
+                "401: this gateway answers its contributors — run `common join` on this "
+                "machine first, then chat from it. (" + detail + ")"
+            )
         raise RuntimeError(f"{e.code}: {detail}")
     except urllib.error.URLError as e:
         raise RuntimeError(str(e.reason))

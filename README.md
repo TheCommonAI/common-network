@@ -7,31 +7,41 @@ model as a node, and requests are answered by the best available capability,
 not by a corporate gatekeeper.
 
 Common speaks the OpenAI API. Point any existing OpenAI SDK client at the
-gateway and it works unchanged — except every response tells you exactly
-which machines answered it, and why. The commons should be legible.
+gateway and pass your node token as the API key — every response tells you
+exactly which machines answered it, and why. The commons should be legible.
 Or just use `common` — a terminal client, no API knowledge required:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.sh | sh
+curl -fsSL https://commonai.com.au/install.sh | sh
+common join      # donate a machine: one model, auto-selected, auto-started
 common ask "What's a good way to learn recursion?"
 ```
 
-**v0.1.1 is about composition.** v0.1 sent one request to one node, which made
-the network a load balancer with good manners: it could never answer better
-than its own best machine. This version sends a request that spans domains to
-**several specialists at once**, checks their arithmetic deterministically, and
-has a third model synthesise one answer.
+**This is the Alpha: a model-donation platform.** Anyone can donate a machine
+and a model — a school lab, a spare laptop, a desktop with a spare GPU — and
+the network answers every request from the best available donation. One
+request, one machine, full visibility into which machine answered and why.
+And the network answers its **contributors**: a request must carry the node
+token of a registered node, so donated compute serves donors rather than
+anonymous bulk traffic.
 
 ```
 $ common ask "I'm 8 weeks behind on $340/week rent in SA. What do I owe and
               can my landlord evict me?"
 
-  2 specialists answering in parallel
-     ├─ mathstral-node
-     ├─ cgla-legal-node
-     └─ qwen3-node combining
-     ⚠ 1 of 3 calculations were wrong — recomputed and corrected
+  answered by   cgla-legal-node
+  chosen from   3 nodes, margin 0.21
 ```
+
+**Composition is built, but off by default.** v0.1.1 also contains the next
+step — sending a request that spans domains to **several specialists at once**,
+checking their arithmetic deterministically, and having a third model
+synthesise one answer. That is the mechanism a future version will need to be
+competitive with a frontier model, but it has not been proven yet, so Alpha
+ships with `COMPOSE_MODE=never` and does not claim it. It can be turned on
+per-request with `common ask --compose`, per-gateway with `COMPOSE_MODE=auto`,
+or tested end-to-end with `testing/compose-test/` — see
+["Does it actually answer better?"](#does-it-actually-answer-better) below.
 
 ## Does it actually answer better?
 
@@ -64,17 +74,26 @@ gate on it — not a result.
 
 1. An operator registers a node — an OpenAI-compatible endpoint plus a short
    capability profile and domain tags.
-2. A client sends a standard `POST /v1/chat/completions`.
+2. A client sends a standard `POST /v1/chat/completions`, carrying the token
+   of a node it registered. With `REQUIRE_CONTRIBUTION` on — the default — a
+   request without a registered node's token is refused with 401. OpenAI SDK
+   clients pass the token as the API key; `common` and the chat client pick
+   it up from `~/.common-network/identity.json`, which `common join` writes.
 3. The gateway embeds the request and scores every healthy node.
-4. **It then decides whether to compose:**
+4. **In Alpha, the best node answers.** Forward, fall back to the runner-up
+   once on failure. If the best specialist's match is weak, a confident
+   generalist answers instead.
+5. **If composition has been turned on** (`COMPOSE_MODE=auto`/`always`, or the
+   `X-Common-Compose` header), the gateway first decides whether a panel is
+   worth forming:
    - Does the request span two or more declared domains?
    - Is a *different* node best at each of them?
    - If one node is best at all of them, it is not dominated by anything — route
      to it alone. Composing could only dilute it.
-5. **Single route** → forward, fall back to the runner-up once on failure.
-   **Panel** → ask every member in parallel, verify, aggregate.
-6. Response headers say what happened: `X-Common-Topology`, `X-Common-Panel`,
-   `X-Common-Aggregator`, `X-Common-Checks-Failed`, `X-Common-Compose-Reason`.
+   A panel asks every member in parallel, verifies, and aggregates.
+6. Response headers say what happened: `X-Common-Topology`, `X-Common-Node`,
+   `X-Common-Panel`, `X-Common-Aggregator`, `X-Common-Checks-Failed`,
+   `X-Common-Compose-Reason` — including why a request was *not* composed.
 
 ### Verification
 
@@ -124,6 +143,11 @@ curl http://localhost:8000/v1/chat/completions -i \
   -d '{"model":"auto","messages":[{"role":"user","content":"Explain recursion"}]}'
 ```
 
+The bare curl works locally because the demo `.env` sets
+`REQUIRE_CONTRIBUTION=false` (its seed nodes have no tokens). On a gateway
+running the shipped default, add `-H "X-Common-Node-Token: <what common join
+printed>"` — or pass the token as the API key from any OpenAI SDK client.
+
 Or open **`/dashboard`**.
 
 ### Tests
@@ -138,7 +162,7 @@ suites stub what they need, so there is no reason not to run them.
 ## Contributing a node
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.sh | sh
+curl -fsSL https://commonai.com.au/install.sh | sh
 common join                 # over a Cloudflare tunnel
 common join --lan           # over the local network — no tunnel, nothing exposed
 ```
@@ -167,7 +191,7 @@ everything.
 
 | Endpoint | What it gives you |
 |---|---|
-| `POST /v1/chat/completions` | OpenAI-compatible. `X-Common-Compose: never\|auto\|always` overrides composition per request. |
+| `POST /v1/chat/completions` | OpenAI-compatible. `X-Common-Compose: never\|auto\|always` overrides composition per request. Contribution-gated by default: send a registered node's token (`X-Common-Node-Token`, or the `Authorization: Bearer` API-key slot). |
 | `GET /nodes`, `POST /nodes`, `DELETE /nodes/{id}` | The registry. Registration is permissionless. |
 | `GET /decisions/recent?topology=panel` | The routing log, filterable by topology. |
 | `GET /decisions/composition` | How often each topology runs, and what the verifier caught. |
@@ -208,12 +232,31 @@ precondition v0.1 concluded no available model pair satisfied. Note that
 `testing/compose-test/` is built around SA-law cases and needs this entry back
 before its result means what it is designed to mean.
 
-## Scope (v0.1.1)
+## Security
 
-**In scope:** everything in v0.1, plus parallel multi-specialist composition,
-gated on non-domination; deterministic arithmetic re-derivation and
-cross-specialist disagreement detection; demand-gap and unserved-cluster
-analysis; fleet install planning; LAN joining; graph-overlay catalogue entries.
+Registration is permissionless — that is the thesis — which makes the security
+model worth stating rather than assuming. Using the network is gated on
+contributing to it (`REQUIRE_CONTRIBUTION`, on by default), requests are
+rate-limited per client, node registration requires the node's private token,
+and endpoint URLs are re-validated against cloud-metadata ranges on every
+health pass. What a stranger can and cannot do, what an operator of a public
+gateway should set, and the known limits (`common test` executes model code;
+a node is trusted for identity, not behaviour): see
+[SECURITY.md](SECURITY.md).
+
+## Scope (Alpha)
+
+**What Alpha ships as:** a model-donation platform. Permissionless node
+contribution, contribution-gated access (the network answers its donors),
+per-client rate limiting, legible routing to the best donated machine, health
+checking, demand-gap and unserved-cluster analysis, fleet install planning,
+LAN joining, graph-overlay catalogue entries.
+
+**Built but off by default:** parallel multi-specialist composition, gated on
+non-domination, with deterministic arithmetic re-derivation and cross-specialist
+disagreement detection. It runs only where deliberately enabled
+(`COMPOSE_MODE`, or `X-Common-Compose` per request) until compose-test has
+proven a non-dominated panel beats its own best member against live models.
 
 **Still explicitly out of scope:** no DHT/peer-to-peer/consensus, no token or
 incentive mechanism, no weight merging or Soup of Experts, no sequential

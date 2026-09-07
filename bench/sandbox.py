@@ -4,9 +4,19 @@ Runs in a fresh subprocess (own memory space, own crash domain) with a wall-cloc
 timeout and a resource cap on CPU time / memory. This is process-level isolation,
 not container-level -- it stops a hang or a crash from taking down the bench run,
 but a determined malicious payload could still touch the filesystem or network.
-That's an acceptable bar for scoring completions from known, trusted models in a
-controlled benchmark run. TODO(v0.3): move to a container (e.g. Docker) sandbox
-if this ever runs untrusted, user-submitted code.
+
+Read this against the network Alpha actually is: node registration is
+permissionless, so a node is NOT a known, trusted model. `common test` executes
+completions from whatever nodes are registered, on the machine running the
+test. That is fine for a lab running tests against machines the operator chose;
+it is NOT fine against a gateway full of strangers' nodes. Two guards:
+
+* `--no-exec` scores without executing anything (already exposed on the CLI).
+* Operators should treat `common test` as a local benchmark of their own
+  network, not something to point at an untrusted one.
+
+TODO(v0.3): move to a container (e.g. Docker) sandbox if this ever has to run
+genuinely untrusted code.
 """
 import resource
 import subprocess

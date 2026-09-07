@@ -146,20 +146,33 @@ def die(msg: str, code: int = 1) -> None:
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
 
-def write_identity(gateway: str, name: str, node_id: str, catalogue_id: str | None, domain_tags: list[str] | None) -> None:
+def write_identity(gateway: str, name: str, node_id: str, catalogue_id: str | None, domain_tags: list[str] | None, node_token: str | None = None) -> None:
     """Local record of the most recent node this machine registered -- read by
     `common status` / `common whoami` / `common contrib`. Not a cryptographic
     identity (see COMMON. CLI design doc's local-keypair vision) -- just a
-    name, deliberately simple until that's a considered decision, not a guess."""
+    name, deliberately simple until that's a considered decision, not a guess.
+
+    The node_token is kept here so a re-join can prove it owns the name: the
+    gateway only lets an existing node re-register from whoever holds its
+    token, and after a crash (no clean deregister) the token is the only way
+    back in under the same name."""
     try:
         IDENTITY_PATH.parent.mkdir(parents=True, exist_ok=True)
         IDENTITY_PATH.write_text(json.dumps({
             "gateway": gateway, "name": name, "node_id": node_id,
             "catalogue_id": catalogue_id, "domain_tags": domain_tags,
+            "node_token": node_token,
             "joined_at": time.time(),
         }))
     except OSError:
         pass  # best-effort -- never block joining the network over this
+
+
+def read_identity() -> dict | None:
+    try:
+        return json.loads(IDENTITY_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def clear_identity() -> None:
@@ -853,8 +866,13 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="Catalogue id (e.g. qwen2.5-coder-14b) or raw Ollama model tag. Default: probe hardware and ask the network what it needs most (see --auto, --list-catalogue)")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
-    parser.add_argument("--name", default=f"{socket.gethostname()}-{os.environ.get('USER', 'node')}", help="Unique node name")
-    parser.add_argument("--operator", default=os.environ.get("USER", "friend"), help="Your name")
+    # The name and operator are published to the whole network (`GET /nodes`
+    # is public by design — legibility), so the defaults deliberately avoid
+    # the old pattern of hostname-username, which put a donor's OS username
+    # in a public registry. The random suffix keeps imaged lab machines (which
+    # often share a hostname) from colliding.
+    parser.add_argument("--name", default=f"{socket.gethostname()}-{os.urandom(2).hex()}", help="Node name, published to the network (default: hostname + short random suffix)")
+    parser.add_argument("--operator", default="friend", help="Name shown publicly as this node's operator (default: 'friend')")
     parser.add_argument("--region", default=None, help="Optional region hint, e.g. au-adelaide")
     parser.add_argument("--cost", type=float, default=0, help="Declared cost per 1k tokens (default: 0, it's free)")
     parser.add_argument("--capability", default=None, help="Override the auto-generated capability description")
@@ -940,18 +958,31 @@ def main() -> None:
     }
 
     working(f"registering '{args.name}' with {gateway}...")
+    # If this machine already registered this name before (crashed without a
+    # clean deregister, say), prove ownership so the gateway lets us take the
+    # name back rather than 409-ing it as a stranger's.
+    identity = read_identity() or {}
+    rejoin_token = (identity.get("node_token")
+                    if identity.get("name") == args.name and identity.get("gateway") == gateway
+                    else None)
+    reg_headers = {"X-Common-Node-Token": rejoin_token} if rejoin_token else None
     try:
-        node = http_json("POST", f"{gateway}/nodes", body=payload)
+        node = http_json("POST", f"{gateway}/nodes", body=payload, headers=reg_headers)
     except urllib.error.HTTPError as e:
         tunnel_proc.terminate()
-        die(f"registration failed: {e.code} {e.read().decode()}")
+        detail = e.read().decode(errors="ignore")
+        if e.code == 409:
+            die(f"registration failed: a node named '{args.name}' is already registered and "
+                f"this machine has no token proving it's ours. Pick a different name "
+                f"(--name), or run `common leave` / DELETE the old node from its own machine first.")
+        die(f"registration failed: {e.code} {detail}")
 
     node_id = node["id"]
     node_token = node["node_token"]
     print(f"{GLYPH_DONE} {blue('you are live', bold=True)} · node id: {node_id}")
     print(comment("keep this window open to stay in the network — ctrl+c to leave."))
 
-    write_identity(gateway, args.name, node_id, catalogue_id, domain_tags)
+    write_identity(gateway, args.name, node_id, catalogue_id, domain_tags, node_token)
 
     def deregister_and_stop_tunnel():
         try:
@@ -992,7 +1023,8 @@ def main() -> None:
                 payload["endpoint_url"] = f"{tunnel_url}/v1"
                 print(f"{GLYPH_FORMING} this machine's address changed — re-registering at {blue(tunnel_url)}")
                 try:
-                    node = http_json("POST", f"{gateway}/nodes", body=payload)
+                    node = http_json("POST", f"{gateway}/nodes", body=payload,
+                                     headers={"X-Common-Node-Token": node_token})
                     node_id, node_token = node["id"], node["node_token"]
                 except urllib.error.HTTPError as e:
                     print(f"{GLYPH_FAILED} {red(f'failed to re-register on the new address: {e.code}')}", file=sys.stderr)
@@ -1006,7 +1038,8 @@ def main() -> None:
                 print(f"{GLYPH_DONE} tunnel live at {blue(tunnel_url)}")
                 payload["endpoint_url"] = f"{tunnel_url}/v1"
                 try:
-                    node = http_json("POST", f"{gateway}/nodes", body=payload)
+                    node = http_json("POST", f"{gateway}/nodes", body=payload,
+                                     headers={"X-Common-Node-Token": node_token})
                     node_id = node["id"]
                     node_token = node["node_token"]
                     print(f"{GLYPH_DONE} re-registered '{args.name}' with the new tunnel url.")

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Install the Common Network CLI tools (macOS / Linux).
 #
-#   curl -fsSL https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.sh | sh
+#   curl -fsSL https://commonai.com.au/install.sh | sh
+#
+# (commonai.com.au redirects to this file on GitHub — the repository stays the
+# single source of truth. The long form works too:
+#   curl -fsSL https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.sh | sh )
 #
 # Always installs `common-chat` (talk to the network — needs nothing but
 # Python). Also installs `common-join` (contribute a node) if Ollama is
@@ -118,12 +122,14 @@ if [ -n "$SHELL_RC" ] && ! grep -qs "$BIN_DIR" "$SHELL_RC" 2>/dev/null; then
 fi
 
 echo ""
-echo "Done! Try:"
+echo "Done! Open a new terminal, then try:"
 echo ""
-echo "    common ask \"hello!\""
-echo "    common               # interactive session"
+echo "    common peers         # see the machines on the network"
 if [ "$JOIN_INSTALLED" = "1" ]; then
-  echo "    common join          # contribute a node"
+  echo "    common join          # contribute a machine -- then asking works"
+else
+  echo "    (install Ollama from https://ollama.com/download and re-run this"
+  echo "     installer to contribute a machine, which is also how asking works)"
 fi
 echo ""
 echo "(common-chat / common-join still work directly too, if you're used to them)"

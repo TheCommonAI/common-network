@@ -1,6 +1,10 @@
 # Install the Common Network CLI tools (Windows).
 #
-#   irm https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.ps1 | iex
+#   irm https://commonai.com.au/install.ps1 | iex
+#
+# (commonai.com.au redirects to this file on GitHub — the repository stays the
+# single source of truth. The long form works too:
+#   irm https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.ps1 | iex )
 #
 # Always installs `common-chat` (talk to the network — needs nothing but
 # Python). Also installs `common-join` (contribute a node) if Ollama is
@@ -89,9 +93,11 @@ if ($userPath -notlike "*$BinDir*") {
 Write-Host ""
 Write-Host "Done! Open a new terminal, then try:"
 Write-Host ""
-Write-Host "    common ask `"hello!`""
-Write-Host "    common               # interactive session"
+Write-Host "    common peers         # see the machines on the network"
 if ($joinInstalled) {
-    Write-Host "    common join          # contribute a node"
+    Write-Host "    common join          # contribute a machine -- then asking works"
+} else {
+    Write-Host "    (install Ollama from https://ollama.com/download and re-run this"
+    Write-Host "     installer to contribute a machine, which is also how asking works)"
 }
 Write-Host ""

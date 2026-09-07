@@ -40,7 +40,9 @@ model is hosted on OpenRouter at all. Common runs local Ollama weights, where
 those models do exist — so the experiment is now runnable, and
 `testing/compose-test/` is the instrument for running it. Until it does, this
 module is a well-founded hypothesis with a gate on it, and `COMPOSE_MODE`
-defaults to `auto` so it only fires where the preconditions hold.
+defaults to `never`: Alpha ships as a donation platform — one request, one
+donated machine — and composition runs only where someone deliberately turns
+it on (`auto`/`always`, or the `X-Common-Compose` header per request).
 """
 from __future__ import annotations
 

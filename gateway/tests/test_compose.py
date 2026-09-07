@@ -78,7 +78,10 @@ def node(name: str, tags: list[str], *, aggregate: bool = False, embed_tag: str 
     }
 
 
-def plan_for(nodes: list[dict], req: list[float], mode: str | None = None):
+def plan_for(nodes: list[dict], req: list[float], mode: str = "auto"):
+    # These tests exercise the auto-mode gates, so they pin mode explicitly
+    # rather than riding on the shipped default — which is `never` in Alpha.
+    # The default mode itself is covered by the `never -> refuses` check below.
     return plan_panel(score_nodes(nodes, req), req, mode_override=mode)
 
 
@@ -172,6 +175,12 @@ check("small network still composes", plan.compose, True)
 check("and flags the aggregator as a panel member", plan.aggregator_in_panel, True)
 
 print("\nmode overrides")
+# The shipped default is a product decision, not an implementation detail:
+# Alpha is a donation platform, and composition only runs where someone has
+# deliberately turned it on. If this check fails, flipping it was deliberate —
+# update the READMEs and CHANGELOG with the reason.
+check("shipped default is never (Alpha: donation platform)",
+      settings.compose_mode, "never")
 check("never -> refuses", plan_for(FIVE_LANE, SPANNING, "never").compose, False)
 check("always -> composes a request the gates would decline",
       plan_for(FIVE_LANE, FLAT, "always").compose, True)

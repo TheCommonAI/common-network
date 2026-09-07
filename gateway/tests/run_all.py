@@ -2,14 +2,16 @@
 """Run every gateway test suite. `python tests/run_all.py` from `gateway/`.
 
 No pytest, no database, no network beyond localhost, no embedding model — the
-suites stub what they need. If this passes, the composition gate, the verifier
-and the panel transport are all behaving.
+suites stub what they need. If this passes, the composition gate, the verifier,
+the panel transport, the registry's security checks and the access controls
+are all behaving.
 """
 import subprocess
 import sys
 from pathlib import Path
 
-TESTS = ["test_verify.py", "test_compose.py", "test_panel_flow.py"]
+TESTS = ["test_verify.py", "test_compose.py", "test_panel_flow.py",
+         "test_registry.py", "test_access.py"]
 
 here = Path(__file__).resolve().parent
 failed = []

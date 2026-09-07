@@ -2,12 +2,24 @@ import asyncio
 import os
 
 import httpx
+from fastapi import HTTPException
 
 from app import db
 from app.config import settings
+from app.registry import validate_endpoint_url
 
 
 async def _check_one(client: httpx.AsyncClient, node: dict) -> bool:
+    # Re-validate the endpoint every pass, not just at registration. This
+    # closes the DNS-rebinding window: a hostname that resolved somewhere
+    # legitimate when it registered and resolves at a metadata service now
+    # stops being health-checked green — the gateway never fetches it again,
+    # because an unhealthy node is never routed to.
+    try:
+        validate_endpoint_url(node["endpoint_url"])
+    except HTTPException:
+        return False
+
     url = node["endpoint_url"].rstrip("/") + "/models"
     headers = {}
     api_key_ref = node.get("api_key_ref")

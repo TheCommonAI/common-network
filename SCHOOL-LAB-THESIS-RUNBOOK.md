@@ -87,7 +87,7 @@ OLLAMA_HOST=0.0.0.0:11434 ollama serve
 curl http://<this-machine-ip>:11434/api/tags
 
 # 4. Install the Common CLI
-curl -fsSL https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.sh | sh
+curl -fsSL https://commonai.com.au/install.sh | sh
 ```
 
 If `curl http://<other-ip>:11434/api/tags` fails from a peer, **client isolation is on** — that is the single most common blocker.

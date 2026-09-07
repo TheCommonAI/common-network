@@ -18,11 +18,13 @@ Usage:
     common test                    benchmark every node + routing, log to jsonl
     common help [verb]             help, per verb
 
-A question that spans domains is answered by several specialists at once and
-combined into one reply — `common ask` shows you which machines answered.
-Composition only happens where it can actually help; `--no-compose` forces the
-old single-node behaviour and `-v` explains why a given request wasn't
-composed. See testing/compose-test for whether it is measurably better.
+A question is answered by the best available donated machine — `common ask`
+shows you which machine answered, and why it was chosen. Composition (several
+specialists answering at once, combined into one reply) is built but **off by
+default in Alpha**: the network is a donation platform first and does not claim
+to compose a better answer until testing/compose-test has proven it against
+live models. `--compose` opts a single request in; `-v` explains the routing
+either way.
 
 `common test` sweeps every healthy node with a fixed probe set, measures
 time-to-first-token / total latency / approximate tok-s per node, checks
@@ -246,6 +248,19 @@ def read_identity() -> dict | None:
         return None
 
 
+def contributor_headers() -> dict:
+    """The node token of the node this machine last registered, if any.
+
+    The network answers its contributors (REQUIRE_CONTRIBUTION): a gateway
+    running that policy passes a request only while the machine asking is
+    also a machine donating. Harmless on open gateways, and never sent on
+    direct-to-node requests (a node is a stranger's server; the token is for
+    the gateway that issued it).
+    """
+    token = (read_identity() or {}).get("node_token")
+    return {"X-Common-Node-Token": token} if token else {}
+
+
 # --- Commands ------------------------------------------------------------
 
 def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
@@ -282,6 +297,7 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
         headers["X-Common-Node"] = node_override
     if compose:
         headers["X-Common-Compose"] = compose
+    headers.update(contributor_headers())
 
     req = urllib.request.Request(f"{gateway}/v1/chat/completions", data=json.dumps(body).encode(), headers=headers, method="POST")
     start = time.monotonic()
@@ -291,6 +307,12 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
         detail = e.read().decode(errors="ignore")
         print(red("✗ the network couldn't answer that."), file=sys.stderr)
         print(comment(f"{e.code}: {detail}"), file=sys.stderr)
+        if e.code == 401:
+            print(comment("this gateway answers its contributors — join a machine first:"), file=sys.stderr)
+            print(dim("  → common join            (donate this machine, then ask from it)"), file=sys.stderr)
+            print(dim("  → common ask \"...\" --local  (ask a local Ollama instead)"), file=sys.stderr)
+        if e.code == 429:
+            print(comment("you're asking faster than a contributor's machine can serve — wait a moment and retry."), file=sys.stderr)
         sys.exit(1)
     except urllib.error.URLError as e:
         print(red("✗ can't reach the network."), file=sys.stderr)
@@ -880,6 +902,10 @@ def _probe_once(gateway: str, prompt: str, node: str | None = None, timeout: flo
         # which is what we want -- a failure here must surface as that node's
         # failure, not get silently masked by the runner-up.
         headers["X-Common-Node"] = node
+    if not direct_url:
+        # Gateway requests carry this machine's contributor token (never sent
+        # straight to a node -- see contributor_headers).
+        headers.update(contributor_headers())
 
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
     start = time.monotonic()
@@ -1703,6 +1729,7 @@ def _ask_thesis(gateway: str, prompt: str, *, compose: str | None = None,
         headers["X-Common-Compose"] = compose
     if node:
         headers["X-Common-Node"] = node
+    headers.update(contributor_headers())
 
     req = urllib.request.Request(f"{gateway}/v1/chat/completions",
                                  data=json.dumps(body).encode(), headers=headers, method="POST")
@@ -2370,11 +2397,12 @@ def main() -> None:
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--no-update", action="store_true", default=bool(os.environ.get("COMMON_NO_UPDATE")))
-    # Composition control. Default (unset) leaves the gateway to decide per
-    # request; --no-compose forces v0.1 single-node behaviour, which is the
-    # control arm for any comparison you want to run yourself.
-    parser.add_argument("--no-compose", action="store_true", help="ask: force a single node, never a panel")
-    parser.add_argument("--compose", action="store_true", help="ask: compose wherever structurally possible")
+    # Composition control. Default (unset) sends no header, and the gateway's
+    # shipped default is `never` (Alpha: donation platform). --compose opts a
+    # request in; --no-compose makes the default explicit — the control arm
+    # for any comparison you want to run yourself.
+    parser.add_argument("--no-compose", action="store_true", help="ask: force a single node, never a panel (the Alpha default)")
+    parser.add_argument("--compose", action="store_true", help="ask: compose wherever structurally possible (off by default in Alpha)")
     # `common recommend` only
     parser.add_argument("--machines", type=int, default=1, help="recommend: plan an install across N machines")
     parser.add_argument("--ram", type=float, default=8.0, help="recommend: RAM per machine in GB (default 8)")
