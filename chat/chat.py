@@ -3,6 +3,10 @@
 
 The Common Network Alpha (v0.1.2).
 
+Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
+https://github.com/TheCommonAI/common-network. This program comes with
+ABSOLUTELY NO WARRANTY.
+
 Usage:
     common-chat                    # interactive chat
     common-chat "your question"    # one-shot

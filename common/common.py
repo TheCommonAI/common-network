@@ -3,6 +3,10 @@
 
 The Common Network Alpha (v0.1.2).
 
+Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
+https://github.com/TheCommonAI/common-network. This program comes with
+ABSOLUTELY NO WARRANTY.
+
 Usage:
     common                         open the interactive session
     common ask "<prompt>"          route one question through the network
@@ -2432,6 +2436,7 @@ def main() -> None:
     if args.version:
         print_wordmark()
         print(dim(f"  {RELEASE} — v{VERSION}"))
+        print(dim("  Copyright (C) 2026 Common AI Inc — AGPL-3.0, no warranty"))
         return
 
     if args.help or args.verb == "help":

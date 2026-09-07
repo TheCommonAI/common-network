@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     # visible from the gateway's own machine.
     allow_loopback_node_endpoints: bool = True
 
+    # Where GET /source sends people. AGPL section 13 requires that users
+    # interacting with this software over a network are offered its source; a
+    # public repository satisfies that for an unmodified deployment. Fork and
+    # run it as a service, and this must point at YOUR source -- what the
+    # licence obliges you to offer is the code you are actually running.
+    source_url: str = "https://github.com/TheCommonAI/common-network"
+
     # --- Access control (Alpha: the network answers its contributors) ----
     #
     # If true, a request to /v1/chat/completions must carry the node token of

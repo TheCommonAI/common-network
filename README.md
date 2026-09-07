@@ -333,7 +333,14 @@ theory would claim otherwise.
 
 ## Licence
 
-AGPL-3.0. Chosen deliberately: copyleft means anyone running a modified version
-of Common as a network service must release their changes back to the commons —
+Copyright (C) 2026 Common AI Inc. Licensed under [AGPL-3.0](LICENSE).
+
+Chosen deliberately: copyleft means anyone running a modified version of Common
+as a network service must release their changes back to the commons —
 structurally preventing this from being taken closed, in keeping with the
 project's anti-enclosure thesis.
+
+That obligation is section 13, and this gateway honours it: **`GET /source`**
+returns the repository a running instance was built from. If you fork Common
+and run it as a service, set `SOURCE_URL` to your own repository — your users
+are entitled to the code you are actually running, not to ours.

@@ -1,0 +1,30 @@
+Common Network
+Copyright (C) 2026 Common AI Inc
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+The full licence text is in LICENSE.
+
+--- Section 13: source for network users ---
+
+If you run a modified version of this software as a network service, the
+AGPL requires you to offer its users the source of your modified version.
+The gateway serves this at GET /source, which points at the repository the
+running instance was built from. Keep that endpoint accurate if you fork.
+
+--- Third-party components ---
+
+This repository vendors no third-party source. Dependencies are declared in
+gateway/requirements.txt and fetched at install time under their own
+licences.

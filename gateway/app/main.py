@@ -83,6 +83,26 @@ async def health():
     return {"status": "ok"}
 
 
+# AGPL section 13: users interacting with this software over a network must be
+# offered its source. A public repository URL satisfies that for an unmodified
+# deployment. If you fork and run this as a service, point SOURCE_URL at *your*
+# source -- leaving it at ours would be a licence violation, not a courtesy
+# problem, because your users would be offered code you are not running.
+@app.get("/source")
+async def source():
+    return {
+        "source": settings.source_url,
+        "licence": "AGPL-3.0",
+        "copyright": "Copyright (C) 2026 Common AI Inc",
+        "version": app.version,
+        "note": (
+            "AGPL-3.0 section 13: if you run a modified version of this "
+            "software as a network service, you must offer its users your "
+            "modified source. Set SOURCE_URL to your own repository."
+        ),
+    }
+
+
 DASHBOARD_PATH = Path(__file__).parent / "static" / "dashboard.html"
 
 
