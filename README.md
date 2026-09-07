@@ -344,3 +344,7 @@ That obligation is section 13, and this gateway honours it: **`GET /source`**
 returns the repository a running instance was built from. If you fork Common
 and run it as a service, set `SOURCE_URL` to your own repository — your users
 are entitled to the code you are actually running, not to ours.
+
+The **name** is not covered by the AGPL. Fork the code freely; give your fork
+its own name. See [TRADEMARK.md](TRADEMARK.md) — it is short, and permissive
+about everything except calling a modified version "Common".
