@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """COMMON. — the commons, belonging to everyone and no one.
 
+The Common Network Alpha (v0.1.2).
+
 Usage:
     common                         open the interactive session
     common ask "<prompt>"          route one question through the network
@@ -81,6 +83,8 @@ except ImportError:  # pragma: no cover - Windows
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
+VERSION = "0.1.2"
+RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/common/common.py"
@@ -2311,6 +2315,7 @@ def build_repl_help() -> str:
 def interactive_session(gateway: str, args: argparse.Namespace) -> None:
     print_banner_box("the commons. belonging to everyone and no one.")
     print()
+    print(dim(f"  {RELEASE} — v{VERSION}"))
     print(dim("you're in the interactive session. type a question, or a /command."))
     print(build_repl_help())
     print()
@@ -2426,6 +2431,7 @@ def main() -> None:
 
     if args.version:
         print_wordmark()
+        print(dim(f"  {RELEASE} — v{VERSION}"))
         return
 
     if args.help or args.verb == "help":

@@ -1,5 +1,9 @@
 # Common Network
 
+![Common.](assets/common-banner.png)
+
+**The Common Network Alpha — v0.1.2**
+
 The AI intelligence layer is being enclosed by a handful of corporations — the
 same way English common land was enclosed and privatised. **Common** is the
 counter-enclosure: a permissionless network where anyone can contribute a

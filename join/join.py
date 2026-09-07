@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Join the Common Network as a node operator.
 
+The Common Network Alpha (v0.1.2).
+
 Runs your local Ollama as a contributing node: opens a Cloudflare quick
 tunnel to your local Ollama, registers it with the shared gateway, and
 keeps running until you press Ctrl+C (at which point it deregisters
@@ -68,6 +70,8 @@ TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
+VERSION = "0.1.2"
+RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
 

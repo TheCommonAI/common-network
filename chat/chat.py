@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Chat with the Common Network from your terminal.
 
+The Common Network Alpha (v0.1.2).
+
 Usage:
     common-chat                    # interactive chat
     common-chat "your question"    # one-shot
@@ -22,6 +24,8 @@ import time
 import urllib.error
 import urllib.request
 
+VERSION = "0.1.2"
+RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/chat/chat.py"

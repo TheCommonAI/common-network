@@ -1,4 +1,4 @@
-# Security notes
+# Security notes — The Common Network Alpha (v0.1.2)
 
 Common is **permissionless by design**: anyone can register a node, and
 anyone can send requests. That is the thesis — but it means the security

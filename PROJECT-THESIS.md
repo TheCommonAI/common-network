@@ -1,5 +1,7 @@
 # Common Network — project thesis and what we have built
 
+**The Common Network Alpha — v0.1.2**
+
 This document is the single-page explanation of the project, the bet it is built around, and the current state of the system. It is written for anyone who needs to understand what is being tested and why, without reading the whole repository.
 
 ---
@@ -33,7 +35,7 @@ The findings say this directly: *"This is not evidence that mixture-of-experts f
 
 # 3. What we built
 
-## 3.1 Common Network v0.1.1 — composition in the gateway
+## 3.1 The Common Network Alpha (v0.1.2) — composition in the gateway
 
 The gateway is no longer a load balancer. For requests that span domains, it:
 
@@ -93,7 +95,7 @@ The only likely blocker on a school LAN is **client/AP isolation** — machines 
 
 - `SCHOOL-NETWORK-REQUIREMENTS.md` — the IT handout.
 - `SCHOOL-LAB-THESIS-RUNBOOK.md` — the full operational checklist.
-- `CHANGELOG-v0.1.1.md` — detailed technical changes.
+- `CHANGELOG-v0.1.2.md` — detailed technical changes.
 - `testing/seam-findings.md` — the v0.1 experiments and diagnosis.
 
 ---
@@ -156,9 +158,9 @@ The report also checks **refusal loss**: if the panel answers out-of-scope quest
 
 # 6. Current honest status
 
-- **The network runs.** v0.1.1 has been validated: the gateway starts, composition forms panels, verification runs, and degradation works.
+- **The network runs.** v0.1.2 has been validated: the gateway starts, composition forms panels, verification runs, and degradation works.
 - **The thesis test instrument exists and is self-tested.** `common test --thesis` has been run against mock nodes end-to-end.
 - **It has not been run against live models yet.** That is the school-lab run.
-- **No claim is being made that composition works.** v0.1.1 is a hypothesis-testing machine, not a product claiming victory.
+- **No claim is being made that composition works.** v0.1.2 is a hypothesis-testing machine, not a product claiming victory.
 
 The next step is the live run. This repository is ready for it.

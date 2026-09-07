@@ -61,13 +61,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Common Network Gateway",
+    title="Common Network Gateway — The Common Network Alpha (v0.1.2)",
     description=(
         "Permissionless, transparent routing and composition across contributed AI nodes. "
         "A request that spans domains is answered by a panel of specialists in parallel, "
         "verified deterministically, and synthesised into one reply."
     ),
-    version="0.1.1",
+    version="0.1.2",
     lifespan=lifespan,
 )
 
