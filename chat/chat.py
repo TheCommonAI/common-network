@@ -223,8 +223,9 @@ def print_footer(node: str | None, score: str | None, latency_ms: int) -> None:
     print()
     print(dim("─" * 63))
     print(dim(f"served by   {node or 'unknown'}{score_str}{marker}"))
-    retention = "embedding retained for demand analytics · no raw text stored"
-    print(dim(f"routed in   {latency_ms}ms   ·   {retention}   ·   no one owns this"))
+    # Just the routing facts -- what is and isn't stored is a standing property
+    # of the network, not news about this request. See `common privacy`.
+    print(dim(f"routed in   {latency_ms}ms"))
 
 
 def one_shot(gateway: str, question: str, region: str | None, target_node: str | None) -> None:

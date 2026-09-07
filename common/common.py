@@ -20,6 +20,7 @@ Usage:
     common peers                   connected nodes and their coverage
     common contrib                 your contribution ledger
     common whoami                  your node identity
+    common privacy                 what the network keeps, and what it doesn't
     common config                  settings (all local, all editable)
     common test                    benchmark every node + routing, log to jsonl
     common help [verb]             help, per verb
@@ -463,8 +464,10 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
             print(dim(f"composed by   {n} specialists + {aggregator}"))
         else:
             print(dim(f"served by   {node_name}{model_bit}"))
-        retention = "embedding retained for demand analytics · no raw text stored"
-        print(dim(f"routed in   {latency_ms}ms   ·   {retention}   ·   no one owns this"))
+        # Just the routing facts. What is and isn't stored is a standing
+        # property of the network, not news about this request -- it lives in
+        # `common privacy` and the README, where it can be read once.
+        print(dim(f"routed in   {latency_ms}ms"))
         if verbose:
             print(dim(f"  score: {score}"))
             if compose_reason:
@@ -686,6 +689,44 @@ def cmd_status(gateway: str, as_json: bool) -> None:
         print(dim(f"domain tags     {', '.join(node.get('domain_tags') or []) or 'untagged'}"))
     else:
         print(red("this node is no longer registered (deregistered or replaced)."))
+
+
+def cmd_privacy(as_json: bool) -> None:
+    """What the network keeps. Said once, on request, instead of after
+    every answer -- a notice repeated forever stops being read."""
+    facts = {
+        "request_text": "not stored",
+        "request_embedding": "stored, for demand analytics (which domains are underserved)",
+        "recorded_per_request": ["which node answered", "score", "latency", "success"],
+        "visible_publicly": ["node names", "operators", "endpoint URLs", "models"],
+        "node_operators_see": "the text of requests routed to their machine",
+        "licence": "AGPL-3.0",
+    }
+    if as_json:
+        print(json.dumps(facts, indent=2))
+        return
+    print()
+    print(paper("What Common keeps", bold=True))
+    print()
+    print("  " + dim("your question") + "        not stored")
+    print("  " + dim("its embedding") + "        stored — a vector, used to find")
+    print("  " + " " * 21 + "domains the network is short of")
+    print("  " + dim("per request") + "          which node answered, score,")
+    print("  " + " " * 21 + "latency, whether it worked")
+    print()
+    print(dim("  The registry is public by design: node names, operators,"))
+    print(dim("  endpoint URLs and models are visible to anyone. That is the"))
+    print(dim("  point — you can see which machine answered you."))
+    print()
+    print(paper("What this does not protect you from", bold=True))
+    print()
+    print(dim("  Your question is sent to someone else's computer, and its"))
+    print(dim("  operator can read it. Donated machines are run by strangers."))
+    print(dim("  Treat the network like a public place: don't send anything"))
+    print(dim("  you wouldn't want a stranger to read."))
+    print()
+    print(dim("  Full detail: SECURITY.md in the repository."))
+    print()
 
 
 def cmd_whoami(as_json: bool) -> None:
@@ -2312,7 +2353,7 @@ def cmd_help(verb: str | None) -> None:
 def build_repl_help() -> str:
     return dim(
         "/ask (implicit: just type)  /join  /serve  /leave  /status\n"
-        "/demand  /recommend  /peers  /contrib  /whoami  /config  /test  /model  /local  /help  /exit"
+        "/demand  /recommend  /peers  /contrib  /whoami  /privacy  /config  /test  /model  /local  /help  /exit"
     )
 
 
@@ -2356,6 +2397,9 @@ def interactive_session(gateway: str, args: argparse.Namespace) -> None:
             continue
         if line == "/contrib":
             cmd_contrib(gateway, False)
+            continue
+        if line == "/privacy":
+            cmd_privacy(False)
             continue
         if line == "/whoami":
             cmd_whoami(False)
@@ -2467,6 +2511,8 @@ def main() -> None:
         cmd_status(gateway, args.json)
     elif args.verb == "whoami":
         cmd_whoami(args.json)
+    elif args.verb == "privacy":
+        cmd_privacy(args.json)
     elif args.verb == "contrib":
         cmd_contrib(gateway, args.json)
     elif args.verb == "config":

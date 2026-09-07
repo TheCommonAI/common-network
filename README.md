@@ -55,6 +55,7 @@ credential; you don't have to handle it yourself.
 common peers          # who else is on the network right now
 common status         # your node: health, position, requests served
 common recommend      # what specialist the network is short of
+common privacy        # what the network keeps, and what it doesn't
 common leave          # take your machine off the network
 common help           # everything else
 ```
