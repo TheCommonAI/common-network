@@ -55,8 +55,8 @@ try:
 
     print("\nconfigured: only the right password gets in")
     settings.admin_token = "s3cret-operators-token"
-    check("correct token in query param (browser)",
-          status_of(FakeRequest(query={"token": "s3cret-operators-token"})), 200)
+    check("even a correct token in the URL is rejected",
+          status_of(FakeRequest(query={"token": "s3cret-operators-token"})), 401)
     check("correct token in header (curl/scripts)",
           status_of(FakeRequest(headers={"x-common-admin-token": "s3cret-operators-token"})), 200)
     check("wrong token -> 401",

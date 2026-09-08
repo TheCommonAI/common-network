@@ -32,32 +32,26 @@ ADMIN_PATH = Path(__file__).parent / "static" / "admin.html"
 
 
 def _require_admin(request: Request) -> None:
-    """404 when unconfigured, 401 when the password is wrong.
-
-    The password may arrive as a header (curl, scripts) or a query parameter
-    (the browser opening the page). A query parameter puts it in the URL bar
-    and in any proxy log — acceptable for a page an operator opens on their
-    own machine, and the alternative is a login form with session cookies,
-    which is a lot of machinery for a status page.
-    """
+    """Header-only authentication. URLs are never a credential source."""
     if not settings.admin_token:
         raise HTTPException(status_code=404, detail="Not Found")
 
-    supplied = request.headers.get("x-common-admin-token") or \
-        request.query_params.get("token") or ""
-    if not secrets.compare_digest(supplied, settings.admin_token):
+    supplied = request.headers.get("x-common-admin-token") or ""
+    if not secrets.compare_digest(supplied.encode(), settings.admin_token.encode()):
         raise HTTPException(status_code=401, detail="bad or missing admin token")
 
 
 @router.get("/admin")
 async def admin_page(request: Request):
-    _require_admin(request)
-    return FileResponse(ADMIN_PATH)
+    if not settings.admin_token:
+        raise HTTPException(404, 'Not Found')
+    return FileResponse(ADMIN_PATH, headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
 
 
 @router.get("/admin/state")
 async def admin_state(request: Request):
     """Everything the page renders, in one round trip."""
+    ratelimit.check_action(request, 'admin', 30)
     _require_admin(request)
 
     async with db.pool().acquire() as conn:

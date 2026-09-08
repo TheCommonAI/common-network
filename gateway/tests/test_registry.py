@@ -77,8 +77,12 @@ finally:
     del original
 
 print("\nreal nodes are unaffected")
-accepted("private LAN address (school lab --lan)", "http://192.168.1.42:11434/v1")
-accepted("public IP literal", "http://8.8.8.8:11434/v1")
+rejected("private LAN blocked by default", "http://192.168.1.42:11434/v1")
+settings.allowed_node_cidrs = '192.168.1.0/24'
+accepted("explicit trusted LAN subnet", "http://192.168.1.42:11434/v1")
+settings.allowed_node_cidrs = ''
+rejected("plaintext public endpoint", "http://8.8.8.8:11434/v1")
+accepted("public TLS endpoint", "https://8.8.8.8/v1")
 
 # Hostname path, stubbed so the suite needs no DNS: a public tunnel/API
 # hostname resolving to a public address is a legitimate node.

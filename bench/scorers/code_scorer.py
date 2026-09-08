@@ -22,7 +22,7 @@ def extract_code(model_output: str, entry_point: str) -> str:
     return text
 
 
-def score(item: dict, model_output: str) -> tuple[bool, str]:
+def score(item: dict, model_output: str, *, allow_unsafe_exec: bool = False) -> tuple[bool, str]:
     """item needs prompt, entry_point, test. Returns (passed, error_detail)."""
     completion = extract_code(model_output, item["entry_point"])
 
@@ -34,4 +34,4 @@ def score(item: dict, model_output: str) -> tuple[bool, str]:
         program = item["prompt"] + completion
 
     full_source = program + "\n\n" + item["test"] + f"\n\ncheck({item['entry_point']})\n"
-    return run_program(full_source)
+    return run_program(full_source, allow_unsafe_exec=allow_unsafe_exec)

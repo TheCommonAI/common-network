@@ -52,3 +52,11 @@ common-chat --gateway https://your-gateway.example   # talk to a different netwo
 common-chat --region au-adelaide                      # hint your region for routing
 common-chat --no-update                                # skip the self-update check
 ```
+
+## Security changes
+
+Updates require deliberately re-running the installer; automatic source execution
+is off. Worker endpoints and detailed request history are private by default.
+`common contrib` uses authenticated personal totals; `common demand` uses delayed
+aggregates. Benchmark execution is disabled unless `--allow-unsafe-exec` is
+explicitly passed in a disposable isolated environment. See [SECURITY.md](../SECURITY.md).

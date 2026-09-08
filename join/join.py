@@ -87,6 +87,42 @@ TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
+
+# Kept self-contained: all three CLI scripts can be installed independently.
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        sensitive = {'authorization', 'x-common-node-token', 'x-common-admin-token', 'cookie'}
+        if req.data is not None or any(k.lower() in sensitive for k in req.headers):
+            raise urllib.error.HTTPError(req.full_url, code, 'credential-bearing redirects are refused', headers, fp)
+        if not newurl.startswith('https://'):
+            raise urllib.error.HTTPError(req.full_url, code, 'unsafe redirect is refused', headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def safe_urlopen(req, timeout=30):
+    from urllib.parse import urlsplit
+    import ipaddress
+    url = req.full_url if isinstance(req, urllib.request.Request) else req
+    p = urlsplit(url)
+    if p.username or p.password or not p.hostname or p.scheme not in {'http', 'https'}:
+        raise urllib.error.URLError('use an HTTP(S) URL without embedded credentials')
+    if p.scheme == 'http':
+        try:
+            ip = ipaddress.ip_address(p.hostname)
+            local = ip.is_loopback or ip.is_private
+        except ValueError:
+            local = p.hostname == 'localhost'
+        if not local:
+            raise urllib.error.URLError('internet gateways require HTTPS; use a private IP for trusted LAN HTTP')
+    return urllib.request.build_opener(_SafeRedirect()).open(req, timeout=timeout)
+
+
+def safe_text(value):
+    return ''.join(c for c in str(value) if (c in '\n\t' or ord(c) >= 32)
+                   and not 127 <= ord(c) <= 159 and not 0x202a <= ord(c) <= 0x202e
+                   and not 0x2066 <= ord(c) <= 0x2069)
+
+
 VERSION = "0.1.2"
 RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
@@ -178,16 +214,25 @@ def write_identity(gateway: str, name: str, node_id: str, catalogue_id: str | No
     gateway only lets an existing node re-register from whoever holds its
     token, and after a crash (no clean deregister) the token is the only way
     back in under the same name."""
+    import tempfile
+    IDENTITY_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != 'nt':
+        IDENTITY_PATH.parent.chmod(0o700)
+    payload = json.dumps({
+        'gateway': gateway, 'name': name, 'node_id': node_id,
+        'catalogue_id': catalogue_id, 'domain_tags': domain_tags,
+        'node_token': node_token, 'joined_at': time.time(),
+    })
+    fd, temporary = tempfile.mkstemp(dir=IDENTITY_PATH.parent, prefix='.identity-')
     try:
-        IDENTITY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        IDENTITY_PATH.write_text(json.dumps({
-            "gateway": gateway, "name": name, "node_id": node_id,
-            "catalogue_id": catalogue_id, "domain_tags": domain_tags,
-            "node_token": node_token,
-            "joined_at": time.time(),
-        }))
-    except OSError:
-        pass  # best-effort -- never block joining the network over this
+        with os.fdopen(fd, 'w') as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, IDENTITY_PATH)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def read_identity() -> dict | None:
@@ -209,7 +254,7 @@ def http_json(method: str, url: str, body: dict | None = None, headers: dict | N
     req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
     if data is not None:
         req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with safe_urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -217,9 +262,12 @@ UPDATE_CHECK_INTERVAL_SECONDS = 1800  # re-check every 30 min while a node sits 
 
 
 def fetch_update() -> bytes | None:
+    if os.environ.get('COMMON_ALLOW_UNVERIFIED_UPDATES') != '1':
+        return None
+    print('Warning: explicitly enabled unverified source updates can execute repository code.', file=sys.stderr)
     """Return the latest join.py source from GitHub if it differs from the local copy, else None."""
     try:
-        with urllib.request.urlopen(UPDATE_URL, timeout=5) as resp:
+        with safe_urlopen(UPDATE_URL, timeout=5) as resp:
             remote = resp.read()
     except urllib.error.HTTPError as e:
         # See the matching note in common/common.py. Offline is normal and
@@ -257,7 +305,7 @@ def update_worker_alongside() -> None:
     """
     worker_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
     try:
-        with urllib.request.urlopen(WORKER_UPDATE_URL, timeout=5) as resp:
+        with safe_urlopen(WORKER_UPDATE_URL, timeout=5) as resp:
             remote = resp.read()
         if not remote.strip():
             return
@@ -886,7 +934,7 @@ def remove_linux_service() -> None:
 def install_windows_service(argv: list[str]) -> None:
     cmd_str = " ".join(f'"{a}"' if " " in a else a for a in argv)
     subprocess.run([
-        "schtasks", "/create", "/f", "/sc", "onlogon", "/rl", "highest",
+        "schtasks", "/create", "/f", "/sc", "onlogon", "/rl", "limited",
         "/tn", SCHTASKS_NAME, "/tr", cmd_str,
     ], check=True)
     subprocess.run(["schtasks", "/run", "/tn", SCHTASKS_NAME], check=True)
@@ -939,7 +987,7 @@ def main() -> None:
     # the old pattern of hostname-username, which put a donor's OS username
     # in a public registry. The random suffix keeps imaged lab machines (which
     # often share a hostname) from colliding.
-    parser.add_argument("--name", default=f"{socket.gethostname()}-{os.urandom(2).hex()}", help="Node name, published to the network (default: hostname + short random suffix)")
+    parser.add_argument("--name", default="node-" + secrets.token_hex(4), help="Node name, published to the network (default: random node alias)")
     parser.add_argument("--operator", default="friend", help="Name shown publicly as this node's operator (default: 'friend')")
     parser.add_argument("--region", default=None, help="Optional region hint, e.g. au-adelaide")
     parser.add_argument("--cost", type=float, default=0, help="Declared cost per 1k tokens (default: 0, it's free)")
@@ -991,7 +1039,7 @@ def main() -> None:
     # itself never has to be reachable from outside, on either path.
     worker_token = secrets.token_urlsafe(24)
     try:
-        worker.serve(worker_token, ollama_tag, port=WORKER_PORT)
+        worker.serve(worker_token, ollama_tag, port=WORKER_PORT, host="0.0.0.0" if args.lan else "127.0.0.1")
     except OSError as e:
         die_with_fix(
             f"couldn't start the Common worker on port {WORKER_PORT}: {e}",
@@ -1074,14 +1122,23 @@ def main() -> None:
     print(f"{GLYPH_DONE} {blue('you are live', bold=True)} · node id: {node_id}")
     print(comment("keep this window open to stay in the network — ctrl+c to leave."))
 
-    write_identity(gateway, args.name, node_id, catalogue_id, domain_tags, node_token)
+    try:
+        write_identity(gateway, args.name, node_id, catalogue_id, domain_tags, node_token)
+    except OSError:
+        try:
+            http_json('DELETE', f'{gateway}/nodes/{node_id}', headers={'X-Common-Node-Token': node_token})
+        except Exception:
+            pass
+        if tunnel_proc is not None:
+            tunnel_proc.terminate()
+        die('Could not securely save your node identity. Check directory permissions before joining again.')
 
     def deregister_and_stop_tunnel():
         try:
             req = urllib.request.Request(
                 f"{gateway}/nodes/{node_id}", method="DELETE", headers={"X-Common-Node-Token": node_token},
             )
-            urllib.request.urlopen(req, timeout=5)
+            safe_urlopen(req, timeout=5)
         except urllib.error.URLError:
             pass
         clear_identity()

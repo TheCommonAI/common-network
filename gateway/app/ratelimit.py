@@ -1,62 +1,75 @@
-"""Per-client request limiting on /v1/chat/completions.
+"""Bounded process-local buckets. Authenticated requests use verified credentials.
 
-A brake on bulk abuse of donated compute, not a security boundary: a client
-that rotates source addresses gets a fresh bucket for each. The contribution
-gate (`REQUIRE_CONTRIBUTION`) is the real control; this exists so a lone
-contributor's laptop doesn't get melted by one script in a loop.
-
-Token bucket, in-process, no external state:
-  * capacity = the whole per-minute allowance (a burst up front, then a
-    steady drip) — a human asks a question and reads the answer; a script
-    hammers, and after the burst it's throttled to the drip rate.
-  * keyed by client IP, from X-Forwarded-For when a proxy is in front
-    (Railway) and the socket address otherwise. Trusting XFF lets a client
-    name a fake IP and get a fresh bucket per request — accepted deliberately,
-    because the alternative (ignoring XFF) gives the *entire internet* one
-    shared bucket behind a proxy, which is worse and silent.
+Run one gateway process for these quotas; multiple processes need shared state.
+Forwarded addresses are accepted only from explicitly trusted proxy CIDRs.
 """
-from __future__ import annotations
-
+import hashlib
+import ipaddress
+import secrets
 import time
-
 from app.config import settings
 
-# key -> (tokens, last_refill_monotonic)
 _buckets: dict[str, tuple[float, float]] = {}
+_salt = secrets.token_bytes(32)
 
 
-def client_key(headers, client_host: str | None) -> str:
-    xff = headers.get("x-forwarded-for")
-    if xff:
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
-    return client_host or "unknown"
+def fingerprint(value):
+    return hashlib.blake2b(value.encode(), key=_salt, digest_size=16).hexdigest()
 
 
-def _check(key: str, now: float) -> float:
-    """One token-bucket step. Returns 0 if allowed, else seconds to wait."""
-    rate = settings.rate_limit_requests_per_minute
+def client_key(headers, client_host):
+    peer = client_host or 'unknown'
+    networks = [ipaddress.ip_network(c.strip()) for c in settings.trusted_proxy_cidrs.split(',') if c.strip()]
+    def trusted(value):
+        try:
+            return any(ipaddress.ip_address(value) in n for n in networks)
+        except ValueError:
+            return False
+    if not trusted(peer):
+        return peer
+    chain = [s.strip() for s in headers.get('x-forwarded-for', '').split(',') if s.strip()]
+    for value in reversed(chain):
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            return peer
+        peer = value
+        if not trusted(peer):
+            break
+    return peer
+
+
+def _check(key, now, rate=None):
+    rate = settings.rate_limit_requests_per_minute if rate is None else rate
     if rate <= 0:
         return 0.0
+    # Expire inactive buckets and bound memory even under many forged identities.
+    if len(_buckets) >= 4096:
+        for k, (_, last) in list(_buckets.items()):
+            if now - last > 120:
+                _buckets.pop(k, None)
+        if key not in _buckets and len(_buckets) >= 4096:
+            return 60.0
     capacity = float(rate)
-    refill_per_second = rate / 60.0
-
     tokens, last = _buckets.get(key, (capacity, now))
-    # Refill elapsed allowance, capped at one full burst.
-    tokens = min(capacity, tokens + max(0.0, now - last) * refill_per_second)
-
-    if tokens < 1.0:
+    tokens = min(capacity, tokens + max(0.0, now-last) * rate / 60)
+    if tokens < 1 - 1e-9:
         _buckets[key] = (tokens, now)
-        return (1.0 - tokens) / refill_per_second
-    _buckets[key] = (tokens - 1.0, now)
+        return (1-tokens) * 60 / rate
+    _buckets[key] = (max(0.0, tokens-1), now)
     return 0.0
 
 
-def check_rate_limit(request, now: float | None = None) -> float:
-    """Consume one request slot for this client. Returns 0.0 if allowed,
-    else the number of seconds until a slot is available (for Retry-After).
-    """
-    key = client_key(request.headers,
-                     request.client.host if request.client else None)
-    return _check(key, now if now is not None else time.monotonic())
+def check_rate_limit(request, now=None):
+    verified = getattr(getattr(request, 'state', None), 'verified_token', None)
+    key = 'member:' + fingerprint(verified) if verified else 'ip:' + fingerprint(
+        client_key(request.headers, request.client.host if request.client else None))
+    return _check(key, time.monotonic() if now is None else now)
+
+
+def check_action(request, action, rate):
+    from fastapi import HTTPException
+    key = action + ':' + fingerprint(client_key(request.headers, request.client.host if request.client else None))
+    wait = _check(key, time.monotonic(), rate)
+    if wait:
+        raise HTTPException(429, 'too many requests; retry later', headers={'Retry-After': str(int(wait)+1)})

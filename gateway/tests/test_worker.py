@@ -75,9 +75,10 @@ class StubOllama(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         UPSTREAM_HITS.append({"path": self.path, "body": None})
         self.send_response(200)
-        self.send_header("Content-Length", "2")
+        payload = json.dumps({'data': [{'id': MODEL}]}).encode()
+        self.send_header('Content-Length', str(len(payload)))
         self.end_headers()
-        self.wfile.write(b"{}")
+        self.wfile.write(payload)
 
 
 stub = ThreadingHTTPServer(("127.0.0.1", 0), StubOllama)
@@ -159,7 +160,7 @@ try:
     listed = json.loads(text)
     check("reports exactly the donated model",
           [m["id"] for m in listed["data"]], [MODEL])
-    check("answered without touching the upstream", UPSTREAM_HITS, [])
+    check("checked upstream metadata only", UPSTREAM_HITS, [{"path": "/v1/models", "body": None}])
 
     print("\nstreaming passes through intact")
     req = urllib.request.Request(

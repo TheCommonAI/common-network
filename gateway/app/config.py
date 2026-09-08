@@ -50,23 +50,27 @@ class Settings(BaseSettings):
     # much RAM headroom, so a specialist never swaps and times out.
     assignment_ram_headroom: float = 0.8
 
-    # Whether nodes may register loopback endpoints (http://localhost:11434).
-    # True by default because the seed demo and same-machine development both
-    # use it. A gateway reachable from the internet should set this to false —
-    # see SECURITY.md — so a stranger can't point the network at services only
-    # visible from the gateway's own machine.
-    allow_loopback_node_endpoints: bool = True
+    # Public by default; same-machine demos opt into loopback explicitly.
+    allow_loopback_node_endpoints: bool = False
 
-    # Environment-variable names a node may reference via api_key_ref, comma
-    # separated. Empty (the default) means NO node may reference one.
-    #
-    # This is an allowlist because api_key_ref is chosen by whoever registers,
-    # and the gateway resolves it against its own environment and sends the
-    # value to that node's endpoint. Unrestricted, a stranger registers an
-    # endpoint they control with api_key_ref=OPENROUTER_API_KEY and the
-    # gateway posts our key to them -- on the first health check, without
-    # waiting for anyone's request. Only names listed here are ever resolved.
-    allowed_api_key_refs: str = ""
+    # Only exact HTTPS destinations may receive a gateway environment secret.
+    allowed_api_key_refs: str = ""  # deprecated: names alone never grant access
+    api_key_destinations: dict[str, list[str]] = {}
+    allowed_node_cidrs: str = ""
+    trusted_proxy_cidrs: str = ""
+    max_request_bytes: int = 2_000_000
+    max_response_bytes: int = 8_000_000
+    max_output_tokens: int = 8192
+    max_messages: int = 128
+    request_deadline_seconds: float = 300.0
+    max_active_requests: int = 32
+    registration_requests_per_minute: int = 5
+    retain_request_embeddings: bool = False
+    decision_retention_days: int = 7
+    public_decision_details: bool = False
+    public_node_endpoints: bool = False
+    analytics_min_count: int = 5
+    analytics_delay_seconds: int = 3600
 
     # Password for the operators view at /admin. Empty (the default) disables
     # those routes entirely — they 404 exactly as if they did not exist, so a
@@ -96,8 +100,8 @@ class Settings(BaseSettings):
 
     # Per-client token bucket on /v1/chat/completions: requests per minute,
     # 0 disables. A brake on bulk abuse of donated compute — best-effort, not
-    # a security boundary (a client rotating source IPs gets one bucket each;
-    # the contribution gate is the real control). The local .env sets 0 so
+    # a security boundary (authenticated users are keyed by credential;
+    # anonymous clients by a trusted-proxy-aware address). The local .env sets 0 so
     # `common test` sweeps unimpeded; public deployments keep the default.
     rate_limit_requests_per_minute: int = 20
 

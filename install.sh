@@ -11,12 +11,12 @@
 # Always installs `common-chat` (talk to the network — needs nothing but
 # Python). Also installs `common-join` (contribute a node) if Ollama is
 # present, installing cloudflared automatically if needed.
-set -euo pipefail
+set -eu
+umask 077
 
 REPO="TheCommonAI/common-network"
 INSTALL_DIR="$HOME/.common-network"
 BIN_DIR="$INSTALL_DIR/bin"
-RAW="https://raw.githubusercontent.com/$REPO/main"
 
 echo "Installing the Common Network Alpha (v0.1.2)..."
 mkdir -p "$BIN_DIR"
@@ -34,6 +34,19 @@ if ! command -v python3 >/dev/null 2>&1; then
   fi
   exit 1
 fi
+
+# Resolve once so all installed files come from the same immutable revision.
+# This prevents mixed-version installs, not repository compromise/code signing.
+COMMON_INSTALL_COMMIT="${COMMON_INSTALL_COMMIT:-}"
+if [ -z "$COMMON_INSTALL_COMMIT" ]; then
+  COMMON_INSTALL_COMMIT="$(curl -fsSL "https://api.github.com/repos/$REPO/commits/main" | python3 -c 'import sys,json; print(json.load(sys.stdin)["sha"])')"
+fi
+case "$COMMON_INSTALL_COMMIT" in
+  *[!0-9a-f]*|"") echo "Invalid install commit"; exit 1 ;;
+esac
+[ "${#COMMON_INSTALL_COMMIT}" -eq 40 ] || { echo "Expected a full commit SHA"; exit 1; }
+RAW="https://raw.githubusercontent.com/$REPO/$COMMON_INSTALL_COMMIT"
+
 
 # --- common-chat (always) ---
 echo "Downloading the chat client..."

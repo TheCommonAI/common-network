@@ -21,7 +21,10 @@ $ErrorActionPreference = "Stop"
 $Repo = "TheCommonAI/common-network"
 $InstallDir = "$env:USERPROFILE\.common-network"
 $BinDir = "$InstallDir\bin"
-$Raw = "https://raw.githubusercontent.com/$Repo/main"
+$InstallCommit = $env:COMMON_INSTALL_COMMIT
+if (-not $InstallCommit) { $InstallCommit = (Invoke-RestMethod "https://api.github.com/repos/$Repo/commits/main").sha }
+if ($InstallCommit -notmatch '^[0-9a-f]{40}$') { throw 'Expected a full install commit SHA' }
+$Raw = "https://raw.githubusercontent.com/$Repo/$InstallCommit"
 
 Write-Host "Installing the Common Network Alpha (v0.1.2)..."
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
@@ -33,6 +36,11 @@ if (-not $python) {
     Write-Host "Install it from https://www.python.org/downloads/ (check 'Add python.exe to PATH'), then re-run this installer."
     exit 1
 }
+
+# Protect saved contributor credentials from other ordinary local users.
+$CommonUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+& icacls $InstallDir /inheritance:r /grant:r "*${CommonUserSid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Could not protect the Common installation directory' }
 
 # --- common-chat (always) ---
 Write-Host "Downloading the chat client..."
