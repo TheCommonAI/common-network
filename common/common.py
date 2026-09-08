@@ -257,7 +257,7 @@ def read_identity() -> dict | None:
         return None
 
 
-def contributor_headers() -> dict:
+def contributor_headers(gateway: str | None = None) -> dict:
     """The node token of the node this machine last registered, if any.
 
     The network answers its contributors (REQUIRE_CONTRIBUTION): a gateway
@@ -265,9 +265,20 @@ def contributor_headers() -> dict:
     also a machine donating. Harmless on open gateways, and never sent on
     direct-to-node requests (a node is a stranger's server; the token is for
     the gateway that issued it).
+
+    Sent only to the gateway that issued it. `--gateway` points the CLI at
+    someone else's server, and a credential that follows the flag would be
+    handed to whoever runs it -- one flag away from leaking the token that
+    controls your node. Unknown destination, no token.
     """
-    token = (read_identity() or {}).get("node_token")
-    return {"X-Common-Node-Token": token} if token else {}
+    identity = read_identity() or {}
+    token = identity.get("node_token")
+    if not token:
+        return {}
+    issuer = (identity.get("gateway") or "").rstrip("/")
+    if gateway is not None and issuer != gateway.rstrip("/"):
+        return {}
+    return {"X-Common-Node-Token": token}
 
 
 # --- Commands ------------------------------------------------------------
@@ -306,7 +317,7 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
         headers["X-Common-Node"] = node_override
     if compose:
         headers["X-Common-Compose"] = compose
-    headers.update(contributor_headers())
+    headers.update(contributor_headers(gateway))
 
     req = urllib.request.Request(f"{gateway}/v1/chat/completions", data=json.dumps(body).encode(), headers=headers, method="POST")
     start = time.monotonic()
@@ -954,7 +965,7 @@ def _probe_once(gateway: str, prompt: str, node: str | None = None, timeout: flo
     if not direct_url:
         # Gateway requests carry this machine's contributor token (never sent
         # straight to a node -- see contributor_headers).
-        headers.update(contributor_headers())
+        headers.update(contributor_headers(gateway))
 
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
     start = time.monotonic()
@@ -1778,7 +1789,7 @@ def _ask_thesis(gateway: str, prompt: str, *, compose: str | None = None,
         headers["X-Common-Compose"] = compose
     if node:
         headers["X-Common-Node"] = node
-    headers.update(contributor_headers())
+    headers.update(contributor_headers(gateway))
 
     req = urllib.request.Request(f"{gateway}/v1/chat/completions",
                                  data=json.dumps(body).encode(), headers=headers, method="POST")

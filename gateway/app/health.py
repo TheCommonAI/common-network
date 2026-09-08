@@ -1,5 +1,4 @@
 import asyncio
-import os
 
 import httpx
 from fastapi import HTTPException
@@ -7,6 +6,7 @@ from fastapi import HTTPException
 from app import db
 from app.config import settings
 from app.registry import validate_endpoint_url
+from app.upstream import resolve_api_key
 
 
 async def _check_one(client: httpx.AsyncClient, node: dict) -> bool:
@@ -21,15 +21,21 @@ async def _check_one(client: httpx.AsyncClient, node: dict) -> bool:
         return False
 
     url = node["endpoint_url"].rstrip("/") + "/models"
+    # Same allowlist as the forwarding path. This call matters more than that
+    # one: it runs every 30s against every registered node, so an unrestricted
+    # api_key_ref would hand a credential to a hostile endpoint without any
+    # user ever sending it a request.
     headers = {}
-    api_key_ref = node.get("api_key_ref")
-    if api_key_ref:
-        key = os.environ.get(api_key_ref)
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
+    key = resolve_api_key(node.get("api_key_ref"))
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
     try:
         resp = await client.get(url, headers=headers, timeout=settings.health_check_timeout_seconds)
-        return resp.status_code < 500
+        # 2xx only. `< 500` counted 401 (bad credential), 403 and 404 (no such
+        # route -- not an OpenAI-compatible server at all) as healthy, so a
+        # node could be routed real traffic on the strength of a reply that
+        # said "I cannot serve you".
+        return 200 <= resp.status_code < 300
     except httpx.HTTPError:
         return False
 

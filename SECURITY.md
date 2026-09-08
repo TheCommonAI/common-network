@@ -35,16 +35,24 @@ defaults `--name` to `<hostname>-<random-suffix>` and `--operator` to
   existing name requires that node's `X-Common-Node-Token`, issued once at
   first registration and returned only to whoever holds it. (Names are
   public; tokens are not — see `gateway/app/registry.py`.)
-- **Make the gateway fetch internal addresses.** An endpoint URL must be
+- **Make the gateway fetch cloud metadata.** An endpoint URL must be
   `http(s)`, must resolve, and is refused outright if it resolves to a
-  link-local address — the cloud-metadata range every SSRF write-up walks
-  through. Loopback is allowed only when the operator opts in, and the check
-  re-runs on every health pass, so a hostname that re-points at a metadata
-  service after registering goes dark instead of being fetched.
+  link-local address — the range cloud metadata services live on. Loopback is
+  allowed only when the operator opts in, and the check re-runs on every
+  health pass. **Private LAN ranges are still permitted**, deliberately (school
+  labs run `--lan`), and re-validation narrows the DNS-rebinding window rather
+  than closing it: the name is resolved again at connection time by httpx, so
+  a hostname that flips between answers can still be fetched. Do not treat
+  this as full SSRF protection — see Known limits.
 - **Harvest credentials through the registry.** A node stores the *name* of
-  an environment variable (`api_key_ref`), never a key. The gateway resolves
-  the name against its own environment; no key value ever enters the
-  database or an API response.
+  an environment variable (`api_key_ref`), never a key, so no key value ever
+  enters the database or an API response. The name is still chosen by the
+  registrant, so it is resolved only if the operator listed it in
+  `ALLOWED_API_KEY_REFS` — empty by default, meaning no node gets a
+  credential until someone deliberately grants one. (Before this allowlist,
+  registering an endpoint you controlled with `api_key_ref=OPENROUTER_API_KEY`
+  made the gateway send that key to you on its next health check. Fixed
+  2026-09-08; see History.)
 - **Read other people's requests.** The decisions log records topology, nodes,
   scores and latencies. It does not expose request text or embeddings.
 
@@ -77,6 +85,18 @@ to a public deployment**. On a public gateway:
 
 ## Known limits, stated rather than papered over
 
+- **A contributor's endpoint is an unauthenticated Ollama.** `common join`
+  tunnels straight to `localhost:11434`, and `/nodes` publishes that URL.
+  Ollama's API has no authentication, so anyone who reads the registry can
+  talk to a contributor's Ollama directly — bypassing the gateway's gate and
+  rate limit, and reaching model-management endpoints, not just inference.
+  This is the largest open hole in Alpha. Until a worker sits in front of
+  Ollama, **only donate a machine you are comfortable exposing**, and prefer
+  `--lan` on a trusted network.
+- **DNS rebinding is narrowed, not closed.** Validation resolves the hostname;
+  the actual connection resolves it again. A hostname that answers differently
+  between those two moments defeats the check. Fixing it properly means
+  pinning the validated IP at connection time.
 - **The gate checks registration, not identity or fair shares.** Anyone who
   can register a node can use the network — that is still the thesis — and
   one person can register several. Usage proportional to *how much* you
@@ -120,6 +140,20 @@ for the details privately.
 
 ## History
 
+- 2026-09-08: `api_key_ref` was resolved against the gateway's environment
+  with no restriction on which variable a registrant could name. Registering
+  an endpoint you controlled and naming any variable (e.g.
+  `OPENROUTER_API_KEY`) caused the gateway to send that value to you as a
+  bearer token — on the next health check, with no user request involved.
+  Fixed by the `ALLOWED_API_KEY_REFS` allowlist, empty by default, applied on
+  both the forwarding and health-check paths. **If you ran a gateway with a
+  real key in its environment while it was publicly reachable, rotate that
+  key.**
+- 2026-09-08: the CLI and chat client attached the stored node token to
+  whatever `--gateway` pointed at, so aiming either at another server handed
+  it your token. Now sent only to the gateway that issued it.
+- 2026-09-08: health checks treated any status under 500 as healthy, so a node
+  answering 401 or 404 was routed real traffic. Now 2xx only.
 - 2026-09-07 (pre-Alpha public release): re-registration of an existing node
   name returned that node's stored token to the caller — anyone who read a
   node's name from `GET /nodes` could take it over or delete it. Fixed before

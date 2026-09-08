@@ -148,17 +148,25 @@ def self_update() -> None:
     os.execv(sys.executable, [sys.executable, local_path] + sys.argv[1:])
 
 
-def _contributor_headers() -> dict:
+def _contributor_headers(gateway: str) -> dict:
     """The node token of the machine this client runs on, if it has joined
     (see `common join`). A gateway running REQUIRE_CONTRIBUTION passes a
     request only while the machine asking is also a machine donating; on open
-    gateways the header is simply ignored."""
+    gateways the header is simply ignored.
+
+    Sent only to the gateway that issued it: --gateway can point this client
+    at anyone's server, and a credential that followed the flag would be
+    handed to whoever runs it."""
     try:
         with open(os.path.expanduser("~/.common-network/identity.json")) as f:
-            token = json.load(f).get("node_token")
+            identity = json.load(f)
+        token = identity.get("node_token")
+        issuer = (identity.get("gateway") or "").rstrip("/")
     except (OSError, json.JSONDecodeError, AttributeError):
         return {}
-    return {"X-Common-Node-Token": token} if token else {}
+    if not token or issuer != gateway.rstrip("/"):
+        return {}
+    return {"X-Common-Node-Token": token}
 
 
 def stream_chat(gateway: str, messages: list[dict], region: str | None, target_node: str | None) -> tuple[str, str | None, str | None]:
@@ -168,7 +176,7 @@ def stream_chat(gateway: str, messages: list[dict], region: str | None, target_n
         headers["X-Common-Region"] = region
     if target_node:
         headers["X-Common-Node"] = target_node
-    headers.update(_contributor_headers())
+    headers.update(_contributor_headers(gateway))
 
     req = urllib.request.Request(
         f"{gateway}/v1/chat/completions", data=json.dumps(body).encode(), headers=headers, method="POST",

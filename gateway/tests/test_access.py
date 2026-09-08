@@ -6,6 +6,7 @@ the limiter does under sustained fire — plus the shipped defaults themselves,
 because "gated, with rate limiting" is the product posture and a future flip
 should be a deliberate test-updating decision, not drift.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import ratelimit  # noqa: E402
 from app.config import Settings, settings  # noqa: E402
 from app.gateway import contributor_token  # noqa: E402
+from app.upstream import resolve_api_key  # noqa: E402
 
 FAILURES = []
 
@@ -83,6 +85,35 @@ check("socket address without proxy",
       ratelimit.client_key({}, "192.168.1.5"), "192.168.1.5")
 check("unknown when nothing is known",
       ratelimit.client_key({}, None), "unknown")
+
+print("\ncredential references are allowlisted, not caller-chosen")
+os.environ["TEST_FAKE_SECRET"] = "super-secret-value"
+_orig_allowed = settings.allowed_api_key_refs
+try:
+    # The attack: register an endpoint you control, name any variable in the
+    # gateway's environment, receive its value as a bearer token.
+    settings.allowed_api_key_refs = ""
+    check("nothing allowed by default -> no key resolved",
+          resolve_api_key("TEST_FAKE_SECRET"), None)
+    check("an unlisted name resolves to nothing",
+          resolve_api_key("OPENROUTER_API_KEY"), None)
+
+    settings.allowed_api_key_refs = "OPENROUTER_API_KEY"
+    check("a name the operator listed but did not set -> None",
+          resolve_api_key("OPENROUTER_API_KEY"), None)
+    check("still refuses a name that is merely in the environment",
+          resolve_api_key("TEST_FAKE_SECRET"), None)
+
+    settings.allowed_api_key_refs = "TEST_FAKE_SECRET, OPENROUTER_API_KEY"
+    check("an allowlisted, present name does resolve",
+          resolve_api_key("TEST_FAKE_SECRET"), "super-secret-value")
+    check("no reference at all -> None", resolve_api_key(None), None)
+    check("empty reference -> None", resolve_api_key(""), None)
+finally:
+    settings.allowed_api_key_refs = _orig_allowed
+    os.environ.pop("TEST_FAKE_SECRET", None)
+
+check("shipped default allows no credential references", _orig_allowed, "")
 
 print()
 if FAILURES:

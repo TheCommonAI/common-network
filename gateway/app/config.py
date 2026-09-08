@@ -57,6 +57,17 @@ class Settings(BaseSettings):
     # visible from the gateway's own machine.
     allow_loopback_node_endpoints: bool = True
 
+    # Environment-variable names a node may reference via api_key_ref, comma
+    # separated. Empty (the default) means NO node may reference one.
+    #
+    # This is an allowlist because api_key_ref is chosen by whoever registers,
+    # and the gateway resolves it against its own environment and sends the
+    # value to that node's endpoint. Unrestricted, a stranger registers an
+    # endpoint they control with api_key_ref=OPENROUTER_API_KEY and the
+    # gateway posts our key to them -- on the first health check, without
+    # waiting for anyone's request. Only names listed here are ever resolved.
+    allowed_api_key_refs: str = ""
+
     # Password for the operators view at /admin. Empty (the default) disables
     # those routes entirely — they 404 exactly as if they did not exist, so a
     # deployment that never sets this cannot leak operational detail no matter
