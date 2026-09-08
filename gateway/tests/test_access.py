@@ -78,9 +78,9 @@ finally:
 print("\nclient key: proxy header honoured, socket address otherwise")
 class FakeClient:
     def __init__(self, host): self.host = host
-check("X-Forwarded-For wins (behind Railway)",
+check("untrusted X-Forwarded-For ignored",
       ratelimit.client_key({"x-forwarded-for": "203.0.113.9, 10.0.0.1"}, None),
-      "203.0.113.9")
+      "unknown")
 check("socket address without proxy",
       ratelimit.client_key({}, "192.168.1.5"), "192.168.1.5")
 check("unknown when nothing is known",
@@ -105,8 +105,14 @@ try:
           resolve_api_key("TEST_FAKE_SECRET"), None)
 
     settings.allowed_api_key_refs = "TEST_FAKE_SECRET, OPENROUTER_API_KEY"
-    check("an allowlisted, present name does resolve",
-          resolve_api_key("TEST_FAKE_SECRET"), "super-secret-value")
+    check("a name allowlist alone never releases a key",
+          resolve_api_key("TEST_FAKE_SECRET"), None)
+    settings.api_key_destinations = {'TEST_FAKE_SECRET': ['https://approved.example/v1']}
+    check("exact approved destination receives its key",
+          resolve_api_key("TEST_FAKE_SECRET", 'https://approved.example/v1'), 'super-secret-value')
+    check("different destination never receives the key",
+          resolve_api_key("TEST_FAKE_SECRET", 'https://unapproved.example/v1'), None)
+    settings.api_key_destinations = {}
     check("no reference at all -> None", resolve_api_key(None), None)
     check("empty reference -> None", resolve_api_key(""), None)
 finally:

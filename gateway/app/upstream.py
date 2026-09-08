@@ -1,41 +1,33 @@
-"""Talking to nodes.
+"""Bounded forwarding shared by routing and composition.
 
-Shared by the single-route path (`gateway.py`) and the composition path
-(`compose.py`) so that the credential-handling rule lives in exactly one place:
-a node stores the *name* of an env var, never a key. A permissionless registry
-that accepted raw keys would be a credential-harvesting endpoint.
-
-Storing only the name is necessary but not sufficient: the *name* is still
-chosen by whoever registers, so the allowlist below decides which names the
-gateway will resolve at all. See `resolve_api_key`.
+Gateway keys require exact approved HTTPS destinations. Worker credentials are
+separate per-node secrets. All outgoing connections use the pinned-address
+transport policy; callers own response/client lifetime for streaming replies.
 """
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import httpx
 
 from app.config import settings
+from app.network import endpoint_identity, pinned_request
 
 
-def resolve_api_key(api_key_ref: str | None) -> str | None:
-    """The env var a node asked for, if this gateway permits that name.
-
-    api_key_ref is attacker-chosen: registration is permissionless, so anyone
-    can register an endpoint they control and name any variable in the
-    gateway's environment. Whatever that variable holds would then be sent to
-    them as a bearer token -- on the next health check, without needing a
-    single user request to be routed there.
-
-    So the reference is only honoured when the operator has explicitly listed
-    the name in ALLOWED_API_KEY_REFS. The default is empty: no node may
-    reference any credential until an operator deliberately allows one.
-    """
+def resolve_api_key(api_key_ref: str | None, endpoint_url: str | None = None) -> str | None:
+    """Resolve a key only for an operator-approved exact HTTPS endpoint."""
     if not api_key_ref:
         return None
-    allowed = {n.strip() for n in settings.allowed_api_key_refs.split(",") if n.strip()}
-    if api_key_ref not in allowed:
+    if not endpoint_url or not endpoint_url.startswith('https://'):
+        return None
+    try:
+        destination = endpoint_identity(endpoint_url)
+        allowed = settings.api_key_destinations.get(api_key_ref, [])
+        if destination not in {endpoint_identity(url) for url in allowed}:
+            return None
+    except Exception:
         return None
     return os.environ.get(api_key_ref)
 
@@ -61,7 +53,7 @@ def auth_headers(node: dict) -> dict[str, str]:
     if worker_token:
         headers["Authorization"] = f"Bearer {worker_token}"
         return headers
-    key = resolve_api_key(node.get("api_key_ref"))
+    key = resolve_api_key(node.get("api_key_ref"), node.get("endpoint_url"))
     if key:
         headers["Authorization"] = f"Bearer {key}"
     return headers
@@ -80,8 +72,48 @@ async def forward(node: dict, body: dict[str, Any], stream: bool) -> httpx.Respo
     """
     outgoing = dict(body)
     outgoing["model"] = node["model_name"]
-    client = httpx.AsyncClient(timeout=settings.forward_timeout_seconds)
-    req = client.build_request("POST", chat_url(node), json=outgoing, headers=auth_headers(node))
-    resp = await client.send(req, stream=stream)
-    resp.extensions["_client"] = client
-    return resp
+    client = httpx.AsyncClient(timeout=settings.forward_timeout_seconds,
+                               follow_redirects=False, trust_env=False,
+                               limits=httpx.Limits(max_keepalive_connections=0))
+    try:
+        req = await pinned_request(client, "POST", chat_url(node), json=outgoing,
+                                   headers=auth_headers(node))
+        resp = await client.send(req, stream=True)
+        if 300 <= resp.status_code < 400:
+            await resp.aclose()
+            raise httpx.ConnectError("node redirects are not permitted")
+        resp.extensions["_client"] = client
+        resp.extensions["_deadline"] = time.monotonic() + settings.request_deadline_seconds
+        if not stream:
+            content = await read_limited(resp)
+            original = resp
+            resp = httpx.Response(original.status_code, headers=original.headers,
+                                  content=content, request=req, extensions=original.extensions)
+            await original.aclose()
+        return resp
+    except BaseException:
+        await client.aclose()
+        raise
+
+
+async def iter_limited(resp):
+    import asyncio
+    total = 0
+    deadline = resp.extensions.get('_deadline', time.monotonic() + settings.request_deadline_seconds)
+    async with asyncio.timeout(max(0, deadline - time.monotonic())):
+        async for chunk in resp.aiter_bytes():
+            total += len(chunk)
+            if total > settings.max_response_bytes:
+                raise httpx.ReadError('node response exceeded the byte limit')
+            yield chunk
+
+
+async def read_limited(resp):
+    chunks = []
+    try:
+        async for chunk in iter_limited(resp):
+            chunks.append(chunk)
+        return b''.join(chunks)
+    except BaseException:
+        await resp.aclose()
+        raise

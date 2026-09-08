@@ -161,7 +161,7 @@ def _recommend(candidates: list[dict]) -> dict | None:
     }
 
 
-async def analyse(window_days: int = 30, cluster_threshold: float = 0.6,
+async def _analyse_uncached(window_days: int = 30, cluster_threshold: float = 0.6,
                   min_cluster_size: int = 3) -> dict:
     """The full picture: served domains, their gaps, and unserved demand."""
     async with db.pool().acquire() as conn:
@@ -171,6 +171,7 @@ async def analyse(window_days: int = 30, cluster_threshold: float = 0.6,
             from decisions
             where matched_domain is not null
               and created_at > now() - make_interval(days => $1)
+              and created_at < date_trunc('hour', now()) - interval '1 hour'
             group by matched_domain
             """,
             window_days,
@@ -190,17 +191,21 @@ async def analyse(window_days: int = 30, cluster_threshold: float = 0.6,
             where matched_domain is null
               and request_embed is not null
               and created_at > now() - make_interval(days => $1)
-            limit 5000
+              and created_at < date_trunc('hour', now()) - interval '1 hour'
+            limit 500
             """,
             window_days,
         )
         total = await conn.fetchval(
-            "select count(*) from decisions where created_at > now() - make_interval(days => $1)",
-            window_days,
-        )
+            "select count(*) from decisions where created_at > now() - make_interval(days => $1) "
+            "and created_at < date_trunc('hour', now()) - interval '1 hour'", window_days)
+        unserved_count = await conn.fetchval(
+            "select count(*) from decisions where matched_domain is null "
+            "and created_at > now() - make_interval(days => $1) "
+            "and created_at < date_trunc('hour', now()) - interval '1 hour'", window_days)
         catalogue = await _catalogue_by_domain(conn)
 
-    demand = {r["matched_domain"]: r["n"] for r in demand_rows}
+    demand = {r["matched_domain"]: r["n"] for r in demand_rows if r["n"] >= settings.analytics_min_count}
     coverage = {r["tag"]: r["n"] for r in coverage_rows}
 
     gaps: list[DomainGap] = []
@@ -215,7 +220,7 @@ async def analyse(window_days: int = 30, cluster_threshold: float = 0.6,
     gaps.sort(key=lambda g: (-g.gap, -g.demand, g.domain))
 
     clusters: list[UnservedCluster] = []
-    if unserved_rows:
+    if unserved_rows and settings.retain_request_embeddings:
         vectors = np.array([list(r["request_embed"]) for r in unserved_rows], dtype=float)
         for members in cluster(vectors, cluster_threshold, min_cluster_size):
             centroid = vectors[members].mean(axis=0)
@@ -230,19 +235,45 @@ async def analyse(window_days: int = 30, cluster_threshold: float = 0.6,
                 centroid=centroid.tolist(),
             ))
 
-    unserved_total = len(unserved_rows)
+    unserved_total = unserved_count if (unserved_count or 0) >= settings.analytics_min_count else 0
     return {
         "window_days": window_days,
-        "total_requests": total or 0,
+        "total_requests": total if total and total >= settings.analytics_min_count else 0,
         "unserved_requests": unserved_total,
-        "unserved_fraction": round(unserved_total / total, 3) if total else 0.0,
+        "unserved_fraction": round(unserved_total / total, 3) if total and unserved_total else 0.0,
         "domain_gaps": [g.as_dict() for g in gaps],
-        "unserved_clusters": [c.as_dict() for c in clusters],
+        "unserved_clusters": [{k: v for k, v in c.as_dict().items() if k != "centroid"} for c in clusters if c.size >= settings.analytics_min_count],
+        "embedding_analysis_enabled": settings.retain_request_embeddings,
+        "privacy_note": "Delayed aggregates; small groups suppressed. Missing counts are not proof of zero demand.",
         "cold_start": (total or 0) == 0,
     }
 
 
 # --- Install planning -----------------------------------------------------
+
+# A small bounded cache prevents public analytics calls repeating pairwise work.
+_analysis_cache = {}
+_analysis_lock = None
+
+async def analyse(window_days=30, cluster_threshold=0.6, min_cluster_size=3):
+    import asyncio
+    import copy
+    import time
+    global _analysis_lock
+    if _analysis_lock is None:
+        _analysis_lock = asyncio.Lock()
+    key = (window_days, cluster_threshold, min_cluster_size,
+           settings.retain_request_embeddings, settings.analytics_min_count)
+    async with _analysis_lock:
+        cached = _analysis_cache.get(key)
+        if cached and time.monotonic() - cached[0] < 60:
+            return copy.deepcopy(cached[1])
+        result = await _analyse_uncached(window_days, cluster_threshold, min_cluster_size)
+        if len(_analysis_cache) >= 32:
+            _analysis_cache.pop(next(iter(_analysis_cache)))
+        _analysis_cache[key] = (time.monotonic(), result)
+        return copy.deepcopy(result)
+
 
 def _fits(model: dict, ram_gb: float) -> bool:
     return float(model["min_ram_gb"]) <= ram_gb * settings.assignment_ram_headroom

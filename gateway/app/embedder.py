@@ -1,5 +1,5 @@
+from __future__ import annotations
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
 from app.config import settings
 
@@ -9,6 +9,7 @@ _model: SentenceTransformer | None = None
 def load() -> None:
     global _model
     if _model is None:
+        from sentence_transformers import SentenceTransformer
         _model = SentenceTransformer(settings.embed_model_name)
 
 

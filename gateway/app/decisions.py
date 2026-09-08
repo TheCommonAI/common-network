@@ -1,16 +1,19 @@
 import json
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 
 from app import db
 from app.models import DecisionOut
+from app.config import settings
+from app.admin import _require_admin
 
 router = APIRouter()
 
 
 @router.get("/decisions/recent", response_model=list[DecisionOut])
 async def recent_decisions(
-    limit: int = Query(default=50, le=500),
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=500),
     topology: str | None = Query(default=None, description="Filter to 'single', 'panel' or 'degraded'"),
 ):
     """The routing log.
@@ -20,6 +23,8 @@ async def recent_decisions(
     erasing the record that it answered. History outliving the node is the
     point of a log.
     """
+    if not settings.public_decision_details:
+        _require_admin(request)
     async with db.pool().acquire() as conn:
         rows = await conn.fetch(
             """
@@ -96,9 +101,11 @@ async def composition_summary(window_days: int = Query(default=7, ge=1, le=365))
                    sum(coalesce(disagreements, 0)) as disagreements
             from decisions
             where created_at > now() - make_interval(days => $1)
+              and created_at < date_trunc('hour', now()) - make_interval(secs => $2)
             group by topology
+            having count(*) >= $3
             """,
-            window_days,
+            window_days, settings.analytics_delay_seconds, settings.analytics_min_count,
         )
 
     by_topology = {}
@@ -134,3 +141,37 @@ async def composition_summary(window_days: int = Query(default=7, ge=1, le=365))
             "testing/compose-test for that."
         ),
     }
+
+
+@router.get('/decisions/summary')
+async def public_summary():
+    """Delayed buckets only: no timestamps, request ids or cross-linked topics."""
+    async with db.pool().acquire() as conn:
+        rows = await conn.fetch('''
+            select topology, count(*) as requests
+            from decisions
+            where created_at >= date_trunc('day', now()) - interval '7 days'
+              and created_at < date_trunc('hour', now()) - make_interval(secs => $1)
+            group by topology having count(*) >= $2
+        ''', settings.analytics_delay_seconds, settings.analytics_min_count)
+    return {'window_days': 7, 'delay_seconds': settings.analytics_delay_seconds,
+            'minimum_group': settings.analytics_min_count,
+            'topologies': {r['topology']: r['requests'] for r in rows},
+            'note': 'Small groups are suppressed. Missing counts are not zero. No per-request history is public.'}
+
+
+@router.get('/decisions/mine')
+async def own_contribution(request: Request):
+    from app.gateway import contributor_token, _require_contributor
+    from app.credentials import token_digest
+    await _require_contributor(request)
+    token = contributor_token(request.headers)
+    async with db.pool().acquire() as conn:
+        row = await conn.fetchrow('''
+            select count(d.id) as requests, count(d.id) filter (where d.ok) as succeeded
+            from nodes n left join decisions d on
+              (d.chosen_node = n.id or d.aggregator_node = n.id or n.id = any(d.panel))
+              and d.created_at > now() - interval '7 days'
+            where n.node_token = $1 or (n.node_token not like 'sha256:%' and n.node_token = $2)
+        ''', token_digest(token), token)
+    return {'window_days': 7, 'requests_served': row['requests'], 'ok': row['succeeded']}

@@ -31,16 +31,15 @@ common-join
 No password needed — joining is permissionless, anyone can contribute a
 node. It will:
 
-1. Check GitHub for a newer version of itself and update in place if found
-   (pass `--no-update` to skip).
+1. Run the installed, reviewed version.
 2. Make sure Ollama is running and pull a default small model if needed.
-3. Open a free Cloudflare tunnel to your local Ollama.
+3. Open a free Cloudflare tunnel to the authenticated Common worker.
 4. Register your node with the shared gateway.
 5. Keep running so your node stays online.
 
 Press `Ctrl+C` to leave the network — it deregisters your node cleanly.
-Every future run auto-updates itself, so friends never need to reinstall to
-get fixes or improvements.
+Updates are deliberate: re-run the installer to install a reviewed revision.
+Automatic source execution is off by default. See [security](../SECURITY.md).
 
 By default it serves `llama3.2:3b` (small, fast, works on most laptops).
 Pass `--model` to use a different one you have pulled in Ollama — keep it
@@ -63,9 +62,7 @@ common-join --permanent
 ```
 
 This installs a LaunchAgent (macOS), a `systemd --user` service (Linux), or
-a Scheduled Task (Windows) that runs `common-join` for you. It still
-checks for updates and auto-updates itself every 30 minutes, same as
-running it in a terminal. Logs go to `~/.common-network/join.log` (macOS)
+a Scheduled Task (Windows) that runs `common-join` for you. It runs the installed version without automatic source execution. Logs go to `~/.common-network/join.log` (macOS)
 or `journalctl --user -u common-join.service` (Linux).
 
 On a headless Linux server, also run `loginctl enable-linger $USER` so it

@@ -148,7 +148,7 @@
   </section>
 
   <section>
-    <h2>Domain coverage <span style="color:var(--muted); font-weight:400;">(demand vs. healthy nodes serving it, last 50 decisions)</span></h2>
+    <h2>Domain coverage <span style="color:var(--muted); font-weight:400;">(delayed demand; small groups suppressed)</span></h2>
     <div class="card"><div id="coverage-chart"></div></div>
   </section>
 
@@ -158,12 +158,12 @@
   </section>
 
   <section>
-    <h2>Requests routed by node <span style="color:var(--muted); font-weight:400;">(last 50 decisions)</span></h2>
+    <h2>Network activity <span style="color:var(--muted); font-weight:400;">(delayed aggregates)</span></h2>
     <div class="card"><div id="routing-chart"></div></div>
   </section>
 
   <section>
-    <h2>Recent decisions</h2>
+    <h2>Request privacy</h2>
     <div class="card"><div id="decisions-table"></div></div>
   </section>
 
@@ -192,33 +192,12 @@ function fmtTime(iso) {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-function renderStats(nodes, decisions) {
-  const healthy = nodes.filter(n => n.healthy).length;
-  const unhealthy = nodes.length - healthy;
-  const ok = decisions.filter(d => d.ok).length;
-  const panels = decisions.filter(d => d.topology === 'panel').length;
-  const degraded = decisions.filter(d => d.topology === 'degraded').length;
-  // Verification fire rate. Worth a tile of its own rather than a footnote:
-  // a rate that quietly falls to zero means the extractor stopped matching,
-  // not that the models stopped making arithmetic errors.
-  const checks = decisions.reduce((a, d) => a + (d.checks_run || 0), 0);
-  const failed = decisions.reduce((a, d) => a + (d.checks_failed || 0), 0);
-  const tiles = [
-    ['Total nodes', nodes.length],
-    ['Healthy', healthy],
-    ['Unhealthy', unhealthy],
-    ['Recent decisions', decisions.length],
-    ['Successful', `${ok}/${decisions.length}`],
-    ['Composed', decisions.length ? `${panels}/${decisions.length}` : '—'],
-    ['Degraded panels', degraded],
-    ['Figures corrected', checks ? `${failed}/${checks}` : '—'],
-  ];
-  document.getElementById('stats').innerHTML = tiles.map(([label, value]) => `
-    <div class="stat-tile">
-      <div class="label">${label}</div>
-      <div class="value">${value}</div>
-    </div>
-  `).join('');
+function renderStats(nodes, summary) {
+  const tiles = [['Nodes', nodes.length], ['Healthy', nodes.filter(n => n.healthy).length],
+    ['Single requests', summary.topologies.single ?? 'Suppressed'],
+    ['Panel requests', summary.topologies.panel ?? 'Suppressed']];
+  document.getElementById('stats').innerHTML = tiles.map(([label, value]) =>
+    `<div class="stat-tile"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
 }
 
 function renderTags(tags) {
@@ -276,11 +255,7 @@ function renderCatalogue(catalogue) {
 
 function renderCoverage(nodes, decisions) {
   const el = document.getElementById('coverage-chart');
-  const demand = new Map();
-  for (const d of decisions) {
-    if (!d.matched_domain) continue;
-    demand.set(d.matched_domain, (demand.get(d.matched_domain) || 0) + 1);
-  }
+  const demand = new Map(decisions.domain_gaps.map(g => [g.domain, g.demand]));
   const coverage = new Map();
   for (const n of nodes) {
     if (!n.healthy || !n.domain_tags) continue;
@@ -393,17 +368,18 @@ function renderDecisions(decisions) {
 
 async function refresh() {
   try {
-    const [nodes, decisions, catalogue] = await Promise.all([
+    const [nodes, summary, catalogue, demand] = await Promise.all([
       fetch('/nodes').then(r => r.json()),
-      fetch('/decisions/recent?limit=50').then(r => r.json()),
+      fetch('/decisions/summary').then(r => r.json()),
       fetch('/catalogue').then(r => r.json()),
+      fetch('/demand/gaps').then(r => r.json()),
     ]);
-    renderStats(nodes, decisions);
+    renderStats(nodes, summary);
     renderNodes(nodes);
-    renderCoverage(nodes, decisions);
+    renderCoverage(nodes, demand);
     renderCatalogue(catalogue);
-    renderRoutingChart(nodes, decisions);
-    renderDecisions(decisions);
+    document.getElementById('routing-chart').textContent = summary.note;
+    document.getElementById('decisions-table').textContent = 'Request history is private. Your own response includes its routing receipt. Contributors can inspect their own aggregate totals with common contrib.';
     document.getElementById('last-updated').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch (e) {
     document.getElementById('last-updated').textContent = 'update failed — retrying…';
@@ -411,7 +387,7 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, 5000);
+setInterval(refresh, 60000);
 </script>
 </body>
 </html>

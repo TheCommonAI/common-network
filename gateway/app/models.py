@@ -7,15 +7,15 @@ from pydantic import BaseModel, Field
 # --- Registry ---
 
 class NodeCreate(BaseModel):
-    name: str
-    operator: str | None = None
-    endpoint_url: str
-    model_name: str
+    name: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    operator: str | None = Field(default=None, max_length=100)
+    endpoint_url: str = Field(min_length=8, max_length=2048)
+    model_name: str = Field(min_length=1, max_length=200)
     api_key_ref: str | None = None
-    capability_text: str
-    region: str | None = None
-    cost_per_1k: float = 0
-    domain_tags: list[str] | None = None
+    capability_text: str = Field(min_length=1, max_length=8000)
+    region: str | None = Field(default=None, max_length=100)
+    cost_per_1k: float = Field(default=0, ge=0, le=100000, allow_inf_nan=False)
+    domain_tags: list[str] | None = Field(default=None, max_length=32)
     catalogue_id: str | None = None
 
     # What the gateway must present to this node's worker on every request.
@@ -23,7 +23,7 @@ class NodeCreate(BaseModel):
     # running (with its token) before the endpoint being registered is worth
     # anything, so generating it gateway-side would need a second round trip.
     # Omitted by nodes that front a third-party API instead of a worker.
-    worker_token: str | None = Field(default=None, min_length=16, max_length=128)
+    worker_token: str | None = Field(default=None, min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class NodeOut(BaseModel):

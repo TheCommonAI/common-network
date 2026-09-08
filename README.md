@@ -1,5 +1,10 @@
 # Common Network
 
+Security upgrade: see [SECURITY.md](SECURITY.md) before deploying. Public defaults
+now restrict private endpoints, protect detailed history, and disable automatic
+source execution. Chat, contribution, streaming and composition remain supported.
+
+
 ![Common.](assets/common-banner.png)
 
 **The Common Network Alpha — v0.1.2**
@@ -191,7 +196,9 @@ createdb common_network
 psql -d common_network -c "create extension if not exists vector;"
 DATABASE_URL=postgresql://localhost/common_network python -m app.migrate
 
-cp .env.example .env                 # edit DATABASE_URL / OPENROUTER_API_KEY
+cp .env.example .env                 # edit DATABASE_URL; see SECURITY.md
+# Local tokenless demo only: set ALLOW_LOOPBACK_NODE_ENDPOINTS=true
+# and REQUIRE_CONTRIBUTION=false in .env
 .venv/bin/uvicorn app.main:app --reload
 ```
 
@@ -205,10 +212,9 @@ curl http://localhost:8000/v1/chat/completions -i \
   -d '{"model":"auto","messages":[{"role":"user","content":"Explain recursion"}]}'
 ```
 
-The bare curl works locally because the demo `.env` sets
-`REQUIRE_CONTRIBUTION=false` (its seed nodes have no tokens). On a gateway
-running the shipped default, add `-H "X-Common-Node-Token: <what common join
-printed>"` — or pass the token as the API key from any OpenAI SDK client.
+The bare curl works locally only if you explicitly set
+`REQUIRE_CONTRIBUTION=false` for the local demo (seed nodes have no tokens). On a gateway
+running the shipped default, add `-H "X-Common-Node-Token: <your saved node token>"` — or pass the token as the API key from any OpenAI SDK client.
 
 Or open **`/dashboard`**.
 
@@ -233,15 +239,11 @@ common join --permanent     # run in the background, start at login
 ```
 
 `--lan` is for computer labs and anywhere the gateway is on the same network.
-It skips `cloudflared` entirely, and refuses to register if Ollama is bound to
-localhost only — otherwise you get a node that health-checks green from its own
-machine and is invisible to every other one.
-
-On a managed network, LAN mode needs three things: outbound HTTPS to
-`registry.ollama.ai`, `github.com` and `pypi.org` (one-time, to install);
-intra-LAN TCP on `11434` (Ollama) and `8000` (the gateway); and
-`OLLAMA_HOST=0.0.0.0:11434` on each node so it is reachable beyond localhost.
-Client/AP isolation is the usual thing that blocks it.
+It skips `cloudflared` entirely and exposes the authenticated worker on port
+11435. Keep Ollama on localhost:11434. Set the gateway's `ALLOWED_NODE_CIDRS`
+to the actual contributor subnet, and allow worker port 11435 through the LAN
+firewall. Use a VPN or TLS if LAN interception is a concern; LAN HTTP is plaintext.
+Client/AP isolation may prevent peers from reaching the worker.
 
 ### What should I install?
 
@@ -263,10 +265,12 @@ everything.
 |---|---|
 | `POST /v1/chat/completions` | OpenAI-compatible. `X-Common-Compose: never\|auto\|always` overrides composition per request. Contribution-gated by default: send a registered node's token (`X-Common-Node-Token`, or the `Authorization: Bearer` API-key slot). |
 | `GET /nodes`, `POST /nodes`, `DELETE /nodes/{id}` | The registry. Registration is permissionless. |
-| `GET /dashboard` | Public status: nodes, coverage, catalogue, routing, recent decisions. |
-| `GET /admin?token=…` | Operators view: failing nodes, error rates, limiter state. 404s unless `ADMIN_TOKEN` is set. |
+| `GET /dashboard` | Public nodes, coverage, catalogue and delayed aggregate activity. |
+| `GET /admin` | Password-entry page for private operator data. 404s unless `ADMIN_TOKEN` is set. |
 | `GET /source` | The repository this instance was built from (AGPL §13). |
-| `GET /decisions/recent?topology=panel` | The routing log, filterable by topology. |
+| `GET /decisions/recent?topology=panel` | Admin-only routing log by default, filterable by topology. |
+| `GET /decisions/summary` | Delayed public counts; small groups suppressed. |
+| `GET /decisions/mine` | Your own contribution totals; requires your node token. |
 | `GET /decisions/composition` | How often each topology runs, and what the verifier caught. |
 | `GET /demand/gaps` | Under-served domains, and demand nothing in the catalogue covers. |
 | `GET /demand/plan?machines=20&ram_gb=8` | An install plan for a set of machines. |

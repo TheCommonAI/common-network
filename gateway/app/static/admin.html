@@ -115,7 +115,7 @@
 
   <div class="private-note">
     <strong>Not a public page.</strong> This view includes endpoint URLs and
-    client addresses. <code>/dashboard</code> is the one to share.
+    pseudonymous client buckets. <code>/dashboard</code> is the one to share.
   </div>
 
   <section>
@@ -150,9 +150,15 @@
 </div>
 
 <script>
-// The token came in via ?token=... to open this page; reuse it for the data
-// fetches so an operator pastes the URL once.
-const TOKEN = new URLSearchParams(location.search).get('token') || '';
+// Keep the admin credential in page memory only.
+let TOKEN = '';
+// Scrub obsolete token links without accepting or persisting their secret.
+if (location.search) history.replaceState(null, '', location.pathname);
+const login = document.createElement('form');
+login.innerHTML = '<label>Admin password <input name="password" type="password" autocomplete="off" required></label> <button>Unlock</button> <button type="button" id="logout">Lock</button>';
+document.querySelector('header').append(login);
+login.addEventListener('submit', event => { event.preventDefault(); TOKEN = login.elements.password.value; login.reset(); refresh(); });
+login.querySelector('#logout').onclick = () => { TOKEN = ''; location.reload(); };
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -254,10 +260,11 @@ function renderBuckets(buckets, limitOn) {
 }
 
 async function refresh() {
+  if (!TOKEN) return;
   const stamp = document.getElementById('last-updated');
   try {
-    const res = await fetch('/admin/state?token=' + encodeURIComponent(TOKEN));
-    if (res.status === 401) { stamp.textContent = 'bad admin token — check the URL'; return; }
+    const res = await fetch('/admin/state', {headers: {'X-Common-Admin-Token': TOKEN}, cache: 'no-store'});
+    if (res.status === 401) { stamp.textContent = 'Locked — enter the admin password above'; return; }
     if (!res.ok) { stamp.textContent = 'update failed (' + res.status + ') — retrying…'; return; }
     const d = await res.json();
     document.getElementById('release').textContent = d.release + ' — v' + d.version;

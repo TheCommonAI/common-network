@@ -10,6 +10,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app import compose, db, embedder, ratelimit, upstream
 from app.compose import PanelPlan
 from app.config import settings
+from app.limits import validate_chat
+from app.credentials import token_digest
 from app.router import ScoredNode, best_matched_domain, score_nodes
 from app.verify import VerificationReport, verify
 
@@ -54,7 +56,9 @@ async def _require_contributor(request: Request) -> None:
     if not token:
         raise HTTPException(status_code=401, detail=_CONTRIBUTOR_GUIDANCE)
     async with db.pool().acquire() as conn:
-        row = await conn.fetchrow("select 1 from nodes where node_token = $1", token)
+        row = await conn.fetchrow("select 1 from nodes where node_token = $1 or (node_token not like 'sha256:%' and node_token = $2)", token_digest(token), token)
+    if row is not None:
+        request.state.verified_token = token
     if row is None:
         raise HTTPException(
             status_code=401,
@@ -108,7 +112,7 @@ async def _record_decision(
                  checks_run, checks_failed, disagreements)
             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             """,
-            request_embed,
+            request_embed if settings.retain_request_embeddings else None,
             chosen.node["id"] if chosen else None,
             chosen.score if chosen else None,
             runner_up.node["id"] if runner_up else None,
@@ -118,7 +122,7 @@ async def _record_decision(
             topology,
             panel,
             aggregator_node,
-            json.dumps(compose_reason) if compose_reason else None,
+            json.dumps(compose_reason) if compose_reason and settings.retain_request_embeddings else None,
             len(report.checks) if report else None,
             len(report.failed) if report else None,
             len(report.disagreements) if report else None,
@@ -240,7 +244,7 @@ def _proxy_response(resp: httpx.Response, headers: dict[str, str], stream: bool)
         async def body_iter():
             client = resp.extensions["_client"]
             try:
-                async for chunk in resp.aiter_raw():
+                async for chunk in upstream.iter_limited(resp):
                     yield chunk
             finally:
                 await resp.aclose()
@@ -249,7 +253,7 @@ def _proxy_response(resp: httpx.Response, headers: dict[str, str], stream: bool)
         return StreamingResponse(
             body_iter(),
             status_code=resp.status_code,
-            media_type=resp.headers.get("content-type", "text/event-stream"),
+            media_type="text/event-stream",
             headers=headers,
         )
     return None
@@ -379,7 +383,7 @@ async def _handle_composed(
     return Response(
         content=content,
         status_code=resp.status_code,
-        media_type=resp.headers.get("content-type", "application/json"),
+        media_type="application/json",
         headers=headers,
     )
 
@@ -388,8 +392,6 @@ async def _handle_composed(
 
 @router.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    body = await request.json()
-    stream = bool(body.get("stream", False))
 
     # Access control before any work: a request that isn't allowed must not
     # cost the donors anything, not even the embedding call.
@@ -405,7 +407,20 @@ async def chat_completions(request: Request):
             headers={"Retry-After": str(max(1, int(retry_after) + 1))},
         )
 
+    try:
+        body = validate_chat(await request.json())
+    except (ValueError, RecursionError):
+        raise HTTPException(400, 'invalid JSON chat body') from None
+    stream = body.get('stream', False)
     nodes = await _fetch_healthy_nodes()
+    # Explicit requester-selected recipients constrain primary, retry, panel,
+    # and aggregator alike. Names are membership choices, not proof of trust.
+    allowed_header = request.headers.get('X-Common-Allowed-Nodes')
+    if allowed_header is not None:
+        allowed = {n.strip() for n in allowed_header.split(',') if n.strip()}
+        if not allowed or len(allowed) > 32:
+            raise HTTPException(400, 'provide 1 to 32 allowed node names')
+        nodes = [n for n in nodes if n['name'] in allowed]
     if not nodes:
         raise HTTPException(status_code=503, detail="no healthy nodes available")
 
@@ -446,6 +461,8 @@ async def chat_completions(request: Request):
             )
             if composed is not None:
                 return composed
+            if request.headers.get('X-Common-No-Retry', '').lower() == 'true':
+                raise HTTPException(502, 'permitted panel failed; retries disabled')
             # Every panel member failed. Fall through to single-node routing
             # rather than failing the request.
             plan = PanelPlan(compose=False,
@@ -461,11 +478,14 @@ async def chat_completions(request: Request):
                 primary, backup = generalists[0], scored[0]
 
         candidates = [primary] + ([backup] if backup else [])
+        if request.headers.get('X-Common-No-Retry', '').lower() == 'true':
+            candidates = candidates[:1]
 
     last_error: Exception | None = None
 
     for attempt, candidate in enumerate(candidates):
         start = time.monotonic()
+        resp = None
         try:
             resp = await upstream.forward(candidate.node, body, stream)
             latency_ms = int((time.monotonic() - start) * 1000)
@@ -480,7 +500,7 @@ async def chat_completions(request: Request):
             )
 
             headers = {
-                "X-Common-Node": candidate.node["name"],
+                "X-Common-Node": _header_safe(candidate.node["name"]),
                 "X-Common-Score": "forced" if forced_node_name else f"{candidate.score:.4f}",
                 # How many nodes this was actually chosen from, and by how much
                 # it beat the next one.
@@ -519,16 +539,19 @@ async def chat_completions(request: Request):
             return Response(
                 content=content,
                 status_code=resp.status_code,
-                media_type=resp.headers.get("content-type", "application/json"),
+                media_type="application/json",
                 headers=headers,
             )
         except (httpx.HTTPError, httpx.HTTPStatusError) as exc:
+            if resp is not None:
+                await resp.aclose()
+                await resp.extensions['_client'].aclose()
             last_error = exc
             latency_ms = int((time.monotonic() - start) * 1000)
             if attempt == len(candidates) - 1:
                 await _record_decision(request_embed, None, None, latency_ms, False, matched_domain)
 
-    raise HTTPException(status_code=502, detail=f"all candidate nodes failed: {last_error}")
+    raise HTTPException(status_code=502, detail="all permitted candidate nodes failed; retry later")
 
 
 @router.get("/v1/models")

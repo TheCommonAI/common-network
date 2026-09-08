@@ -28,6 +28,42 @@ import time
 import urllib.error
 import urllib.request
 
+
+# Kept self-contained: all three CLI scripts can be installed independently.
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        sensitive = {'authorization', 'x-common-node-token', 'x-common-admin-token', 'cookie'}
+        if req.data is not None or any(k.lower() in sensitive for k in req.headers):
+            raise urllib.error.HTTPError(req.full_url, code, 'credential-bearing redirects are refused', headers, fp)
+        if not newurl.startswith('https://'):
+            raise urllib.error.HTTPError(req.full_url, code, 'unsafe redirect is refused', headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def safe_urlopen(req, timeout=30):
+    from urllib.parse import urlsplit
+    import ipaddress
+    url = req.full_url if isinstance(req, urllib.request.Request) else req
+    p = urlsplit(url)
+    if p.username or p.password or not p.hostname or p.scheme not in {'http', 'https'}:
+        raise urllib.error.URLError('use an HTTP(S) URL without embedded credentials')
+    if p.scheme == 'http':
+        try:
+            ip = ipaddress.ip_address(p.hostname)
+            local = ip.is_loopback or ip.is_private
+        except ValueError:
+            local = p.hostname == 'localhost'
+        if not local:
+            raise urllib.error.URLError('internet gateways require HTTPS; use a private IP for trusted LAN HTTP')
+    return urllib.request.build_opener(_SafeRedirect()).open(req, timeout=timeout)
+
+
+def safe_text(value):
+    return ''.join(c for c in str(value) if (c in '\n\t' or ord(c) >= 32)
+                   and not 127 <= ord(c) <= 159 and not 0x202a <= ord(c) <= 0x202e
+                   and not 0x2066 <= ord(c) <= 0x2069)
+
+
 VERSION = "0.1.2"
 RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
@@ -111,8 +147,11 @@ def comment(text: str) -> str:
 
 
 def self_update() -> None:
+    if os.environ.get('COMMON_ALLOW_UNVERIFIED_UPDATES') != '1':
+        return None
+    print('Warning: explicitly enabled unverified source updates can execute repository code.', file=sys.stderr)
     try:
-        with urllib.request.urlopen(UPDATE_URL, timeout=5) as resp:
+        with safe_urlopen(UPDATE_URL, timeout=5) as resp:
             remote = resp.read()
     except urllib.error.HTTPError as e:
         # See the note in common/common.py: offline stays silent, but a
@@ -182,7 +221,7 @@ def stream_chat(gateway: str, messages: list[dict], region: str | None, target_n
         f"{gateway}/v1/chat/completions", data=json.dumps(body).encode(), headers=headers, method="POST",
     )
     try:
-        resp = urllib.request.urlopen(req, timeout=180)
+        resp = safe_urlopen(req, timeout=180)
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="ignore")
         if e.code == 401:
@@ -212,7 +251,7 @@ def stream_chat(gateway: str, messages: list[dict], region: str | None, target_n
             choices = chunk.get("choices") or [{}]
             delta = choices[0].get("delta", {}).get("content")
             if delta:
-                print(paper(delta), end="", flush=True)
+                print(paper(safe_text(delta)), end="", flush=True)
                 full.append(delta)
     print()
     return "".join(full), node, score
@@ -281,7 +320,7 @@ def interactive(gateway: str, region: str | None, target_node: str | None) -> No
 def list_nodes(gateway: str) -> None:
     req = urllib.request.Request(f"{gateway}/nodes")
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with safe_urlopen(req, timeout=10) as resp:
             nodes = json.loads(resp.read().decode())
     except (urllib.error.URLError, socket.timeout) as e:
         print(f"{GLYPH_FAILED} {red('could not reach the gateway.')}", file=sys.stderr)

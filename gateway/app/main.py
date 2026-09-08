@@ -14,6 +14,8 @@ from app.demand import router as demand_router
 from app.gateway import router as gateway_router
 from app.health import health_check_loop
 from app.registry import router as registry_router
+from app.limits import RequestLimits
+from app.privacy import retention_loop
 from app.seed import seed_from_file
 
 
@@ -51,14 +53,19 @@ async def lifespan(app: FastAPI):
         print("startup: seeding catalogue...", flush=True)
         await seed_catalogue_from_file()
     except Exception as exc:
-        print(f"startup: WARNING seeding failed ({type(exc).__name__}: {exc}) — "
+        print(f"startup: WARNING seeding failed ({type(exc).__name__}) — "
               f"serving with whatever is already in the database", flush=True)
 
     health_task = asyncio.create_task(health_check_loop())
+    retention_task = asyncio.create_task(retention_loop())
     print("startup: ready", flush=True)
-    yield
-    health_task.cancel()
-    await db.disconnect()
+    try:
+        yield
+    finally:
+        health_task.cancel()
+        retention_task.cancel()
+        await asyncio.gather(health_task, retention_task, return_exceptions=True)
+        await db.disconnect()
 
 
 app = FastAPI(
@@ -71,6 +78,8 @@ app = FastAPI(
     version="0.1.2",
     lifespan=lifespan,
 )
+
+app.add_middleware(RequestLimits)
 
 app.include_router(registry_router)
 app.include_router(gateway_router)
@@ -111,3 +120,12 @@ DASHBOARD_PATH = Path(__file__).parent / "static" / "dashboard.html"
 @app.get("/dashboard")
 async def dashboard():
     return FileResponse(DASHBOARD_PATH)
+
+
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request, exc):
+    return JSONResponse({'detail': [{'loc': e['loc'], 'type': e['type'],
+                                    'msg': 'invalid value'} for e in exc.errors()]}, 422)

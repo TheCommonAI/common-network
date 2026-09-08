@@ -1,24 +1,13 @@
-"""Isolated execution for model-generated code.
+"""Explicitly unsafe benchmark execution, disabled by default.
 
-Runs in a fresh subprocess (own memory space, own crash domain) with a wall-clock
-timeout and a resource cap on CPU time / memory. This is process-level isolation,
-not container-level -- it stops a hang or a crash from taking down the bench run,
-but a determined malicious payload could still touch the filesystem or network.
-
-Read this against the network Alpha actually is: node registration is
-permissionless, so a node is NOT a known, trusted model. `common test` executes
-completions from whatever nodes are registered, on the machine running the
-test. That is fine for a lab running tests against machines the operator chose;
-it is NOT fine against a gateway full of strangers' nodes. Two guards:
-
-* `--no-exec` scores without executing anything (already exposed on the CLI).
-* Operators should treat `common test` as a local benchmark of their own
-  network, not something to point at an untrusted one.
-
-TODO(v0.3): move to a container (e.g. Docker) sandbox if this ever has to run
-genuinely untrusted code.
+This subprocess is not a security sandbox: opted-in code can read files and
+use the network with the caller's permissions. Only run it in an independently
+isolated disposable environment. Resource caps prevent some hangs, not attacks.
 """
-import resource
+try:
+    import resource
+except ImportError:
+    resource = None
 import subprocess
 import sys
 import tempfile
@@ -50,8 +39,10 @@ def _limit_resources():
             pass
 
 
-def run_program(source: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> tuple[bool, str]:
+def run_program(source: str, timeout: float = DEFAULT_TIMEOUT_SECONDS, *, allow_unsafe_exec: bool = False) -> tuple[bool, str]:
     """Run a self-contained Python program. Returns (ok, error_message)."""
+    if not allow_unsafe_exec:
+        return False, 'execution disabled; explicitly opt in only inside a disposable isolated environment'
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
         f.write(source)
         path = f.name
@@ -60,7 +51,7 @@ def run_program(source: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> tuple[
         result = subprocess.run(
             [sys.executable, path],
             capture_output=True, text=True, timeout=timeout,
-            preexec_fn=_limit_resources if sys.platform != "win32" else None,
+            preexec_fn=_limit_resources if resource and sys.platform != "win32" else None,
         )
         if result.returncode != 0:
             return False, (result.stderr or result.stdout or "non-zero exit").strip()[-2000:]

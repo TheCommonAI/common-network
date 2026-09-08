@@ -49,13 +49,12 @@ on the school lab if the question is "does the thesis work".
 The three composition-shaped cases are scored against a rubric of independent,
 lane-tagged components rather than substring presence, so an answer that
 combines two specialists scores above one that emits a single specialist's
-part. Scoring executes the model-written code it is judging; `--no-exec`
+part. Execution-based scoring is disabled by default; `--no-exec`
 skips that at the cost of resolution. The report's COMPOSITION CASES block
 isolates those cases and breaks each arm down by lane.
 
 "synth" and "map" are recognised but not yet built -- see `common help synth`
-/ `common help map`. This CLI checks GitHub for a newer version of itself on
-every run and updates in place (pass --no-update to skip).
+/ `common help map`. Automatic source execution is off. Re-run the installer deliberately to update.
 """
 import argparse
 import json
@@ -87,6 +86,42 @@ except ImportError:  # pragma: no cover - Windows
 # join.py owns writing/clearing this file (it runs the actual registration).
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
+
+
+# Kept self-contained: all three CLI scripts can be installed independently.
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        sensitive = {'authorization', 'x-common-node-token', 'x-common-admin-token', 'cookie'}
+        if req.data is not None or any(k.lower() in sensitive for k in req.headers):
+            raise urllib.error.HTTPError(req.full_url, code, 'credential-bearing redirects are refused', headers, fp)
+        if not newurl.startswith('https://'):
+            raise urllib.error.HTTPError(req.full_url, code, 'unsafe redirect is refused', headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def safe_urlopen(req, timeout=30):
+    from urllib.parse import urlsplit
+    import ipaddress
+    url = req.full_url if isinstance(req, urllib.request.Request) else req
+    p = urlsplit(url)
+    if p.username or p.password or not p.hostname or p.scheme not in {'http', 'https'}:
+        raise urllib.error.URLError('use an HTTP(S) URL without embedded credentials')
+    if p.scheme == 'http':
+        try:
+            ip = ipaddress.ip_address(p.hostname)
+            local = ip.is_loopback or ip.is_private
+        except ValueError:
+            local = p.hostname == 'localhost'
+        if not local:
+            raise urllib.error.URLError('internet gateways require HTTPS; use a private IP for trusted LAN HTTP')
+    return urllib.request.build_opener(_SafeRedirect()).open(req, timeout=timeout)
+
+
+def safe_text(value):
+    return ''.join(c for c in str(value) if (c in '\n\t' or ord(c) >= 32)
+                   and not 127 <= ord(c) <= 159 and not 0x202a <= ord(c) <= 0x202e
+                   and not 0x2066 <= ord(c) <= 0x2069)
+
 
 VERSION = "0.1.2"
 RELEASE = "The Common Network Alpha"
@@ -200,15 +235,18 @@ def http_json(method: str, url: str, body: dict | None = None, headers: dict | N
     req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
     if data is not None:
         req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with safe_urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
 
 
 # --- Self-update (same pattern as join.py/chat.py) ---------------------------
 
 def self_update() -> None:
+    if os.environ.get('COMMON_ALLOW_UNVERIFIED_UPDATES') != '1':
+        return None
+    print('Warning: explicitly enabled unverified source updates can execute repository code.', file=sys.stderr)
     try:
-        with urllib.request.urlopen(UPDATE_URL, timeout=5) as resp:
+        with safe_urlopen(UPDATE_URL, timeout=5) as resp:
             remote = resp.read()
     except urllib.error.HTTPError as e:
         # Being offline is normal and stays silent. A 401/403/404 is not
@@ -276,7 +314,7 @@ def contributor_headers(gateway: str | None = None) -> dict:
     if not token:
         return {}
     issuer = (identity.get("gateway") or "").rstrip("/")
-    if gateway is not None and issuer != gateway.rstrip("/"):
+    if gateway is None or issuer != gateway.rstrip("/"):
         return {}
     return {"X-Common-Node-Token": token}
 
@@ -322,7 +360,7 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
     req = urllib.request.Request(f"{gateway}/v1/chat/completions", data=json.dumps(body).encode(), headers=headers, method="POST")
     start = time.monotonic()
     try:
-        resp = urllib.request.urlopen(req, timeout=180)
+        resp = safe_urlopen(req, timeout=180)
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="ignore")
         print(red("✗ the network couldn't answer that."), file=sys.stderr)
@@ -444,7 +482,7 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
                 if as_json:
                     full.append(delta)
                 else:
-                    print(paper(delta), end="", flush=True)
+                    print(paper(safe_text(delta)), end="", flush=True)
                     full.append(delta)
     if not as_json:
         print()
@@ -630,12 +668,8 @@ def cmd_peers(gateway: str, as_json: bool) -> None:
 
 def cmd_demand(gateway: str, as_json: bool) -> None:
     nodes = http_json("GET", f"{gateway}/nodes")
-    decisions = http_json("GET", f"{gateway}/decisions/recent?limit=200")
-
-    demand: dict[str, int] = {}
-    for d in decisions:
-        if d.get("matched_domain"):
-            demand[d["matched_domain"]] = demand.get(d["matched_domain"], 0) + 1
+    stats = http_json("GET", f"{gateway}/demand/gaps")
+    demand = {g['domain']: g['demand'] for g in stats['domain_gaps']}
     coverage: dict[str, int] = {}
     for n in nodes:
         if n["healthy"] and n.get("domain_tags"):
@@ -651,7 +685,7 @@ def cmd_demand(gateway: str, as_json: bool) -> None:
         print(dim("no domain-matched requests yet. the network hasn't seen enough traffic to show gaps."))
         return
 
-    print(dim("domain coverage   ·   live\n"))
+    print(dim("domain coverage · delayed demand; small groups suppressed\n"))
     max_val = max([1] + list(demand.values()) + list(coverage.values()))
     for d in domains:
         dv, cv = demand.get(d, 0), coverage.get(d, 0)
@@ -766,21 +800,21 @@ def cmd_contrib(gateway: str, as_json: bool) -> None:
         print(dim("not currently on the commons."))
         print(dim("  → common join"))
         return
-    decisions = http_json("GET", f"{gateway}/decisions/recent?limit=500")
-    served = [d for d in decisions if d.get("chosen_node") == identity.get("node_id")]
-    ok = sum(1 for d in served if d.get("ok"))
+    stats = http_json("GET", f"{gateway}/decisions/mine", headers=contributor_headers(gateway))
+    count = stats['requests_served']
+    ok = stats['ok']
 
     if as_json:
-        print(json.dumps({"requests_served": len(served), "ok": ok}))
+        print(json.dumps({"requests_served": count, "ok": ok}))
         return
 
     since = time.time() - identity.get("joined_at", time.time())
     days = max(since / 86400, 0.01)
     print(f"node  {paper(identity['name'], bold=True)}   ·   on the commons {days:.1f} days\n")
-    print(dim(f"requests served (last 500 logged)   {len(served)}"))
-    print(dim(f"successful                          {ok}/{len(served)}" if served else dim("successful                          —")))
+    print(dim(f"requests served (last 7 days)       {count}"))
+    print(dim(f"successful                          {ok}/{count}" if count else dim("successful                          —")))
     print()
-    print(comment(f"{len(served)} questions got answered because you left your gate open."))
+    print(comment(f"{count} questions got answered because you left your gate open."))
 
 
 def cmd_config(as_json: bool, args: argparse.Namespace) -> None:
@@ -822,20 +856,15 @@ def cmd_leave(gateway: str) -> None:
 
 def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_model: str | None = None) -> None:
     join_py = INSTALL_DIR / "join.py"
-    # Always fetch the current version before delegating -- a stale local
-    # copy's own self-update runs *after* argparse, so a new flag this CLI
-    # relies on (e.g. --auto) would crash before join.py ever got the chance
-    # to update itself. Found exactly this bug in testing.
-    try:
-        with urllib.request.urlopen(JOIN_SCRIPT_URL, timeout=10) as resp:
-            remote = resp.read()
-        join_py.parent.mkdir(parents=True, exist_ok=True)
-        join_py.write_bytes(remote)
-    except (urllib.error.URLError, socket.timeout) as e:
-        if not join_py.exists():
-            print(red(f"✗ couldn't fetch the join script: {e}"), file=sys.stderr)
-            sys.exit(1)
-        # Offline but we already have a copy -- use it as-is.
+    # Execute the installed version only. Fetch-and-exec here used to bypass
+    # --no-update and could silently replace reviewed code on every join.
+    if not join_py.exists():
+        source_join = Path(__file__).resolve().parent.parent / 'join' / 'join.py'
+        if source_join.exists():
+            join_py = source_join
+        else:
+            print('Contributor tools are not installed. Re-run the installer after installing Ollama.', file=sys.stderr)
+            return
 
     if verb == "serve":
         print(dim(f"putting {extra_model} out to graze on the commons.\n"))
@@ -925,7 +954,7 @@ def _link_probe(endpoint_url: str, attempts: int = 3, timeout: float = 15.0) -> 
     for _ in range(attempts):
         t = time.monotonic()
         try:
-            with urllib.request.urlopen(url, timeout=timeout):
+            with safe_urlopen(url, timeout=timeout):
                 pass
         except urllib.error.HTTPError:
             pass  # any HTTP answer still proves the round trip -- time it
@@ -970,7 +999,7 @@ def _probe_once(gateway: str, prompt: str, node: str | None = None, timeout: flo
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
     start = time.monotonic()
     try:
-        resp = urllib.request.urlopen(req, timeout=timeout)
+        resp = safe_urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as e:
         return {"ok": False, "error": f"http {e.code}: {e.read().decode(errors='ignore')[:200]}",
                 "total_ms": int((time.monotonic() - start) * 1000)}
@@ -1098,13 +1127,13 @@ def _money(value) -> Decimal:
 # would be circular. The cost is that this measures whether an explanation is
 # present, coherent and correct, not whether it is elegant.
 
-# Set False by `--no-exec`. Executing model-generated code is the strongest
+# Disabled by default; explicit unsafe opt-in is required. Execution is the strongest
 # available quality signal for the code lane -- structural checks cannot tell a
 # working function from a plausible-looking broken one -- but it is still
 # running generated code on the lab's machines. Same bar as bench/sandbox.py:
 # acceptable for known, trusted models in a controlled run. When off, the
 # execution components drop out of the denominator rather than scoring zero.
-_THESIS_EXEC = True
+_THESIS_EXEC = False
 
 _FENCE_RE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _DEF_RE = re.compile(r"^\s*(?:def |import |from |class )")
@@ -1794,7 +1823,7 @@ def _ask_thesis(gateway: str, prompt: str, *, compose: str | None = None,
     req = urllib.request.Request(f"{gateway}/v1/chat/completions",
                                  data=json.dumps(body).encode(), headers=headers, method="POST")
     start = time.monotonic()
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with safe_urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read().decode())
         meta = {
             "latency_ms": int((time.monotonic() - start) * 1000),
@@ -2054,7 +2083,7 @@ def _render_thesis_report(payload: dict) -> str:
 def _cmd_test_thesis(gateway: str, args: argparse.Namespace, emit: callable) -> None:
     """Run the thesis benchmark and append results to the same jsonl."""
     global _THESIS_EXEC
-    _THESIS_EXEC = not getattr(args, "no_exec", False)
+    _THESIS_EXEC = getattr(args, "allow_unsafe_exec", False) and not getattr(args, "no_exec", False)
 
     cases = _thesis_cases_legal() if args.thesis_cases == "legal" else _thesis_cases_math_code()
     arms = ["single", "panel", "best-member", "replication"]
@@ -2064,7 +2093,7 @@ def _cmd_test_thesis(gateway: str, args: argparse.Namespace, emit: callable) -> 
     print(f"{GLYPH_ROUTE} {paper('thesis test', bold=True)}")
     print(comment("does a panel of specialists beat the best individual specialist?"))
     if not _THESIS_EXEC:
-        print(comment("--no-exec: model-written code is not run; code-correctness checks are skipped"))
+        print(comment("safe scoring: model-written code is not run; execution checks are skipped"))
     print()
     print(f"{GLYPH_WORK} {dim('preflight: checking the network can compose')}")
     network = _thesis_preflight(gateway, cases)
@@ -2150,6 +2179,9 @@ def cmd_test(gateway: str, args: argparse.Namespace) -> None:
     if not args.routing_only:
         print(f"{GLYPH_WORK} {dim('measuring the link to each node (no inference)')}")
         for n in healthy:
+            if not n.get('endpoint_url'):
+                print(dim(f"   {n['name']}: endpoint private; using gateway measurements only"))
+                continue
             link_rtt = _link_probe(n["endpoint_url"])
             direct = _probe_once(gateway, "Reply with exactly: OK", timeout=120,
                                  direct_url=n["endpoint_url"], direct_model=n["model_name"])
@@ -2332,6 +2364,7 @@ def _parse_test_flags(args: argparse.Namespace) -> argparse.Namespace:
     p.add_argument("--thesis", action="store_true")
     p.add_argument("--thesis-cases")
     p.add_argument("--no-exec", action="store_true")
+    p.add_argument("--allow-unsafe-exec", action="store_true")
     sub, _ = p.parse_known_args(args.rest)
     for key, value in vars(sub).items():
         if value not in (None, False):  # only override what was actually passed
@@ -2478,6 +2511,7 @@ def main() -> None:
     parser.add_argument("--out", default=None, help="test: results jsonl path")
     parser.add_argument("--thesis", action="store_true", help="test: run the thesis benchmark (single vs panel vs best-member)")
     parser.add_argument("--thesis-cases", default="math-code", choices=["math-code", "legal"], help="test: which ground-truth case set to use (default: math-code)")
+    parser.add_argument("--allow-unsafe-exec", action="store_true", help="DANGER: execute model-written Python with your user permissions; disposable trusted lab only")
     parser.add_argument("--no-exec", action="store_true", help="test: don't execute model-written code when scoring (lower resolution, nothing runs locally)")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--version", action="store_true")

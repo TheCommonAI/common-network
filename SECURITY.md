@@ -1,161 +1,176 @@
-# Security notes — The Common Network Alpha (v0.1.2)
+# Security and privacy
 
-Common is **permissionless by design**: anyone can register a node, and
-anyone can send requests. That is the thesis — but it means the security
-model has to be stated, not assumed. This document says what an unauthenticated
-stranger can and cannot do, what an operator of a *publicly reachable* gateway
-should do, and what is deliberately out of scope for Alpha.
+Common is a trusted-compute prototype, not a confidential-computing system.
+A contributor's administrator can inspect any prompt or answer processed on
+that ordinary PC. The gateway also sees plaintext to route and compose it.
+TLS and content-free logs do not change either fact. Use trusted participants
+and non-sensitive inputs; no claim of end-to-end encryption is made.
 
-## What a stranger can do (by design)
+## Implemented boundaries
 
-- Register a node (it must be reachable, and it will be health-checked).
-- Send `POST /v1/chat/completions` requests and use the network's compute.
-- Read `/nodes` (names, models, endpoint URLs, operators), `/decisions/*`,
-  `/demand/*`, `/catalogue` and the dashboard.
+- Workers authenticate each inference request with a random credential distinct
+  from the node's ownership/chat token. Only `GET /v1/models` and
+  `POST /v1/chat/completions` are exposed. Only the contributed model is allowed.
+- Tunnel workers bind loopback. `--lan` explicitly binds the worker to the LAN;
+  Ollama stays on loopback. Old externally bound Ollama installations must be
+  reconfigured: Common cannot revoke a separately opened port or old tunnel.
+- Workers accept at most 16 connections and one inference job by default.
+  Headers/body have a 15-second overall read deadline, and input is limited to
+  2 MB. Inference has socket timeouts, an output-byte cap, an output-token cap
+  and an overall relay deadline. Content is not logged and backend error
+  bodies are not reflected. Responses stream promptly instead of waiting for
+  an 8 KB buffer. A missing Ollama/model fails health checks.
+- Gateway registration and outbound requests reject non-public addresses by
+  default, HTTP on public destinations, URL credentials, query strings,
+  fragments and ambiguous paths. Link-local/metadata, unspecified and multicast
+  addresses are always forbidden. Every resolved address must pass policy.
+- Outbound HTTP connects to a validated numeric address; the original hostname
+  is preserved for Host, TLS SNI and certificate verification. Fresh HTTP/1.1
+  connections prevent reuse of one hostname's TLS session for another hostname
+  sharing an IP. Redirects and environment-configured proxies are disabled on
+  gateway-to-node requests. Health checks use the same boundary and a deadline.
+- A gateway environment key is released only for its exact configured HTTPS
+  endpoint. A name allowlist alone never authorises a credential.
+- Clients attach saved tokens only to their issuing gateway. Credential-bearing
+  requests and request bodies cannot follow redirects. Internet gateways must
+  use HTTPS; trusted LAN HTTP must use a private IP (or loopback).
+- Node credentials are stored as SHA-256 verification digests. Random tokens are
+  high-entropy secrets, not human passwords. Migration 008 hashes existing
+  node tokens without changing client credentials. Hash values themselves are
+  not accepted as credentials. Legacy plaintext tokens remain supported during
+  an upgrade and are hashed on successful re-registration.
+- Worker tokens must remain recoverable by the gateway to authenticate outgoing
+  jobs. They are not returned in public node listings. Keep the database and
+  backups private. Name claims are serialised in a database transaction.
+- Chat quotas use verified contributor identities. IP-based registration/admin
+  limits accept forwarding headers only from configured trusted proxies, walking
+  the chain from the trusted end. In-memory bucket counts are bounded; bucket
+  labels use process-local keyed fingerprints rather than tokens or raw IPs.
+- Gateway input and output bytes, message counts, output tokens, concurrent
+  requests and request duration are bounded. Text chat, system messages,
+  streaming, ordinary sampling controls and JSON response-format requests are
+  supported. Unsupported options, remote image inputs and non-text messages
+  are rejected explicitly rather than silently forwarded.
+- `X-Common-Allowed-Nodes: name1,name2` restricts all eligible workers, including
+  primary selection, retries, specialists and aggregation. An empty/unavailable
+  allowed group fails closed. `X-Common-No-Retry: true` disables fallback after
+  a failed single route or failed panel. `X-Common-Compose: never` prevents
+  composition. A node name expresses a user's trust choice, not attested identity.
+- Admin data requires `X-Common-Admin-Token`. `/admin` has a password input;
+  the password remains in page memory and is never put in URLs, cookies or
+  browser storage. Lock or reload clears it. Query-string passwords are refused.
+- Responses have no-store, no-referrer and nosniff headers. Dashboard/admin pages
+  prohibit framing, external resource loads and external form destinations.
+  Validation errors omit submitted values (which could contain secrets).
+- Contributor identity files are atomically replaced with restrictive Unix
+  permissions. The Windows installer restricts its directory ACL to the current
+  user and SYSTEM. Failure to save identity is reported and registration is
+  rolled back on a best-effort basis. Background Windows tasks no longer request
+  highest privileges. The gateway container runs as a non-root user.
 
-Legibility is part of the pitch — every response says which machine answered
-it — so the registry is public on purpose. If you operate a gateway, know that
-node names, operators and endpoint URLs are visible to anyone. `common join`
-defaults `--name` to `<hostname>-<random-suffix>` and `--operator` to
-`friend` — it never publishes your OS username unless you pass it.
+## Retention and public statistics
 
-## What a stranger cannot do
+Request embeddings and detailed composition reasons are not retained by default.
+An hourly cleanup clears previous copies when retention is disabled, and deletes
+routing metadata older than `DECISION_RETENTION_DAYS` (default 7, minimum 1).
+Cleanup failures produce a content-free warning; they must be investigated.
+Deleting rows does not erase database backups, WAL, disk remnants or provider
+logs. Operators must configure the corresponding backup/log expiry themselves.
 
-- **Use the network without contributing to it.** With
-  `REQUIRE_CONTRIBUTION=true` (the shipped default), a request to
-  `/v1/chat/completions` must carry the node token of a currently registered
-  node. Donated compute is for donors. The gate checks *registration*, not
-  health — a donor whose laptop flaps offline keeps asking; a token whose
-  node is deregistered stops working immediately.
-- **Burn a contributor's machine with bulk traffic.** A per-client token
-  bucket (`RATE_LIMIT_REQUESTS_PER_MINUTE`, default 20) throttles
-  `/v1/chat/completions` after the burst. Best-effort, not a boundary — the
-  contribution gate is the real control.
-- **Take over or delete a node they didn't register.** Registration of an
-  existing name requires that node's `X-Common-Node-Token`, issued once at
-  first registration and returned only to whoever holds it. (Names are
-  public; tokens are not — see `gateway/app/registry.py`.)
-- **Make the gateway fetch cloud metadata.** An endpoint URL must be
-  `http(s)`, must resolve, and is refused outright if it resolves to a
-  link-local address — the range cloud metadata services live on. Loopback is
-  allowed only when the operator opts in, and the check re-runs on every
-  health pass. **Private LAN ranges are still permitted**, deliberately (school
-  labs run `--lan`), and re-validation narrows the DNS-rebinding window rather
-  than closing it: the name is resolved again at connection time by httpx, so
-  a hostname that flips between answers can still be fetched. Do not treat
-  this as full SSRF protection — see Known limits.
-- **Harvest credentials through the registry.** A node stores the *name* of
-  an environment variable (`api_key_ref`), never a key, so no key value ever
-  enters the database or an API response. The name is still chosen by the
-  registrant, so it is resolved only if the operator listed it in
-  `ALLOWED_API_KEY_REFS` — empty by default, meaning no node gets a
-  credential until someone deliberately grants one. (Before this allowlist,
-  registering an endpoint you controlled with `api_key_ref=OPENROUTER_API_KEY`
-  made the gateway send that key to you on its next health check. Fixed
-  2026-09-08; see History.)
-- **Read other people's requests.** The decisions log records topology, nodes,
-  scores and latencies. It does not expose request text or embeddings.
+`/decisions/recent` is admin-only by default. `/decisions/mine` gives a contributor
+only their own aggregate contribution counts. `/decisions/summary` and the public
+dashboard use delayed aggregate counts with small groups suppressed. Public
+worker endpoints are hidden, although aliases, capabilities and available models
+remain visible. Each requester still receives their own routing receipt headers.
 
-## Running a public gateway
+Demand planning continues from delayed domain counts and model coverage. Without
+stored embeddings, clustering of uncategorised request vectors is unavailable;
+`embedding_analysis_enabled` reports this. Public clustering work is bounded to
+500 vectors and cached. Counts suppressed for privacy are not proof of zero demand.
+These measures reduce incidental disclosure; they are not differential privacy,
+anonymity, or protection against a determined observer of a small network.
 
-The shipped defaults are the public posture: contribution-gated
-(`REQUIRE_CONTRIBUTION=true`) and rate-limited
-(`RATE_LIMIT_REQUESTS_PER_MINUTE=20`). The local demo `.env` switches both
-off because its seeded nodes have no tokens — **do not copy those overrides
-to a public deployment**. On a public gateway:
+`RETAIN_REQUEST_EMBEDDINGS=true`, `PUBLIC_DECISION_DETAILS=true` and
+`PUBLIC_NODE_ENDPOINTS=true` are explicit research/development exceptions. Do not
+enable them for sensitive traffic. Enabling embedding retention is an operator
+choice, not a substitute for informed consent from the people using that gateway.
 
-1. **Set `ALLOW_LOOPBACK_NODE_ENDPOINTS=false`** so a stranger can't point the
-   network at services only visible from the gateway's own machine.
-2. **Leave `REQUIRE_CONTRIBUTION=true`** unless you deliberately want to give
-   compute away to anonymous traffic.
-3. **Keep the database private.** Request embeddings live in the `decisions`
-   table; the API doesn't expose them, but a public Postgres would.
-4. **Set `ADMIN_TOKEN`** if you want the operators view at `/admin` (failing
-   nodes, error rates, client rate-limit state). Left empty — the default —
-   those routes 404 as though the feature did not exist. Use a long random
-   value (`openssl rand -hex 24`); it is a password, and it appears in the URL
-   when you open the page in a browser, so it will be in your history.
-5. **Pin the CLI install to a tag** if you fork this. `install.sh` and the
-   CLI's self-update fetch from `main` by default; `main` is fine while it is
-   this repository, but it means whoever controls the repo controls every
-   installed machine's CLI. The short install URL (`commonai.com.au/install.sh`)
-   is a redirect to this repository, not a mirror — keep it that way, so the
-   repo stays the single source of truth and the domain can never serve
-   something the repo doesn't contain.
+## Upgrading an existing deployment
 
-## Known limits, stated rather than papered over
+1. Review this PR and stage it with a private test gateway first. Apply
+   `python -m app.migrate` with the deployed version; migration 008 is idempotent.
+   Rollback to an older gateway requires a plan for hashed node credentials;
+   old code cannot authenticate migrated tokens. Clients keep the same raw token.
+2. Leave public endpoints on HTTPS and set `ALLOW_LOOPBACK_NODE_ENDPOINTS=false`.
+   For a trusted LAN gateway, set `ALLOWED_NODE_CIDRS` to the actual node subnet,
+   for example `192.168.1.0/24`. For a same-machine demo, explicitly enable
+   loopback. Never use `0.0.0.0/0` as an exception on a public service.
+3. Replace `ALLOWED_API_KEY_REFS` with exact destination mappings, e.g.
+   `API_KEY_DESTINATIONS={"OPENROUTER_API_KEY":["https://openrouter.ai/api/v1"]}`.
+   The old name-only setting is accepted for configuration compatibility but
+   does not authorise any key. A changed destination requires operator approval.
+4. Keep `REQUIRE_CONTRIBUTION=true` and configure quota values for your test
+   population. Use a single gateway process for the built-in quotas. Configure
+   `TRUSTED_PROXY_CIDRS` only from your hosting provider's actual proxy network.
+   Do not combine this with an ASGI server that blindly rewrites client addresses.
+   The Docker command disables uvicorn proxy-header rewriting and access logs.
+5. Reinstall/restart contributor tools so tunnels point at the restricted worker.
+   New/re-registered nodes become eligible after a successful health check.
+   Remove old raw-Ollama tunnels and reverse old `OLLAMA_HOST=0.0.0.0` settings.
+   LAN firewall access is for worker port 11435, not Ollama port 11434.
+6. Open `/admin` and enter the password in the page. Retire saved `?token=` links.
+   Rotate any password previously used in URLs; proxies may already have logged it.
+7. Review retention settings and confirm cleanup succeeds. Configure expiry for
+   database backups and infrastructure logs separately. No real prompts should
+   appear in diagnostics. Windows/macOS installations and real-model performance
+   still need smoke testing on those target operating systems.
 
-- **A contributor's endpoint is an unauthenticated Ollama.** `common join`
-  tunnels straight to `localhost:11434`, and `/nodes` publishes that URL.
-  Ollama's API has no authentication, so anyone who reads the registry can
-  talk to a contributor's Ollama directly — bypassing the gateway's gate and
-  rate limit, and reaching model-management endpoints, not just inference.
-  This is the largest open hole in Alpha. Until a worker sits in front of
-  Ollama, **only donate a machine you are comfortable exposing**, and prefer
-  `--lan` on a trusted network.
-- **DNS rebinding is narrowed, not closed.** Validation resolves the hostname;
-  the actual connection resolves it again. A hostname that answers differently
-  between those two moments defeats the check. Fixing it properly means
-  pinning the validated IP at connection time.
-- **The gate checks registration, not identity or fair shares.** Anyone who
-  can register a node can use the network — that is still the thesis — and
-  one person can register several. Usage proportional to *how much* you
-  donate (capacity, model size, uptime) is a v0.2 problem; Alpha's gate is
-  binary: in or out.
-- **The node token now doubles as the access credential.** Leaking it costs
-  more than it did yesterday: before it only controlled your own node, now it
-  also grants network access while that node is registered. It is still
-  scoped (one node, one gateway) and revocable (deregister the node).
-- **Rate limiting is per-IP and trusts X-Forwarded-For.** A client rotating
-  source addresses gets a bucket each. It is a brake on scripts in loops,
-  not a defence against a determined bulk attacker — the gate is.
-- **A contributor machine flapping offline keeps access while registered.**
-  Deliberate (health is a routing signal, not membership), but it means a
-  node that is registered-but-never-answering still lets its owner ask.
-- **`common test` executes model-generated code** with process-level
-  isolation only (`bench/sandbox.py` — subprocess, timeout, memory/CPU caps;
-  not a container). Fine against machines you chose; run it with `--no-exec`
-  against a gateway full of strangers' nodes. A node can feed you code to
-  run; don't point the scorer at a network you don't trust.
-- **A malicious node can answer requests**, including as a panel aggregator
-  if composition is enabled. The network trusts node *identity*, not node
-  *behaviour*. Responses are model output and should be treated as untrusted
-  text by any client, the same as any LLM.
-- **No CORS configuration.** Browsers cannot call the API cross-origin (the
-  default is deny), which is the safe direction; the CLI and curl are
-  unaffected.
-- **The operators view authenticates with one shared password, in the URL.**
-  `/admin` has no accounts, no sessions and no audit of who looked; anyone
-  with the link has it until you rotate `ADMIN_TOKEN`. Adequate for a page
-  one or two people open on their own machines, which is what it is for —
-  not a control panel to hand around. It is read-only: nothing on it changes
-  the network.
+## Updates and benchmark execution
 
-## Reporting a problem
+Automatic fetch-and-execute updates are disabled. `common join` uses installed
+code and does not independently fetch a replacement join script. Re-run the
+installer to update deliberately; installers resolve one immutable repository
+commit for all Common files. `COMMON_INSTALL_COMMIT` can pin a reviewed full SHA.
+This is revision consistency, **not signed release verification**. Initial
+installation still trusts GitHub/repository control and upstream dependency
+installers. The opt-in `COMMON_ALLOW_UNVERIFIED_UPDATES=1` retains the old unsafe
+update path for developers, with a warning. Do not enable it on donated PCs.
+A signed release process with separately managed signing keys remains future work.
 
-Open a private GitHub security advisory on this repository (Security tab →
-"Report a vulnerability") rather than a public issue. If you can't, a plain
-issue titled "security" with no reproduction details works — we'll follow up
-for the details privately.
+Benchmark code execution is off by default in both implementations. The CLI's
+`--allow-unsafe-exec` and the library's `allow_unsafe_exec=True` are explicit,
+dangerous opt-ins. They execute generated Python with the caller's permissions.
+Use only in a disposable isolated environment. CPU/memory limits and timeouts
+are not a security sandbox. `--no-exec` is still accepted and overrides the opt-in.
 
-## History
+## Remaining trust and operational limits
 
-- 2026-09-08: `api_key_ref` was resolved against the gateway's environment
-  with no restriction on which variable a registrant could name. Registering
-  an endpoint you controlled and naming any variable (e.g.
-  `OPENROUTER_API_KEY`) caused the gateway to send that value to you as a
-  bearer token — on the next health check, with no user request involved.
-  Fixed by the `ALLOWED_API_KEY_REFS` allowlist, empty by default, applied on
-  both the forwarding and health-check paths. **If you ran a gateway with a
-  real key in its environment while it was publicly reachable, rotate that
-  key.**
-- 2026-09-08: the CLI and chat client attached the stored node token to
-  whatever `--gateway` pointed at, so aiming either at another server handed
-  it your token. Now sent only to the gateway that issued it.
-- 2026-09-08: health checks treated any status under 500 as healthy, so a node
-  answering 401 or 404 was routed real traffic. Now 2xx only.
-- 2026-09-07 (pre-Alpha public release): re-registration of an existing node
-  name returned that node's stored token to the caller — anyone who read a
-  node's name from `GET /nodes` could take it over or delete it. Fixed before
-  first publish: token required on name conflict, and endpoint URLs
-  validated against metadata/link-local ranges.
+- Ordinary PC administrators, the gateway operator, swap/crash dumps and hostile
+  backend modifications can expose content. No secure memory-erasure promise.
+- LAN HTTP is plaintext, including credentials. Use an encrypted VPN or properly
+  terminated TLS when network interception is in scope. Tunnel TLS terminates at
+  its provider; this is not requester-to-worker end-to-end encryption.
+- Registration does not prove honest contribution or stop Sybil identities.
+  Admission policy, abuse monitoring, global shared quotas and fair scheduling
+  remain necessary before broad untrusted public use.
+- Worker cancellation closes upstream connections best-effort. Ollama controls
+  when GPU work actually stops. Resource limits are not a hard GPU/RAM sandbox.
+- No attestation, confidential computing, signed updater, secret-management
+  service, reproducible-build guarantee or comprehensive dependency audit is
+  provided by this change. Containers do not hide content from the host owner.
+- Limits are per process. Multiple gateway processes need shared limits; hosting
+  firewalls must also restrict ingress/egress and protect the database.
+
+## Verification
+
+Run `python tests/run_all.py` from `gateway/` with gateway dependencies installed.
+The lightweight suite does not download or load an embedding model. It covers
+routing/composition, real local HTTP forwarding, worker auth/route/model boundaries,
+streaming, gateway chat, recipient restrictions, redirects, DNS pinning, TLS
+hostname verification, retention writes, quotas, bounds and credential handling.
+TLS fixture tests need OpenSSL and report a skip if it is missing.
+
+These tests do not certify live deployment configuration, database migrations on
+production data, GPU resource isolation, or platform installers. Test those in
+staging before merging/deployment. Report vulnerabilities through a private GitHub
+security advisory rather than posting real secrets or exploit details publicly.
