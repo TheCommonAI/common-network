@@ -18,6 +18,13 @@ class NodeCreate(BaseModel):
     domain_tags: list[str] | None = None
     catalogue_id: str | None = None
 
+    # What the gateway must present to this node's worker on every request.
+    # Supplied by the joiner rather than issued here: the worker has to be
+    # running (with its token) before the endpoint being registered is worth
+    # anything, so generating it gateway-side would need a second round trip.
+    # Omitted by nodes that front a third-party API instead of a worker.
+    worker_token: str | None = Field(default=None, min_length=16, max_length=128)
+
 
 class NodeOut(BaseModel):
     id: UUID

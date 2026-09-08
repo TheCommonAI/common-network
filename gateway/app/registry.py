@@ -147,13 +147,14 @@ async def register_node(node: NodeCreate, x_common_node_token: str | None = Head
                     api_key_ref = $5, capability_text = $6, capability_embed = $7,
                     region = $8, cost_per_1k = $9, domain_tags = $10,
                     catalogue_id = $11,
-                    node_token = coalesce(node_token, $12)
+                    node_token = coalesce(node_token, $12),
+                    worker_token = $13
                 where name = $1
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
                 node.capability_text, vec, node.region, node.cost_per_1k,
-                node.domain_tags, node.catalogue_id, new_token,
+                node.domain_tags, node.catalogue_id, new_token, node.worker_token,
             )
         else:
             row = await conn.fetchrow(
@@ -161,18 +162,22 @@ async def register_node(node: NodeCreate, x_common_node_token: str | None = Head
                 insert into nodes
                     (name, operator, endpoint_url, model_name, api_key_ref,
                      capability_text, capability_embed, region, cost_per_1k,
-                     domain_tags, catalogue_id, node_token)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                     domain_tags, catalogue_id, node_token, worker_token)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
                 node.capability_text, vec, node.region, node.cost_per_1k,
-                node.domain_tags, node.catalogue_id, new_token,
+                node.domain_tags, node.catalogue_id, new_token, node.worker_token,
             )
 
     out = _row_to_node_out(row)
-    # The token reaches only whoever proved they own the name: fresh inserts
+    # node_token reaches only whoever proved they own the name: fresh inserts
     # (nobody owned it before) and token-holding re-registrations.
+    #
+    # worker_token is deliberately NOT returned. The node generated it and
+    # already has it; echoing it would put a live credential in one more
+    # response body for no one's benefit.
     return NodeRegisterOut(**out.model_dump(), node_token=row["node_token"])
 
 

@@ -1,0 +1,28 @@
+-- The worker token: what the gateway proves to a contributor's machine.
+--
+-- Until now `common join` tunnelled straight to Ollama, whose API has no
+-- authentication, and GET /nodes published that URL. Anyone who read the
+-- registry could talk to a contributor's Ollama directly -- bypassing the
+-- gateway's contribution gate and rate limit, and reaching model management
+-- (/api/pull, /api/delete), not just inference.
+--
+-- A worker now sits in front of Ollama and requires this token on every
+-- request. It is deliberately NOT node_token:
+--
+--   node_token   -- proves you OWN the node: re-register it, delete it, and
+--                   (since REQUIRE_CONTRIBUTION) use the network.
+--   worker_token -- proves a request came from the gateway. Held by the
+--                   gateway for every node, so it is the credential most
+--                   exposed to a gateway-side leak.
+--
+-- One credential doing both jobs would mean a leaked inference token could
+-- delete the node it belongs to. Separate columns, separate blast radius.
+--
+-- Nullable, and supplied by the joiner rather than generated here. The worker
+-- must already be running with this token before the endpoint it serves is
+-- worth registering, so the node generates it and sends it up.
+--
+-- Null means "no worker in front of this node" -- either a pre-worker node
+-- registered before this migration, or a node fronting a third-party API. The
+-- gateway sends no worker credential to those, which is what they expect.
+alter table nodes add column if not exists worker_token text;

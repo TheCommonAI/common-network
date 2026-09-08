@@ -69,6 +69,9 @@ if ($ollama) {
 
     Write-Host "Downloading the join script..."
     Invoke-WebRequest -Uri "$Raw/join/join.py" -OutFile "$InstallDir\join.py"
+    # The worker is what the tunnel points at -- join.py imports it as a
+    # sibling, so it is not optional.
+    Invoke-WebRequest -Uri "$Raw/join/worker.py" -OutFile "$InstallDir\worker.py"
 
     $joinWrapper = @"
 @echo off

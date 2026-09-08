@@ -94,6 +94,9 @@ if command -v ollama >/dev/null 2>&1; then
     echo "Downloading the join script..."
     curl -fsSL "$RAW/join/join.py" -o "$INSTALL_DIR/join.py"
     chmod +x "$INSTALL_DIR/join.py"
+    # The worker is what the tunnel points at -- join.py imports it as a
+    # sibling, so it is not optional.
+    curl -fsSL "$RAW/join/worker.py" -o "$INSTALL_DIR/worker.py"
 
     cat > "$BIN_DIR/common-join" <<WRAPPER
 #!/usr/bin/env bash

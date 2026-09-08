@@ -11,7 +11,8 @@ import sys
 from pathlib import Path
 
 TESTS = ["test_verify.py", "test_compose.py", "test_panel_flow.py",
-         "test_registry.py", "test_access.py", "test_admin.py"]
+         "test_registry.py", "test_access.py", "test_admin.py",
+         "test_worker.py"]
 
 here = Path(__file__).resolve().parent
 failed = []

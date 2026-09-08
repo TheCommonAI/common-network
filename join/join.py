@@ -43,6 +43,7 @@ import os
 import platform
 import plistlib
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -54,6 +55,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+# Sibling module: the installer puts join.py and worker.py in the same
+# directory, and `python3 join.py` puts that directory on sys.path.
+import worker
 
 BANNER = r"""
  ░▒▓██████▓▒░ ░▒▓██████▓▒░░▒▓██████████████▓▒░░▒▓██████████████▓▒░ ░▒▓██████▓▒░░▒▓███████▓▒░         
@@ -68,6 +73,14 @@ BANNER = r"""
 """
 
 OLLAMA_URL = "http://localhost:11434"
+
+# What actually faces the network. Ollama itself stays on localhost: the worker
+# is the only thing the tunnel (or the LAN) can reach, and it requires the
+# gateway's token, serves two routes, and pins this node to one model. See
+# worker.py for why that matters -- an exposed Ollama has no authentication at
+# all, including on its model-management endpoints.
+WORKER_PORT = 11435
+WORKER_URL = f"http://localhost:{WORKER_PORT}"
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
 
 # The default, shared Common Network gateway. Override with --gateway to
@@ -78,6 +91,7 @@ VERSION = "0.1.2"
 RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
+WORKER_UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/worker.py"
 
 
 def _enable_windows_ansi() -> None:
@@ -232,8 +246,36 @@ def fetch_update() -> bytes | None:
     return remote if remote != local else None
 
 
+def update_worker_alongside() -> None:
+    """Refresh worker.py when join.py updates itself.
+
+    join.py imports the worker as a sibling, so a self-update that replaced
+    only join.py would leave a new joiner driving an old worker -- exactly the
+    kind of version skew that shows up as a security fix silently not applying.
+    Best effort: a failure here must not block the join, because a working old
+    worker beats no node at all.
+    """
+    worker_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
+    try:
+        with urllib.request.urlopen(WORKER_UPDATE_URL, timeout=5) as resp:
+            remote = resp.read()
+        if not remote.strip():
+            return
+        try:
+            with open(worker_path, "rb") as f:
+                if f.read() == remote:
+                    return
+        except OSError:
+            pass  # missing locally -- writing it below is the fix
+        with open(worker_path, "wb") as f:
+            f.write(remote)
+    except (urllib.error.URLError, socket.timeout, OSError):
+        return
+
+
 def apply_update_and_restart(remote: bytes) -> None:
     """Overwrite this script with `remote` and re-exec. Never returns on success."""
+    update_worker_alongside()
     local_path = os.path.abspath(__file__)
     try:
         with open(local_path, "wb") as f:
@@ -634,10 +676,20 @@ def _best_local_fallback(gateway: str, hw: dict, exclude_id: str | None) -> dict
 TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS = 120  # quick tunnels can silently reconnect with a new hostname without the process dying
 
 
-def tunnel_is_healthy(tunnel_url: str) -> bool:
+def tunnel_is_healthy(tunnel_url: str, worker_token: str) -> bool:
+    """Is the tunnel still carrying traffic to our worker?
+
+    Needs the token now: the worker 401s an unauthenticated /v1/models, and a
+    401 travelling back through the tunnel would prove the tunnel is fine
+    while reading as a failure -- so send the credential and treat only a
+    transport error as unhealthy.
+    """
     try:
-        http_json("GET", f"{tunnel_url}/v1/models", timeout=8)
+        http_json("GET", f"{tunnel_url}/v1/models", timeout=8,
+                  headers={"Authorization": f"Bearer {worker_token}"})
         return True
+    except urllib.error.HTTPError:
+        return True  # reached the worker; a status code is not a dead tunnel
     except (urllib.error.URLError, socket.timeout):
         return False
 
@@ -664,29 +716,37 @@ def lan_ip() -> str | None:
         sock.close()
 
 
-def ollama_reachable_on_lan(ip: str) -> bool:
-    """Can another machine on this LAN actually reach our Ollama?
+def worker_reachable_on_lan(ip: str) -> bool:
+    """Can another machine on this LAN actually reach our worker?
 
-    Ollama binds 127.0.0.1 by default, which is invisible to every other
-    machine in the room. Registering anyway would put a node in the registry
-    that health-checks green from its own machine and fails for everyone else
-    -- the worst kind of broken, because the registry looks fine.
+    Registering an address nobody else can reach would put a node in the
+    registry that health-checks green from its own machine and fails for
+    everyone else -- the worst kind of broken, because the registry looks fine.
+
+    A 401 counts as reachable: unauthenticated is exactly what this probe is,
+    and the worker answering at all is the thing being tested. Only a
+    transport failure means the address is no good -- usually client isolation
+    on the wifi, or a local firewall.
     """
     try:
-        http_json("GET", f"http://{ip}:11434/v1/models", timeout=5)
+        http_json("GET", f"http://{ip}:{WORKER_PORT}/v1/models", timeout=5)
+        return True
+    except urllib.error.HTTPError:
         return True
     except (urllib.error.URLError, socket.timeout, OSError):
         return False
 
 
 def start_tunnel() -> tuple[subprocess.Popen, str]:
+    # Points at the worker, never at Ollama: the worker is what requires the
+    # gateway's token and refuses everything but the two inference routes.
+    #
     # Cloudflare's quick tunnel forwards the public tunnel hostname as the
-    # Host header by default. Some Ollama versions reject any request whose
-    # Host isn't localhost/127.0.0.1 (anti-DNS-rebinding protection) and
-    # respond 403 -- force the header cloudflared sends to the origin so
-    # that check always passes regardless of the Ollama version.
+    # Host header by default. Kept pinned to localhost for the same reason it
+    # was before -- an origin that checks Host against localhost (Ollama's
+    # anti-DNS-rebinding behaviour) then passes regardless of version.
     proc = subprocess.Popen(
-        ["cloudflared", "tunnel", "--url", OLLAMA_URL, "--http-host-header", "localhost:11434"],
+        ["cloudflared", "tunnel", "--url", WORKER_URL, "--http-host-header", f"localhost:{WORKER_PORT}"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
 
@@ -925,27 +985,46 @@ def main() -> None:
     ensure_ollama_running()
     ensure_model(ollama_tag)
 
+    # Start the worker before anything can reach this machine. It holds the
+    # only credential the gateway will be given for this node, serves exactly
+    # two routes, and pins the node to the model resolved above -- so Ollama
+    # itself never has to be reachable from outside, on either path.
+    worker_token = secrets.token_urlsafe(24)
+    try:
+        worker.serve(worker_token, ollama_tag, port=WORKER_PORT)
+    except OSError as e:
+        die_with_fix(
+            f"couldn't start the Common worker on port {WORKER_PORT}: {e}",
+            f"Something else is using port {WORKER_PORT}. Stop it, or if an older\n"
+            f"  `common join` is still running, close that window first.",
+        )
+    print(f"{GLYPH_DONE} worker listening on :{WORKER_PORT} "
+          f"{comment('(token-checked, inference only)')}")
+
     tunnel_proc = None
     if args.lan:
         ip = lan_ip()
         if not ip:
             die("couldn't work out this machine's LAN address — pass a tunnel join instead (drop --lan)")
-        if not ollama_reachable_on_lan(ip):
+        # What must be reachable is the worker, not Ollama -- Ollama can stay
+        # on localhost now, which is both safer and one less thing for a
+        # contributor to configure.
+        if not worker_reachable_on_lan(ip):
             die_with_fix(
-                f"Ollama is running, but not reachable from the rest of the network on {ip}:11434.",
-                "Ollama binds to localhost only by default. Restart it bound to the LAN:\n"
-                "    macOS/Linux:  OLLAMA_HOST=0.0.0.0:11434 ollama serve\n"
-                "    Windows:      setx OLLAMA_HOST 0.0.0.0:11434   (then restart Ollama)\n\n"
-                "  If that's already set and this still fails, the network has client isolation\n"
-                "  turned on — machines on the same wifi can't talk to each other. That needs\n"
-                "  IT to disable it for this subnet.",
+                f"the Common worker is running, but not reachable from the rest of "
+                f"the network on {ip}:{WORKER_PORT}.",
+                "Usually one of two things:\n"
+                "    · a local firewall is blocking incoming connections on this port\n"
+                "    · the network has client isolation turned on, so machines on the\n"
+                "      same wifi can't talk to each other — that needs IT to disable it\n"
+                "      for this subnet.",
             )
-        tunnel_url = f"http://{ip}:11434"
+        tunnel_url = f"http://{ip}:{WORKER_PORT}"
         print(f"{GLYPH_DONE} serving on the local network at {blue(tunnel_url)}")
         print(comment("no tunnel, nothing exposed to the internet — this machine is only "
                       "reachable from your own network."))
     else:
-        working("opening a Cloudflare quick tunnel to your local Ollama...")
+        working("opening a Cloudflare quick tunnel to this machine's Common worker...")
         tunnel_proc, tunnel_url = start_tunnel()
         print(f"{GLYPH_DONE} tunnel live at {blue(tunnel_url)}")
 
@@ -963,6 +1042,10 @@ def main() -> None:
         "cost_per_1k": args.cost,
         "domain_tags": domain_tags,
         "catalogue_id": catalogue_id,
+        # The gateway must present this to reach the worker started above.
+        # Generated here rather than issued by the gateway: the worker has to
+        # be running before this endpoint is worth registering.
+        "worker_token": worker_token,
     }
 
     working(f"registering '{args.name}' with {gateway}...")
@@ -977,7 +1060,8 @@ def main() -> None:
     try:
         node = http_json("POST", f"{gateway}/nodes", body=payload, headers=reg_headers)
     except urllib.error.HTTPError as e:
-        tunnel_proc.terminate()
+        if tunnel_proc is not None:
+            tunnel_proc.terminate()  # no tunnel in --lan mode; nothing to stop
         detail = e.read().decode(errors="ignore")
         if e.code == 409:
             die(f"registration failed: a node named '{args.name}' is already registered and "
@@ -1026,8 +1110,8 @@ def main() -> None:
         if tunnel_proc is None and time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
             last_tunnel_check = time.monotonic()
             current = lan_ip()
-            if current and f"http://{current}:11434" != tunnel_url:
-                tunnel_url = f"http://{current}:11434"
+            if current and f"http://{current}:{WORKER_PORT}" != tunnel_url:
+                tunnel_url = f"http://{current}:{WORKER_PORT}"
                 payload["endpoint_url"] = f"{tunnel_url}/v1"
                 print(f"{GLYPH_FORMING} this machine's address changed — re-registering at {blue(tunnel_url)}")
                 try:
@@ -1039,7 +1123,7 @@ def main() -> None:
 
         if tunnel_proc is not None and time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
             last_tunnel_check = time.monotonic()
-            if not tunnel_is_healthy(tunnel_url):
+            if not tunnel_is_healthy(tunnel_url, worker_token):
                 print(f"{GLYPH_FORMING} {red('tunnel is no longer reachable')} (quick tunnels can silently rotate hostnames) — restarting it...")
                 tunnel_proc.terminate()
                 tunnel_proc, tunnel_url = start_tunnel()

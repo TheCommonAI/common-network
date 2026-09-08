@@ -41,7 +41,26 @@ def resolve_api_key(api_key_ref: str | None) -> str | None:
 
 
 def auth_headers(node: dict) -> dict[str, str]:
+    """Headers for a request to a node.
+
+    Two credential sources, in priority order:
+
+    * `worker_token` -- what a `common join` worker requires. A node that
+      sends one is running our worker, and the token is what proves to a
+      contributor's machine that a request came from this gateway rather than
+      from anyone who read the endpoint URL out of GET /nodes.
+    * `api_key_ref` -- an allowlisted environment variable, for nodes that
+      front a third-party API needing its own key (see resolve_api_key).
+
+    A node cannot need both: the first is our own worker, the second is
+    somebody else's service. Worker token wins, because a node that has one is
+    running our worker and will reject anything else.
+    """
     headers = {"Content-Type": "application/json"}
+    worker_token = node.get("worker_token")
+    if worker_token:
+        headers["Authorization"] = f"Bearer {worker_token}"
+        return headers
     key = resolve_api_key(node.get("api_key_ref"))
     if key:
         headers["Authorization"] = f"Bearer {key}"
