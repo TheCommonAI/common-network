@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 .env
 *.log
+
+# Internal planning and school-deployment documents. These describe a specific
+# lab, its constraints and the thesis being tested there -- useful to us,
+# nobody else's business, and they date fast. Kept locally, not published.
+PROJECT-THESIS.md
+SCHOOL-LAB-THESIS-RUNBOOK.md
+SCHOOL-NETWORK-REQUIREMENTS.md

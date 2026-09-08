@@ -235,8 +235,13 @@ common join --permanent     # run in the background, start at login
 `--lan` is for computer labs and anywhere the gateway is on the same network.
 It skips `cloudflared` entirely, and refuses to register if Ollama is bound to
 localhost only — otherwise you get a node that health-checks green from its own
-machine and is invisible to every other one. See
-[`SCHOOL-NETWORK-REQUIREMENTS.md`](SCHOOL-NETWORK-REQUIREMENTS.md).
+machine and is invisible to every other one.
+
+On a managed network, LAN mode needs three things: outbound HTTPS to
+`registry.ollama.ai`, `github.com` and `pypi.org` (one-time, to install);
+intra-LAN TCP on `11434` (Ollama) and `8000` (the gateway); and
+`OLLAMA_HOST=0.0.0.0:11434` on each node so it is reachable beyond localhost.
+Client/AP isolation is the usual thing that blocks it.
 
 ### What should I install?
 
