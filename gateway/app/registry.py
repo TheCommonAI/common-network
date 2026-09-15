@@ -99,7 +99,11 @@ def _row_to_node_out(row) -> NodeOut:
 
 
 @router.post("/nodes", response_model=NodeRegisterOut)
-async def register_node(node: NodeCreate, x_common_node_token: str | None = Header(default=None)):
+async def register_node(
+    node: NodeCreate,
+    x_common_node_token: str | None = Header(default=None),
+    x_common_client: str | None = Header(default=None),
+):
     """Register or re-register a node.
 
     Permissionless by design — see README "Scope": anyone can contribute a
@@ -120,6 +124,13 @@ async def register_node(node: NodeCreate, x_common_node_token: str | None = Head
     """
     validate_endpoint_url(node.endpoint_url)
     vec = embedder.embed(node.capability_text)
+
+    # Body field first, X-Common-Client header second. The desktop app sends
+    # both; a client that only sets the header still gets counted, which keeps
+    # the CLI's side of this a one-line change. Truncated rather than
+    # rejected -- an over-long client string is a malformed statistic, not a
+    # reason to refuse a contributor their registration.
+    client = (node.client or x_common_client or "").strip()[:64] or None
 
     new_token = secrets.token_urlsafe(24)
     async with db.pool().acquire() as conn:
@@ -148,13 +159,16 @@ async def register_node(node: NodeCreate, x_common_node_token: str | None = Head
                     region = $8, cost_per_1k = $9, domain_tags = $10,
                     catalogue_id = $11,
                     node_token = coalesce(node_token, $12),
-                    worker_token = $13
+                    worker_token = $13,
+                    -- coalesce, not overwrite: a client that does not send the
+                    -- field must not erase what an earlier registration said.
+                    client = coalesce($14, client)
                 where name = $1
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
                 node.capability_text, vec, node.region, node.cost_per_1k,
-                node.domain_tags, node.catalogue_id, new_token, node.worker_token,
+                node.domain_tags, node.catalogue_id, new_token, node.worker_token, client,
             )
         else:
             row = await conn.fetchrow(
@@ -162,13 +176,13 @@ async def register_node(node: NodeCreate, x_common_node_token: str | None = Head
                 insert into nodes
                     (name, operator, endpoint_url, model_name, api_key_ref,
                      capability_text, capability_embed, region, cost_per_1k,
-                     domain_tags, catalogue_id, node_token, worker_token)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                     domain_tags, catalogue_id, node_token, worker_token, client)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
                 node.capability_text, vec, node.region, node.cost_per_1k,
-                node.domain_tags, node.catalogue_id, new_token, node.worker_token,
+                node.domain_tags, node.catalogue_id, new_token, node.worker_token, client,
             )
 
     out = _row_to_node_out(row)

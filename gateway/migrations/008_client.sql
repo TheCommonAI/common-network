@@ -1,0 +1,22 @@
+-- Which program registered a node: `common-desktop/0.1.0`, and in due course
+-- a matching string from the CLI.
+--
+-- The desktop app and `common join` deliberately share everything that
+-- matters -- the same gateway, the same endpoints, the same node_token in the
+-- same ~/.common-network/identity.json -- so that one machine is one node
+-- however it joined. That is the right default, and it leaves the two
+-- indistinguishable here: every field on this table describes the machine,
+-- not the program that spoke for it. "How many people are on the app?" was
+-- not answerable, and neither was "did the app's contributors stay longer
+-- than the terminal's".
+--
+-- Sent as the X-Common-Client header on every request and repeated as a
+-- `client` field on POST /nodes. Both are self-reported and trivially
+-- forgeable: this is a usage statistic, never an authorisation input. Nothing
+-- may branch on it.
+--
+-- Nullable with no default. Null means "did not say" -- a row from before
+-- this migration, or a client that predates sending it -- which is a
+-- different fact from any string we could invent here, and worth keeping
+-- distinct while both old and new clients are in the wild.
+alter table nodes add column if not exists client text;
