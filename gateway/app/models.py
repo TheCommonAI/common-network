@@ -25,6 +25,14 @@ class NodeCreate(BaseModel):
     # Omitted by nodes that front a third-party API instead of a worker.
     worker_token: str | None = Field(default=None, min_length=16, max_length=128)
 
+    # Which program is registering: "common-desktop/0.1.0" and, later, a
+    # matching string from the CLI. Self-reported and unverifiable, so it is a
+    # usage statistic and nothing else -- never an authorisation input, and
+    # nothing in the gateway may branch on it. Length-capped because it lands
+    # in a text column straight from a stranger; not otherwise validated,
+    # since an unrecognised client is data, not an error.
+    client: str | None = Field(default=None, max_length=64)
+
 
 class NodeOut(BaseModel):
     id: UUID
