@@ -92,6 +92,10 @@ def _row_to_node_out(row) -> NodeOut:
         avg_latency_ms=row["avg_latency_ms"],
         healthy=row["healthy"],
         last_heartbeat=row["last_heartbeat"].isoformat() if row["last_heartbeat"] else None,
+        last_seen_healthy=(
+            row["last_seen_healthy"].isoformat()
+            if "last_seen_healthy" in row and row["last_seen_healthy"] else None
+        ),
         capability_text=row["capability_text"],
         domain_tags=row["domain_tags"],
         catalogue_id=row["catalogue_id"],

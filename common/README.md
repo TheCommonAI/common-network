@@ -15,6 +15,7 @@ common leave              take this machine off the commons
 common status             this node: health, position, requests served
 common demand             live domain coverage gaps (real data, not a mockup)
 common peers              connected nodes and their coverage
+common peers --all        the same, including machines that have left
 common contrib            your contribution ledger
 common whoami             your node identity
 common config             settings, and exactly what the network retains

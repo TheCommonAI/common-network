@@ -5,8 +5,10 @@ in front of it is a security boundary and gets pinned like one. The database
 query behind /admin/state needs a database and isn't covered here; what is
 covered is every path by which someone reaches it.
 """
+import asyncio
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -42,6 +44,18 @@ def status_of(request) -> int:
         return e.status_code
 
 
+async def delete_status(request) -> int:
+    """The status the delete route rejects with. Only ever called with a
+    request that must be turned away -- reaching the database would mean the
+    gate let someone through, so a connection error here is itself a failure
+    and is reported as one rather than swallowed."""
+    try:
+        await admin.admin_delete_node(uuid4(), request)
+        return 200
+    except HTTPException as e:
+        return e.status_code
+
+
 original = settings.admin_token
 try:
     print("\nunconfigured: the routes must not exist")
@@ -71,6 +85,19 @@ try:
           status_of(FakeRequest(query={"token": "s3cret"})), 401)
     check("header wins nothing when wrong -> 401",
           status_of(FakeRequest(headers={"x-common-admin-token": "nope"})), 401)
+    # DELETE /admin/nodes/{id} removes a contributor's row without their node
+    # token, so it is the most dangerous door here and must sit behind exactly
+    # the same gate as the read-only page -- not a weaker one bolted on later.
+    # The delete itself needs a database and isn't covered; the gate is.
+    print("\nnode deletion is gated identically")
+    settings.admin_token = ""
+    check("delete: unconfigured -> 404",
+          asyncio.run(delete_status(FakeRequest(query={"token": "guess"}))), 404)
+    settings.admin_token = "s3cret-operators-token"
+    check("delete: wrong token -> 401",
+          asyncio.run(delete_status(FakeRequest(query={"token": "wrong"}))), 401)
+    check("delete: missing token -> 401",
+          asyncio.run(delete_status(FakeRequest())), 401)
 finally:
     settings.admin_token = original
 

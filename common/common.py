@@ -18,6 +18,7 @@ Usage:
     common recommend               what specialist the network needs next
     common recommend --machines 20 plan a whole computer lab at once
     common peers                   connected nodes and their coverage
+    common peers --all             include machines that have left
     common contrib                 your contribution ledger
     common whoami                  your node identity
     common privacy                 what the network keeps, and what it doesn't
@@ -72,6 +73,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -95,6 +97,19 @@ REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/common/common.py"
 JOIN_SCRIPT_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
 INSTALL_DIR = Path.home() / ".common-network"
+
+# How long a node that has stopped answering stays on the peer list.
+#
+# Under this it reads as *down*: a laptop that shut its lid, a machine
+# mid-restart, a lab that closes overnight. Worth showing, because it is
+# coming back. Over it, the honest reading is that whoever lent the machine
+# has moved on -- an afternoon in a school lab, a friend who tried it once --
+# and listing them forever makes the network look larger than it is, which is
+# the one thing a contribution ledger must never do.
+#
+# Hidden, not deleted: `common peers --all` still shows every row the gateway
+# holds, and the row itself is the gateway's to keep or prune.
+PEER_GRACE_SECONDS = 24 * 60 * 60
 
 WORDMARK = r""" ██████  ██████  ███    ███ ███    ███  ██████  ███    ██
 ██      ██    ██ ████  ████ ████  ████ ██    ██ ████   ██
@@ -610,22 +625,107 @@ def cmd_recommend(gateway: str, as_json: bool, machines: int, ram_gb: float) -> 
                   f"— scattered one-offs rather than a missing specialist."))
 
 
-def cmd_peers(gateway: str, as_json: bool) -> None:
+def _parse_ts(value: str | None) -> datetime | None:
+    """An ISO timestamp from the gateway, as an aware datetime. None if absent
+    or unparseable -- a malformed date is missing information, not a crash."""
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _ago(ts: datetime | None) -> str:
+    """Coarse elapsed time. Deliberately one unit: nobody reading a peer list
+    needs "3 days, 4 hours" to decide a machine is gone."""
+    if ts is None:
+        return "never"
+    secs = max(0, int((datetime.now(timezone.utc) - ts).total_seconds()))
+    if secs < 90:
+        return f"{secs}s"
+    if secs < 90 * 60:
+        return f"{secs // 60}m"
+    if secs < 48 * 3600:
+        return f"{secs // 3600}h"
+    return f"{secs // 86400}d"
+
+
+def _peer_state(node: dict) -> tuple[str, datetime | None]:
+    """`live` | `down` | `gone`, and when the gateway last saw this node answer.
+
+    The distinction rests on `last_seen_healthy`, which a health check stamps
+    only when it *passed*. That is a different question from `last_heartbeat`,
+    which records when the gateway last asked and ticks every pass whether the
+    node replies or not -- so by that field every row ever registered looks
+    equally fresh forever, which is exactly why the peer list never forgot
+    anyone.
+
+    A gateway older than that column omits the field. There is then genuinely
+    no way to tell a two-minute reboot from a machine that left in July, so an
+    unhealthy node is classed `gone` and collapsed rather than given a date we
+    would be inventing.
+    """
+    if node.get("healthy"):
+        return "live", _parse_ts(node.get("last_seen_healthy") or node.get("last_heartbeat"))
+    seen = _parse_ts(node.get("last_seen_healthy"))
+    if seen is None:
+        return "gone", None
+    age = (datetime.now(timezone.utc) - seen).total_seconds()
+    return ("down" if age <= PEER_GRACE_SECONDS else "gone"), seen
+
+
+def cmd_peers(gateway: str, as_json: bool, show_all: bool = False) -> None:
     nodes = http_json("GET", f"{gateway}/nodes")
+    classified = [(n, *_peer_state(n)) for n in nodes]
+    live = [c for c in classified if c[1] == "live"]
+    down = [c for c in classified if c[1] == "down"]
+    gone = [c for c in classified if c[1] == "gone"]
+
     if as_json:
-        print(json.dumps(nodes))
+        # Same shape as before -- a list of node objects -- filtered by the
+        # same rule the display uses, so `--json` and the screen never
+        # disagree about who is on the network.
+        print(json.dumps(nodes if show_all else [n for n, _, _ in live + down]))
         return
+
     if not nodes:
         print(dim("no peers reachable yet."))
         print(dim("  → common join"))
         return
-    healthy = sum(1 for n in nodes if n["healthy"])
-    print(dim(f"{len(nodes)} peer(s)   ·   {healthy} healthy\n"))
-    for n in nodes:
-        badge = GLYPH_DONE if n["healthy"] else GLYPH_FAILED
+
+    shown = live + down + (gone if show_all else [])
+    if not shown:
+        print(dim(f"nothing answering right now   ·   {len(gone)} machine(s) have left\n"))
+        print(comment("the network is only the machines people lend it."))
+        print(dim("  → common join"))
+        return
+
+    header = f"{len(shown)} peer(s)   ·   {len(live)} answering"
+    if down:
+        header += f"   ·   {len(down)} down"
+    if gone and show_all:
+        header += f"   ·   {len(gone)} gone"
+    print(dim(header + "\n"))
+
+    for n, state, seen in shown:
+        if state == "live":
+            badge, name, suffix = GLYPH_DONE, paper(n["name"]), ""
+        elif state == "down":
+            badge, name = GLYPH_FORMING, dim(n["name"])
+            suffix = f"   ·   down {_ago(seen)}"
+        else:
+            badge, name = GLYPH_FAILED, dim(n["name"])
+            suffix = f"   ·   left {_ago(seen)} ago" if seen else "   ·   never answered"
         tags = ", ".join(n.get("domain_tags") or []) or "untagged"
-        print(f"{badge}  {paper(n['name'])}")
-        print(dim(f"   {n['model_name']}   ·   {tags}   ·   {n['avg_latency_ms']}ms avg"))
+        print(f"{badge}  {name}")
+        print(dim(f"   {n['model_name']}   ·   {tags}   ·   {n['avg_latency_ms']}ms avg{suffix}"))
+
+    if gone and not show_all:
+        print()
+        print(comment(f"{len(gone)} machine(s) hidden — gone over a day, or never answered."))
+        print(dim("  → common peers --all"))
 
 
 def cmd_demand(gateway: str, as_json: bool) -> None:
@@ -1629,6 +1729,11 @@ class _ThesisScore:
     rubric_earned: float = 0.0
     rubric_possible: float = 0.0
     lane_scores: dict[str, float] = field(default_factory=dict)
+    # `fusion` arm only: the cross-attention weight each expert received on this
+    # case. Recorded per row because the headline comparison cannot distinguish
+    # "fusion combined both experts" from "fusion rode one expert and carried
+    # the other along" -- only these weights can.
+    attention: dict[str, float] = field(default_factory=dict)
 
     @property
     def score(self) -> float:
@@ -1866,12 +1971,64 @@ def _thesis_preflight(gateway: str, cases: list[_ThesisCase]) -> dict:
     return {"healthy_nodes": len(healthy), "lanes": lanes, "generalists": generalists}
 
 
+class _FusionRunner:
+    """Adapter for the hidden-state fusion arm.
+
+    The other arms are network calls; this one runs a local pipeline (frozen
+    experts -> projection heads -> cross-attention -> frozen aggregator) loaded
+    from a trained checkpoint. It is deliberately lazy and self-contained: the
+    fusion package needs torch and transformers, which the plain CLI does not,
+    so nothing is imported until `--fusion-ckpt` is actually passed. A school
+    lab running the four network arms is unaffected.
+    """
+
+    def __init__(self, ckpt: str, path: str | None, profile: str | None):
+        root = path or os.environ.get("COMMON_FUSION_PATH")
+        if not root:
+            sys.exit(
+                "--fusion-ckpt needs --fusion-path (or $COMMON_FUSION_PATH) pointing at "
+                "the directory containing the `fusion` package."
+            )
+        root = os.path.abspath(os.path.expanduser(root))
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        try:
+            from fusion.pipeline import FusionPipeline
+        except ImportError as e:
+            sys.exit(f"could not import the fusion package from {root}: {e}")
+
+        print(f"  {dim('loading fusion pipeline from ' + os.path.basename(ckpt))}")
+        self.pipeline = FusionPipeline.from_checkpoint(ckpt, profile)
+        self.names = self.pipeline.module.expert_names
+
+    def ask(self, prompt: str) -> tuple[str, dict]:
+        answer = self.pipeline.answer(prompt)
+        return answer.text, {
+            "latency_ms": answer.latency_ms,
+            "topology": "fusion",
+            "panel": list(self.names),
+            "attention": answer.attention,
+        }
+
+
 def _run_thesis_arm(gateway: str, arm: str, repeat: int, network: dict,
-                    cases: list[_ThesisCase]) -> list[_ThesisScore]:
+                    cases: list[_ThesisCase],
+                    fusion: "_FusionRunner | None" = None) -> list[_ThesisScore]:
     scores: list[_ThesisScore] = []
     for case in cases:
         label = f"{arm}[{repeat}] {case.id}"
         try:
+            if arm == "fusion":
+                answer, meta = fusion.ask(case.prompt)
+                score = _score_thesis_case(
+                    case, answer, arm, latency_ms=meta["latency_ms"],
+                    topology=meta["topology"], panel=meta["panel"], repeat=repeat)
+                score.attention = meta["attention"]
+                scores.append(score)
+                attn = " ".join(f"{k}={v:.2f}" for k, v in meta["attention"].items())
+                print(f"  {label}: {score.score:.3f} [fusion {attn}]")
+                continue
+
             if arm == "best-member":
                 per_member: list[_ThesisScore] = []
                 for node_names in network["lanes"].values():
@@ -2012,6 +2169,59 @@ def _render_thesis_report(payload: dict) -> str:
             lines.append("")
             lines.append("  best-member arm not run — 'panel beats single' is a weaker claim than the thesis.")
 
+    # --- fusion arm ----------------------------------------------------------
+    # Hidden-state composition against text composition. The comparison that
+    # matters is fusion vs panel: both compose the same two specialists, and
+    # they differ only in what gets exchanged (a pooled vector vs natural
+    # language). fusion vs single would only re-prove that two models beat one.
+    #
+    # `single is not None` is required as well as `panel`: it is the condition
+    # under which the branch above defined `call`, which this section uses.
+    fus = s.get("fusion", {}).get("mean")
+    if fus is not None and panel is not None and single is not None:
+        lines += ["", "FUSION ARM (hidden-state composition)"]
+        d_panel = fus - panel
+        lines.append(f"  fusion − panel         {d_panel:+.3f}   {call(d_panel)}")
+        if best is not None:
+            lines.append(f"  fusion − best member   {fus - best:+.3f}   {call(fus - best)}")
+        lines.append("")
+
+        if f is None:
+            lines.append("  → No noise floor measured; this delta cannot be called either way.")
+        elif d_panel > f:
+            lines.append("  → Fusing hidden states beats exchanging text. Check the attention weights")
+            lines.append("    below before claiming composition: a win with a collapsed weight is one")
+            lines.append("    expert carrying the arm, not fusion.")
+        elif abs(d_panel) <= f:
+            lines.append("  → Fusion is indistinguishable from text-based composition. The extra")
+            lines.append("    machinery is not paying for itself on these cases.")
+        else:
+            lines.append("  → Fusion is WORSE than exchanging text. On these cases the pooled vector")
+            lines.append("    carries less usable signal than the specialists' own words.")
+
+        weights = [r["attention"] for r in payload.get("scores", [])
+                   if r.get("arm") == "fusion" and r.get("attention")]
+        if weights:
+            names = sorted({k for w in weights for k in w})
+            lines += ["", "  cross-attention weights (mean over cases)"]
+            for name in names:
+                vals = [w[name] for w in weights if name in w]
+                mean = sum(vals) / len(vals)
+                spread = max(vals) - min(vals)
+                lines.append(f"    {name:<20} {mean:.3f}   spread {spread:.3f} over {len(vals)} cases")
+            top = max(names, key=lambda n: sum(w.get(n, 0) for w in weights))
+            top_mean = sum(w.get(top, 0) for w in weights) / len(weights)
+            if top_mean > 0.85:
+                lines += ["",
+                          f"  ⚠ COLLAPSE: attention sits at {top_mean:.2f} on '{top}' across all cases.",
+                          "    The fusion layer is reading one expert and ignoring the other, so any",
+                          "    gain here is that expert's, not composition's."]
+            elif max(max(w.values()) - min(w.values()) for w in weights) < 0.05:
+                lines += ["",
+                          "  ⚠ FLAT: the weights barely move between cases. The layer is averaging the",
+                          "    experts rather than selecting between them — it is not query-conditional,",
+                          "    which is the mechanism the architecture is supposed to provide."]
+
     # The composition-shaped cases, isolated. These are the only cases where a
     # panel can express an advantage at all, and the blended headline averages
     # them with seven cases that are one specialist's work by construction.
@@ -2060,6 +2270,15 @@ def _cmd_test_thesis(gateway: str, args: argparse.Namespace, emit: callable) -> 
     arms = ["single", "panel", "best-member", "replication"]
     repeats = 3 if args.full else max(1, args.repeats)
 
+    # The fusion arm is opt-in. It needs a trained checkpoint and a torch
+    # install, neither of which a school-lab machine running the four network
+    # arms has any reason to carry.
+    fusion = None
+    if getattr(args, "fusion_ckpt", None):
+        fusion = _FusionRunner(args.fusion_ckpt, getattr(args, "fusion_path", None),
+                               getattr(args, "fusion_profile", None))
+        arms.append("fusion")
+
     print()
     print(f"{GLYPH_ROUTE} {paper('thesis test', bold=True)}")
     print(comment("does a panel of specialists beat the best individual specialist?"))
@@ -2073,7 +2292,7 @@ def _cmd_test_thesis(gateway: str, args: argparse.Namespace, emit: callable) -> 
     all_scores: list[_ThesisScore] = []
     for repeat in range(repeats):
         for arm in arms:
-            all_scores.extend(_run_thesis_arm(gateway, arm, repeat, network, cases))
+            all_scores.extend(_run_thesis_arm(gateway, arm, repeat, network, cases, fusion))
         print()
 
     summaries = {arm: _summarise_thesis(all_scores, arm).as_dict() for arm in arms}
@@ -2331,6 +2550,9 @@ def _parse_test_flags(args: argparse.Namespace) -> argparse.Namespace:
     p.add_argument("--json", action="store_true")
     p.add_argument("--thesis", action="store_true")
     p.add_argument("--thesis-cases")
+    p.add_argument("--fusion-ckpt")
+    p.add_argument("--fusion-path")
+    p.add_argument("--fusion-profile")
     p.add_argument("--no-exec", action="store_true")
     sub, _ = p.parse_known_args(args.rest)
     for key, value in vars(sub).items():
@@ -2393,8 +2615,9 @@ def interactive_session(gateway: str, args: argparse.Namespace) -> None:
         if line == "/status":
             cmd_status(gateway, False)
             continue
-        if line == "/peers":
-            cmd_peers(gateway, False)
+        if line == "/peers" or line.startswith("/peers "):
+            rest = line.split()[1:]
+            cmd_peers(gateway, False, show_all=bool(rest) and rest[0] in ("all", "--all"))
             continue
         if line == "/demand":
             cmd_demand(gateway, False)
@@ -2467,6 +2690,8 @@ def main() -> None:
     # for any comparison you want to run yourself.
     parser.add_argument("--no-compose", action="store_true", help="ask: force a single node, never a panel (the Alpha default)")
     parser.add_argument("--compose", action="store_true", help="ask: compose wherever structurally possible (off by default in Alpha)")
+    # `common peers` only
+    parser.add_argument("--all", action="store_true", help="peers: include machines that have left")
     # `common recommend` only
     parser.add_argument("--machines", type=int, default=1, help="recommend: plan an install across N machines")
     parser.add_argument("--ram", type=float, default=8.0, help="recommend: RAM per machine in GB (default 8)")
@@ -2478,6 +2703,9 @@ def main() -> None:
     parser.add_argument("--out", default=None, help="test: results jsonl path")
     parser.add_argument("--thesis", action="store_true", help="test: run the thesis benchmark (single vs panel vs best-member)")
     parser.add_argument("--thesis-cases", default="math-code", choices=["math-code", "legal"], help="test: which ground-truth case set to use (default: math-code)")
+    parser.add_argument("--fusion-ckpt", help="test: trained fusion checkpoint; adds the hidden-state `fusion` arm alongside the network arms")
+    parser.add_argument("--fusion-path", help="test: directory containing the `fusion` package (or set $COMMON_FUSION_PATH)")
+    parser.add_argument("--fusion-profile", help="test: fusion config profile (default: the profile recorded in the checkpoint)")
     parser.add_argument("--no-exec", action="store_true", help="test: don't execute model-written code when scoring (lower resolution, nothing runs locally)")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--version", action="store_true")
@@ -2515,7 +2743,18 @@ def main() -> None:
     elif args.verb == "recommend":
         cmd_recommend(gateway, args.json, args.machines, args.ram)
     elif args.verb == "peers":
-        cmd_peers(gateway, args.json)
+        # `rest` is argparse.REMAINDER, so anything after the verb is captured
+        # there rather than parsed -- that is deliberate and load-bearing for
+        # `common ask "what does --all do?"`, whose question must survive
+        # intact. The cost is that a flag written after any other verb is
+        # silently ignored, and `common peers --all` is the natural way to
+        # type it. `peers` takes no free text, so accept either side.
+        rest = args.rest or []
+        cmd_peers(
+            gateway,
+            args.json or "--json" in rest,
+            args.all or "--all" in rest or "all" in rest,
+        )
     elif args.verb == "demand":
         cmd_demand(gateway, args.json)
     elif args.verb == "status":

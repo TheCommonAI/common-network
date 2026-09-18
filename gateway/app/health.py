@@ -53,7 +53,20 @@ async def run_health_checks_once() -> None:
             ok = await _check_one(client, dict(row))
             async with db.pool().acquire() as conn:
                 await conn.execute(
-                    "update nodes set healthy = $1, last_heartbeat = now() where id = $2",
+                    # last_heartbeat records that we asked; last_seen_healthy
+                    # records that the node answered, and only moves when it
+                    # did. Keeping both is what lets a peer list tell a laptop
+                    # that shut its lid apart from a machine that has left --
+                    # by last_heartbeat alone every row ever registered looks
+                    # equally fresh, because this loop touches them all.
+                    """
+                    update nodes
+                       set healthy = $1,
+                           last_heartbeat = now(),
+                           last_seen_healthy = case when $1 then now()
+                                                    else last_seen_healthy end
+                     where id = $2
+                    """,
                     ok, row["id"],
                 )
 

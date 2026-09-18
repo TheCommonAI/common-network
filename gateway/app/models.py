@@ -45,6 +45,10 @@ class NodeOut(BaseModel):
     avg_latency_ms: int
     healthy: bool
     last_heartbeat: str | None
+    # When a health check last *passed*, as opposed to last ran. Null means
+    # this gateway has never seen the node answer. Clients use it to drop
+    # contributors who are gone from the peer list without deleting them.
+    last_seen_healthy: str | None = None
     capability_text: str
     domain_tags: list[str] | None = None
     catalogue_id: str | None = None

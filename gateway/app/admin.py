@@ -19,6 +19,7 @@ from __future__ import annotations
 import secrets
 import time
 from pathlib import Path
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -55,6 +56,41 @@ async def admin_page(request: Request):
     return FileResponse(ADMIN_PATH)
 
 
+@router.delete("/admin/nodes/{node_id}")
+async def admin_delete_node(node_id: UUID, request: Request):
+    """Remove a node row the operator has no other way to remove.
+
+    `DELETE /nodes/{id}` is the contributor's own exit and requires that
+    node's X-Common-Node-Token. That is right -- a stranger must never be able
+    to deregister someone else's machine by reading its name off `GET /nodes`
+    -- but it leaves the gateway operator unable to clear a row whose token
+    nobody holds any more: a lab machine reimaged at the end of term, a node
+    registered before tokens existed, a laptop that was lent for an afternoon.
+    Those rows stay in the registry forever and every count of "who is on the
+    network" includes them.
+
+    This is the one deliberately operator-only door, which is why it is here
+    behind ADMIN_TOKEN and not on the public registry router.
+
+    Safe for history: `decisions.chosen_node` is ON DELETE SET NULL (migration
+    002), so past requests survive with the node reading "(deregistered)"
+    rather than the decision vanishing with it.
+
+    One id per call, and the name is echoed back, so removing the wrong
+    machine requires getting a uuid wrong rather than a filter wrong. There is
+    no bulk or pattern delete on purpose.
+    """
+    _require_admin(request)
+
+    async with db.pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "delete from nodes where id = $1 returning name, healthy", node_id,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no node with id {node_id}")
+    return {"deleted": str(node_id), "name": row["name"], "was_healthy": row["healthy"]}
+
+
 @router.get("/admin/state")
 async def admin_state(request: Request):
     """Everything the page renders, in one round trip."""
@@ -65,7 +101,7 @@ async def admin_state(request: Request):
             """
             select id, name, operator, model_name, endpoint_url, region,
                    healthy, can_aggregate, domain_tags, avg_latency_ms,
-                   last_heartbeat, created_at,
+                   last_heartbeat, last_seen_healthy, created_at,
                    (node_token is not null) as has_token
             from nodes
             order by healthy asc, name asc
@@ -130,6 +166,9 @@ async def admin_state(request: Request):
             "domain_tags": list(n["domain_tags"] or []),
             "avg_latency_ms": n["avg_latency_ms"],
             "last_heartbeat": n["last_heartbeat"].isoformat() if n["last_heartbeat"] else None,
+            # Null here is the signal for pruning: this gateway has never seen
+            # the machine answer, so nothing is lost by removing the row.
+            "last_seen_healthy": n["last_seen_healthy"].isoformat() if n["last_seen_healthy"] else None,
             "created_at": n["created_at"].isoformat() if n["created_at"] else None,
             # Legacy nodes registered before tokens existed cannot be
             # re-registered safely by their owner and cannot grant access.
