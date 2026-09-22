@@ -159,6 +159,7 @@ async def register_node(
                 """
                 update nodes set
                     operator = $2, endpoint_url = $3, model_name = $4,
+                    healthy = false, paused = false,
                     api_key_ref = $5, capability_text = $6, capability_embed = $7,
                     region = $8, cost_per_1k = $9, domain_tags = $10,
                     catalogue_id = $11,
@@ -180,8 +181,8 @@ async def register_node(
                 insert into nodes
                     (name, operator, endpoint_url, model_name, api_key_ref,
                      capability_text, capability_embed, region, cost_per_1k,
-                     domain_tags, catalogue_id, node_token, worker_token, client)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                     domain_tags, catalogue_id, node_token, worker_token, client, healthy)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, false)
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
