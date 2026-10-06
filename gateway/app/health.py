@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 from fastapi import HTTPException
@@ -31,21 +32,34 @@ async def _check_one(client: httpx.AsyncClient, node: dict) -> bool:
     # sending it a request.
     headers = auth_headers(node)
     headers.pop("Content-Type", None)  # a GET has no body to describe
+    async def probe():
+        async with client.stream('GET', url, headers=headers, timeout=settings.health_check_timeout_seconds) as resp:
+            if not 200 <= resp.status_code < 300:
+                return False
+            content = bytearray()
+            async for chunk in resp.aiter_bytes():
+                content.extend(chunk)
+                if len(content) > 65536:
+                    return False
+            try:
+                data = json.loads(content).get('data')
+                return isinstance(data, list) and any(
+                    isinstance(m, dict) and isinstance(m.get('id'), str)
+                    and (not node.get('model_name') or m['id'] == node['model_name'])
+                    for m in data)
+            except (ValueError, AttributeError, UnicodeError):
+                return False
     try:
-        resp = await client.get(url, headers=headers, timeout=settings.health_check_timeout_seconds)
-        # 2xx only. `< 500` counted 401 (bad credential), 403 and 404 (no such
-        # route -- not an OpenAI-compatible server at all) as healthy, so a
-        # node could be routed real traffic on the strength of a reply that
-        # said "I cannot serve you".
-        return 200 <= resp.status_code < 300
-    except httpx.HTTPError:
+        return await asyncio.wait_for(probe(), settings.health_check_timeout_seconds)
+    except (httpx.HTTPError, asyncio.TimeoutError):
         return False
+
 
 
 async def run_health_checks_once() -> None:
     async with db.pool().acquire() as conn:
         rows = await conn.fetch(
-            "select id, endpoint_url, api_key_ref, worker_token from nodes"
+            "select id, endpoint_url, api_key_ref, worker_token, model_name from nodes where not paused"
         )
 
     async with httpx.AsyncClient() as client:
@@ -65,9 +79,9 @@ async def run_health_checks_once() -> None:
                            last_heartbeat = now(),
                            last_seen_healthy = case when $1 then now()
                                                     else last_seen_healthy end
-                     where id = $2
+                     where id = $2 and not paused and endpoint_url = $3
                     """,
-                    ok, row["id"],
+                    ok, row["id"], row["endpoint_url"],
                 )
 
 
