@@ -562,7 +562,7 @@ def cmd_recommend(gateway: str, as_json: bool, machines: int, ram_gb: float) -> 
             role = entry["role"]
             badge = paper(" aggregator ", bold=True) if role == "aggregator" else blue(f" {role} ")
             print(f"  {entry['machine']:>3}.  {blue(entry['display_name'], bold=True)}  {badge}")
-            print(dim(f"        common join --lan --model {entry['catalogue_id']}"))
+            print(dim(f"        common join --model {entry['catalogue_id']}"))
             print(comment(f"        {entry['reason']}"))
             print()
         lanes = plan["distinct_specialist_lanes"]
@@ -604,7 +604,7 @@ def cmd_recommend(gateway: str, as_json: bool, machines: int, ram_gb: float) -> 
         print(dim(f"     {gap['demand']} recent request(s)  ·  {gap['coverage']} node(s) serving it"))
         verified = paper("  ✓ verified in lane") if rec["verified_in_lane"] else ""
         print(f"     → {rec['display_name']}{verified}")
-        print(dim(f"       common join --lan --model {rec['catalogue_id']}   ({rec['min_ram_gb']}GB+)"))
+        print(dim(f"       common join --model {rec['catalogue_id']}   ({rec['min_ram_gb']}GB+)"))
         print()
 
     if not shown:
@@ -949,6 +949,9 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
         argv += ["--model", args.model]
     if args.region:
         argv += ["--region", args.region]
+    # Forward any remaining args (e.g. --permanent, --lan) to join.py
+    if args.rest:
+        argv += args.rest
 
     os.execv(sys.executable, argv)
 
