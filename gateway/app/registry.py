@@ -1,6 +1,8 @@
 import ipaddress
+import logging
 import secrets
 import socket
+import time
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -11,9 +13,18 @@ from app.config import settings
 from app.models import NodeCreate, NodeOut, NodeRegisterOut
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # --- Endpoint validation ---------------------------------------------------
+
+def _resolve_once(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address] | None:
+    """Single DNS resolution attempt; returns None on failure."""
+    try:
+        return [ipaddress.ip_address(info[4][0]) for info in socket.getaddrinfo(host, None)]
+    except socket.gaierror:
+        return None
+
 
 def _resolved_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     """Every address the endpoint host could resolve to.
@@ -22,18 +33,49 @@ def _resolved_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv
     time. That leaves a DNS-rebinding window (a host that resolves somewhere
     safe for the registration check and somewhere unsafe for the request) —
     a known limit of Alpha, recorded here rather than papered over.
+
+    For hostnames, DNS resolution is retried with exponential backoff before
+    giving up. Fresh Cloudflare quick tunnels (*.trycloudflare.com) often
+    NXDOMAIN for a brief window after the tunnel comes up — Railway's
+    resolvers and other cloud DNS caches may lag behind public DNS. Retrying
+    lets the propagation settle rather than rejecting a healthy tunnel.
     """
     try:
         return [ipaddress.ip_address(host)]
     except ValueError:
-        try:
-            return [ipaddress.ip_address(info[4][0]) for info in socket.getaddrinfo(host, None)]
-        except socket.gaierror:
-            raise HTTPException(
-                status_code=400,
-                detail=f"endpoint_url host '{host}' does not resolve — the gateway health "
-                       f"checker would flag this node dead on its first pass anyway.",
-            )
+        pass
+
+    addrs = _resolve_once(host)
+    if addrs is not None:
+        return addrs
+
+    backoff = settings.dns_resolve_initial_backoff_seconds
+    max_backoff = settings.dns_resolve_max_backoff_seconds
+    max_wait = settings.dns_resolve_max_wait_seconds
+    elapsed = 0.0
+
+    while elapsed < max_wait:
+        sleep_time = min(backoff, max_wait - elapsed)
+        logger.info(
+            "DNS resolution failed for '%s', retrying in %.1fs (elapsed %.1fs / %.1fs)",
+            host, sleep_time, elapsed, max_wait,
+        )
+        time.sleep(sleep_time)
+        elapsed += sleep_time
+
+        addrs = _resolve_once(host)
+        if addrs is not None:
+            logger.info("DNS resolution succeeded for '%s' after %.1fs", host, elapsed)
+            return addrs
+
+        backoff = min(backoff * 2, max_backoff)
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"endpoint_url host '{host}' does not resolve — the gateway health "
+               f"checker would flag this node dead on its first pass anyway. "
+               f"(Retried for {max_wait:.0f}s in case DNS was still propagating.)",
+    )
 
 
 def validate_endpoint_url(url: str) -> None:
