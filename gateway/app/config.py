@@ -176,5 +176,19 @@ class Settings(BaseSettings):
     # take ~57s, so this is generous on purpose.
     compose_member_timeout_seconds: float = 90.0
 
+    # --- DNS resolution retry for node registration -----------------------
+    #
+    # Fresh Cloudflare quick tunnels (*.trycloudflare.com) often NXDOMAIN for
+    # a brief window after the tunnel comes up, even when public DNS has them.
+    # Railway's resolvers and other cloud DNS caches may lag behind. Retrying
+    # with exponential backoff lets DNS propagate before rejecting a healthy
+    # tunnel as "unresolvable".
+    #
+    # Total wait caps at dns_resolve_max_wait_seconds; backoff grows from
+    # dns_resolve_initial_backoff_seconds up to dns_resolve_max_backoff_seconds.
+    dns_resolve_max_wait_seconds: float = 30.0
+    dns_resolve_initial_backoff_seconds: float = 1.0
+    dns_resolve_max_backoff_seconds: float = 8.0
+
 
 settings = Settings()

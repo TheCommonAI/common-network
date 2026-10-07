@@ -1057,17 +1057,54 @@ def main() -> None:
                     if identity.get("name") == args.name and identity.get("gateway") == gateway
                     else None)
     reg_headers = {"X-Common-Node-Token": rejoin_token} if rejoin_token else None
-    try:
-        node = http_json("POST", f"{gateway}/nodes", body=payload, headers=reg_headers)
-    except urllib.error.HTTPError as e:
-        if tunnel_proc is not None:
-            tunnel_proc.terminate()  # no tunnel in --lan mode; nothing to stop
-        detail = e.read().decode(errors="ignore")
-        if e.code == 409:
-            die(f"registration failed: a node named '{args.name}' is already registered and "
-                f"this machine has no token proving it's ours. Pick a different name "
-                f"(--name), or run `common leave` / DELETE the old node from its own machine first.")
-        die(f"registration failed: {e.code} {detail}")
+
+    # Registration retry logic for DNS propagation delays.
+    # Fresh Cloudflare quick tunnels (*.trycloudflare.com) often NXDOMAIN
+    # from the gateway's perspective for a short window after coming up.
+    # Retrying with the *same* tunnel URL lets DNS catch up; killing the
+    # tunnel on first failure and minting a new hostname on the next
+    # `common-join` just restarts the clock.
+    DNS_RETRY_MAX_WAIT = 60  # seconds
+    DNS_RETRY_INITIAL_BACKOFF = 2  # seconds
+    DNS_RETRY_MAX_BACKOFF = 10  # seconds
+
+    node = None
+    dns_elapsed = 0.0
+    dns_backoff = DNS_RETRY_INITIAL_BACKOFF
+
+    while node is None:
+        try:
+            node = http_json("POST", f"{gateway}/nodes", body=payload, headers=reg_headers)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="ignore")
+
+            # DNS-related failure: the gateway couldn't resolve our hostname.
+            # Keep the tunnel alive and retry -- the gateway is also retrying
+            # on its side, but client-side retry with the same URL helps if
+            # the gateway gave up before our DNS propagated.
+            if e.code == 400 and "does not resolve" in detail:
+                if dns_elapsed >= DNS_RETRY_MAX_WAIT:
+                    if tunnel_proc is not None:
+                        tunnel_proc.terminate()
+                    die(f"registration failed: the gateway still cannot resolve our tunnel "
+                        f"hostname after {DNS_RETRY_MAX_WAIT}s. This can happen when DNS "
+                        f"propagation is unusually slow.\n"
+                        f"  {comment('Try again in a minute; the same hostname may work then.')}")
+
+                print(f"{GLYPH_FORMING} {dim(f'gateway cannot resolve our hostname yet — retrying in {dns_backoff}s (waited {dns_elapsed:.0f}s / {DNS_RETRY_MAX_WAIT}s)...')}")
+                time.sleep(dns_backoff)
+                dns_elapsed += dns_backoff
+                dns_backoff = min(dns_backoff * 2, DNS_RETRY_MAX_BACKOFF)
+                continue
+
+            # Non-DNS failure: terminate immediately.
+            if tunnel_proc is not None:
+                tunnel_proc.terminate()
+            if e.code == 409:
+                die(f"registration failed: a node named '{args.name}' is already registered and "
+                    f"this machine has no token proving it's ours. Pick a different name "
+                    f"(--name), or run `common leave` / DELETE the old node from its own machine first.")
+            die(f"registration failed: {e.code} {detail}")
 
     node_id = node["id"]
     node_token = node["node_token"]
