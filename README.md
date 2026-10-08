@@ -4,6 +4,11 @@
 
 **The Common Network Alpha — v0.1.2**
 
+A South Australian nonprofit building decentralised AI.
+Small models on participants' devices, routed and combined. No single company owns the gate.
+
+[Learn more at commonai.com.au](https://commonai.com.au)
+
 ## Install and set up
 
 **1. Install [Ollama](https://ollama.com/download)** — the program that runs the
