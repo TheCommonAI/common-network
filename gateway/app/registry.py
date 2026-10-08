@@ -10,7 +10,7 @@ from fastapi import APIRouter, Header, HTTPException
 
 from app import db, embedder
 from app.config import settings
-from app.models import NodeCreate, NodeOut, NodeRegisterOut
+from app.models import NodeCreate, NodeOut, NodePublicOut, NodeRegisterOut
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -122,7 +122,30 @@ def validate_endpoint_url(url: str) -> None:
 
 # --- Registry ---------------------------------------------------------------
 
+def _row_to_node_public_out(row) -> NodePublicOut:
+    """Public node info — no endpoint_url."""
+    return NodePublicOut(
+        id=row["id"],
+        name=row["name"],
+        operator=row["operator"],
+        model_name=row["model_name"],
+        region=row["region"],
+        cost_per_1k=float(row["cost_per_1k"]),
+        avg_latency_ms=row["avg_latency_ms"],
+        healthy=row["healthy"],
+        last_heartbeat=row["last_heartbeat"].isoformat() if row["last_heartbeat"] else None,
+        last_seen_healthy=(
+            row["last_seen_healthy"].isoformat()
+            if "last_seen_healthy" in row and row["last_seen_healthy"] else None
+        ),
+        capability_text=row["capability_text"],
+        domain_tags=row["domain_tags"],
+        catalogue_id=row["catalogue_id"],
+    )
+
+
 def _row_to_node_out(row) -> NodeOut:
+    """Full node info including endpoint_url — internal/admin use only."""
     return NodeOut(
         id=row["id"],
         name=row["name"],
@@ -232,21 +255,27 @@ async def register_node(
                 node.domain_tags, node.catalogue_id, new_token, node.worker_token, client,
             )
 
-    out = _row_to_node_out(row)
+    out = _row_to_node_public_out(row)
     # node_token reaches only whoever proved they own the name: fresh inserts
     # (nobody owned it before) and token-holding re-registrations.
     #
     # worker_token is deliberately NOT returned. The node generated it and
     # already has it; echoing it would put a live credential in one more
     # response body for no one's benefit.
+    #
+    # endpoint_url is not included — the registrant just provided it, so they
+    # have it already. Keeping responses consistent with public GET /nodes.
     return NodeRegisterOut(**out.model_dump(), node_token=row["node_token"])
 
 
-@router.get("/nodes", response_model=list[NodeOut])
+@router.get("/nodes", response_model=list[NodePublicOut])
 async def list_nodes():
+    """Public node list — shows name, model, health, tags, but NOT endpoint_url.
+    Endpoint URLs are internal to the gateway; exposing them would let anyone
+    bypass the gateway's contribution gate and rate limiting."""
     async with db.pool().acquire() as conn:
         rows = await conn.fetch("select * from nodes order by created_at desc")
-    return [_row_to_node_out(r) for r in rows]
+    return [_row_to_node_public_out(r) for r in rows]
 
 
 @router.delete("/nodes/{node_id}")
