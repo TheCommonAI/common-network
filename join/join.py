@@ -703,6 +703,10 @@ def _best_local_fallback(gateway: str, hw: dict, exclude_id: str | None) -> dict
 
 TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS = 120  # quick tunnels can silently reconnect with a new hostname without the process dying
 
+# Registration can block while the gateway retries DNS resolution (up to ~30s).
+# This timeout must exceed that window, otherwise the client aborts mid-retry.
+REGISTRATION_TIMEOUT = 90  # seconds — comfortably above gateway's 30s DNS retry
+
 
 def tunnel_is_healthy(tunnel_url: str, worker_token: str) -> bool:
     """Is the tunnel still carrying traffic to our worker?
@@ -1090,20 +1094,86 @@ def main() -> None:
     rejoin_token = (identity.get("node_token")
                     if identity.get("name") == args.name and identity.get("gateway") == gateway
                     else None)
+    # gateway_headers(), not a bare dict: registration is a request like
+    # any other and must carry X-Common-Client, or the operators view
+    # records this node's client as blank. Empty dict rather than None so
+    # the helper has something to merge into (it always adds the header).
     reg_headers = gateway_headers(
         {"X-Common-Node-Token": rejoin_token} if rejoin_token else {}
     )
-    try:
-        node = http_json("POST", f"{gateway}/nodes", body=payload, headers=reg_headers)
-    except urllib.error.HTTPError as e:
-        if tunnel_proc is not None:
-            tunnel_proc.terminate()  # no tunnel in --lan mode; nothing to stop
-        detail = e.read().decode(errors="ignore")
-        if e.code == 409:
-            die(f"registration failed: a node named '{args.name}' is already registered and "
-                f"this machine has no token proving it's ours. Pick a different name "
-                f"(--name), or run `common leave` / DELETE the old node from its own machine first.")
-        die(f"registration failed: {e.code} {detail}")
+
+    # Registration retry logic for DNS propagation delays.
+    # Fresh Cloudflare quick tunnels (*.trycloudflare.com) often NXDOMAIN
+    # from the gateway's perspective for a short window after coming up.
+    # Retrying with the *same* tunnel URL lets DNS catch up; killing the
+    # tunnel on first failure and minting a new hostname on the next
+    # `common-join` just restarts the clock.
+    #
+    # The gateway itself retries DNS resolution for up to ~30s before
+    # returning 400, so registration requests can block for a while.
+    # REGISTRATION_TIMEOUT (module constant) exceeds the gateway's DNS retry
+    # window so the client doesn't abort mid-retry.
+    RETRY_MAX_WAIT = 60  # seconds
+    RETRY_INITIAL_BACKOFF = 2  # seconds
+    RETRY_MAX_BACKOFF = 10  # seconds
+
+    node = None
+    retry_elapsed = 0.0
+    retry_backoff = RETRY_INITIAL_BACKOFF
+
+    while node is None:
+        try:
+            node = http_json("POST", f"{gateway}/nodes", body=payload, headers=reg_headers,
+                             timeout=REGISTRATION_TIMEOUT)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="ignore")
+
+            # DNS-related failure: the gateway couldn't resolve our hostname.
+            # Keep the tunnel alive and retry -- the gateway is also retrying
+            # on its side, but client-side retry with the same URL helps if
+            # the gateway gave up before our DNS propagated.
+            if e.code == 400 and "does not resolve" in detail:
+                if retry_elapsed >= RETRY_MAX_WAIT:
+                    if tunnel_proc is not None:
+                        tunnel_proc.terminate()
+                    die(f"registration failed: the gateway still cannot resolve our tunnel "
+                        f"hostname after {RETRY_MAX_WAIT}s. This can happen when DNS "
+                        f"propagation is unusually slow.\n"
+                        f"  {comment('Try again in a minute; the same hostname may work then.')}")
+
+                print(f"{GLYPH_FORMING} {dim(f'gateway cannot resolve our hostname yet — retrying in {retry_backoff}s (waited {retry_elapsed:.0f}s / {RETRY_MAX_WAIT}s)...')}")
+                time.sleep(retry_backoff)
+                retry_elapsed += retry_backoff
+                retry_backoff = min(retry_backoff * 2, RETRY_MAX_BACKOFF)
+                continue
+
+            # Non-DNS failure: terminate immediately.
+            if tunnel_proc is not None:
+                tunnel_proc.terminate()
+            if e.code == 409:
+                die(f"registration failed: a node named '{args.name}' is already registered and "
+                    f"this machine has no token proving it's ours. Pick a different name "
+                    f"(--name), or run `common leave` / DELETE the old node from its own machine first.")
+            die(f"registration failed: {e.code} {detail}")
+
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+            # Timeout or network error during registration. The gateway may be
+            # mid-DNS-retry (blocking), or there may be transient network issues.
+            # Treat like a soft failure and retry with the same tunnel URL.
+            if retry_elapsed >= RETRY_MAX_WAIT:
+                if tunnel_proc is not None:
+                    tunnel_proc.terminate()
+                die(f"registration failed: request timed out or network error after "
+                    f"{RETRY_MAX_WAIT}s of retries. The gateway may be slow to respond "
+                    f"(DNS propagation) or unreachable.\n"
+                    f"  {comment('Try again in a minute.')}")
+
+            err_desc = "timed out" if isinstance(e, (socket.timeout, TimeoutError)) else str(e.reason if hasattr(e, 'reason') else e)
+            print(f"{GLYPH_FORMING} {dim(f'registration {err_desc} — retrying in {retry_backoff}s (waited {retry_elapsed:.0f}s / {RETRY_MAX_WAIT}s)...')}")
+            time.sleep(retry_backoff)
+            retry_elapsed += retry_backoff
+            retry_backoff = min(retry_backoff * 2, RETRY_MAX_BACKOFF)
+            continue
 
     node_id = node["id"]
     node_token = node["node_token"]
@@ -1153,10 +1223,12 @@ def main() -> None:
                 print(f"{GLYPH_FORMING} this machine's address changed — re-registering at {blue(tunnel_url)}")
                 try:
                     node = http_json("POST", f"{gateway}/nodes", body=payload,
-                                     headers=gateway_headers({"X-Common-Node-Token": node_token}))
+                                     headers=gateway_headers({"X-Common-Node-Token": node_token}),
+                                     timeout=REGISTRATION_TIMEOUT)
                     node_id, node_token = node["id"], node["node_token"]
-                except urllib.error.HTTPError as e:
-                    print(f"{GLYPH_FAILED} {red(f'failed to re-register on the new address: {e.code}')}", file=sys.stderr)
+                except (urllib.error.HTTPError, urllib.error.URLError, socket.timeout, TimeoutError) as e:
+                    err_msg = f"{e.code}" if isinstance(e, urllib.error.HTTPError) else str(e)
+                    print(f"{GLYPH_FAILED} {red(f'failed to re-register on the new address: {err_msg}')}", file=sys.stderr)
 
         if tunnel_proc is not None and time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
             last_tunnel_check = time.monotonic()
@@ -1168,12 +1240,16 @@ def main() -> None:
                 payload["endpoint_url"] = f"{tunnel_url}/v1"
                 try:
                     node = http_json("POST", f"{gateway}/nodes", body=payload,
-                                     headers=gateway_headers({"X-Common-Node-Token": node_token}))
+                                     headers=gateway_headers({"X-Common-Node-Token": node_token}),
+                                     timeout=REGISTRATION_TIMEOUT)
                     node_id = node["id"]
                     node_token = node["node_token"]
                     print(f"{GLYPH_DONE} re-registered '{args.name}' with the new tunnel url.")
                 except urllib.error.HTTPError as e:
                     print(f"{GLYPH_FAILED} {red(f'failed to re-register after tunnel restart: {e.code} {e.read().decode()}')}", file=sys.stderr)
+                except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+                    err_msg = str(e)
+                    print(f"{GLYPH_FAILED} {red(f'failed to re-register after tunnel restart: {err_msg}')}", file=sys.stderr)
 
         if not args.no_update and time.monotonic() - last_update_check > UPDATE_CHECK_INTERVAL_SECONDS:
             last_update_check = time.monotonic()

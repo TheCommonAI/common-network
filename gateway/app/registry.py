@@ -1,6 +1,8 @@
 import ipaddress
+import logging
 import secrets
 import socket
+import time
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -8,12 +10,21 @@ from fastapi import APIRouter, Header, HTTPException
 
 from app import db, embedder
 from app.config import settings
-from app.models import NodeCreate, NodeOut, NodeRegisterOut
+from app.models import NodeCreate, NodeOut, NodePublicOut, NodeRegisterOut
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # --- Endpoint validation ---------------------------------------------------
+
+def _resolve_once(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address] | None:
+    """Single DNS resolution attempt; returns None on failure."""
+    try:
+        return [ipaddress.ip_address(info[4][0]) for info in socket.getaddrinfo(host, None)]
+    except socket.gaierror:
+        return None
+
 
 def _resolved_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     """Every address the endpoint host could resolve to.
@@ -22,18 +33,49 @@ def _resolved_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv
     time. That leaves a DNS-rebinding window (a host that resolves somewhere
     safe for the registration check and somewhere unsafe for the request) —
     a known limit of Alpha, recorded here rather than papered over.
+
+    For hostnames, DNS resolution is retried with exponential backoff before
+    giving up. Fresh Cloudflare quick tunnels (*.trycloudflare.com) often
+    NXDOMAIN for a brief window after the tunnel comes up — Railway's
+    resolvers and other cloud DNS caches may lag behind public DNS. Retrying
+    lets the propagation settle rather than rejecting a healthy tunnel.
     """
     try:
         return [ipaddress.ip_address(host)]
     except ValueError:
-        try:
-            return [ipaddress.ip_address(info[4][0]) for info in socket.getaddrinfo(host, None)]
-        except socket.gaierror:
-            raise HTTPException(
-                status_code=400,
-                detail=f"endpoint_url host '{host}' does not resolve — the gateway health "
-                       f"checker would flag this node dead on its first pass anyway.",
-            )
+        pass
+
+    addrs = _resolve_once(host)
+    if addrs is not None:
+        return addrs
+
+    backoff = settings.dns_resolve_initial_backoff_seconds
+    max_backoff = settings.dns_resolve_max_backoff_seconds
+    max_wait = settings.dns_resolve_max_wait_seconds
+    elapsed = 0.0
+
+    while elapsed < max_wait:
+        sleep_time = min(backoff, max_wait - elapsed)
+        logger.info(
+            "DNS resolution failed for '%s', retrying in %.1fs (elapsed %.1fs / %.1fs)",
+            host, sleep_time, elapsed, max_wait,
+        )
+        time.sleep(sleep_time)
+        elapsed += sleep_time
+
+        addrs = _resolve_once(host)
+        if addrs is not None:
+            logger.info("DNS resolution succeeded for '%s' after %.1fs", host, elapsed)
+            return addrs
+
+        backoff = min(backoff * 2, max_backoff)
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"endpoint_url host '{host}' does not resolve — the gateway health "
+               f"checker would flag this node dead on its first pass anyway. "
+               f"(Retried for {max_wait:.0f}s in case DNS was still propagating.)",
+    )
 
 
 def validate_endpoint_url(url: str) -> None:
@@ -80,7 +122,30 @@ def validate_endpoint_url(url: str) -> None:
 
 # --- Registry ---------------------------------------------------------------
 
+def _row_to_node_public_out(row) -> NodePublicOut:
+    """Public node info — no endpoint_url."""
+    return NodePublicOut(
+        id=row["id"],
+        name=row["name"],
+        operator=row["operator"],
+        model_name=row["model_name"],
+        region=row["region"],
+        cost_per_1k=float(row["cost_per_1k"]),
+        avg_latency_ms=row["avg_latency_ms"],
+        healthy=row["healthy"],
+        last_heartbeat=row["last_heartbeat"].isoformat() if row["last_heartbeat"] else None,
+        last_seen_healthy=(
+            row["last_seen_healthy"].isoformat()
+            if "last_seen_healthy" in row and row["last_seen_healthy"] else None
+        ),
+        capability_text=row["capability_text"],
+        domain_tags=row["domain_tags"],
+        catalogue_id=row["catalogue_id"],
+    )
+
+
 def _row_to_node_out(row) -> NodeOut:
+    """Full node info including endpoint_url — internal/admin use only."""
     return NodeOut(
         id=row["id"],
         name=row["name"],
@@ -159,6 +224,7 @@ async def register_node(
                 """
                 update nodes set
                     operator = $2, endpoint_url = $3, model_name = $4,
+                    healthy = false, paused = false,
                     api_key_ref = $5, capability_text = $6, capability_embed = $7,
                     region = $8, cost_per_1k = $9, domain_tags = $10,
                     catalogue_id = $11,
@@ -180,8 +246,8 @@ async def register_node(
                 insert into nodes
                     (name, operator, endpoint_url, model_name, api_key_ref,
                      capability_text, capability_embed, region, cost_per_1k,
-                     domain_tags, catalogue_id, node_token, worker_token, client)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                     domain_tags, catalogue_id, node_token, worker_token, client, healthy)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, false)
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
@@ -189,21 +255,27 @@ async def register_node(
                 node.domain_tags, node.catalogue_id, new_token, node.worker_token, client,
             )
 
-    out = _row_to_node_out(row)
+    out = _row_to_node_public_out(row)
     # node_token reaches only whoever proved they own the name: fresh inserts
     # (nobody owned it before) and token-holding re-registrations.
     #
     # worker_token is deliberately NOT returned. The node generated it and
     # already has it; echoing it would put a live credential in one more
     # response body for no one's benefit.
+    #
+    # endpoint_url is not included — the registrant just provided it, so they
+    # have it already. Keeping responses consistent with public GET /nodes.
     return NodeRegisterOut(**out.model_dump(), node_token=row["node_token"])
 
 
-@router.get("/nodes", response_model=list[NodeOut])
+@router.get("/nodes", response_model=list[NodePublicOut])
 async def list_nodes():
+    """Public node list — shows name, model, health, tags, but NOT endpoint_url.
+    Endpoint URLs are internal to the gateway; exposing them would let anyone
+    bypass the gateway's contribution gate and rate limiting."""
     async with db.pool().acquire() as conn:
         rows = await conn.fetch("select * from nodes order by created_at desc")
-    return [_row_to_node_out(r) for r in rows]
+    return [_row_to_node_public_out(r) for r in rows]
 
 
 @router.delete("/nodes/{node_id}")

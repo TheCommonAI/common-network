@@ -11,10 +11,13 @@ make permissionless registration safe to expose publicly (see SECURITY.md):
    hold it. (The token logic itself needs a database; what is testable
    without one is the guard around it: what the 409 branch checks.)
 
-Also pins the constants the token comparison depends on.
+Also pins the constants the token comparison depends on, and tests DNS
+resolution retry behavior for fresh Cloudflare quick tunnels.
 """
 import sys
+import time
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -99,6 +102,121 @@ try:
     check("unresolvable host rejected", "accepted", "400")
 except HTTPException as e:
     check("unresolvable host rejected", e.status_code, 400)
+
+print("\nDNS resolution retry for fresh tunnels")
+
+# Test: DNS eventually succeeds after retries
+def test_dns_retry_success():
+    """Hostname that fails initially but succeeds on retry."""
+    call_count = [0]
+    real_getaddrinfo = registry.socket.getaddrinfo
+
+    def flaky_getaddrinfo(host, *args, **kwargs):
+        if host == "flaky-tunnel.trycloudflare.com":
+            call_count[0] += 1
+            if call_count[0] < 3:
+                raise registry.socket.gaierror("Name or service not known")
+            return [(2, 1, 6, "", ("104.16.0.1", 0))]
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    original_max_wait = settings.dns_resolve_max_wait_seconds
+    original_initial = settings.dns_resolve_initial_backoff_seconds
+    original_max_backoff = settings.dns_resolve_max_backoff_seconds
+    try:
+        settings.dns_resolve_max_wait_seconds = 10.0
+        settings.dns_resolve_initial_backoff_seconds = 0.1
+        settings.dns_resolve_max_backoff_seconds = 0.2
+
+        with mock.patch.object(registry.socket, "getaddrinfo", flaky_getaddrinfo):
+            with mock.patch.object(registry.time, "sleep"):  # Skip actual sleeping
+                try:
+                    registry.validate_endpoint_url("https://flaky-tunnel.trycloudflare.com/v1")
+                    check("DNS retry succeeds after transient failure", call_count[0] >= 3, True)
+                except HTTPException:
+                    check("DNS retry succeeds after transient failure", "rejected", "should succeed")
+    finally:
+        settings.dns_resolve_max_wait_seconds = original_max_wait
+        settings.dns_resolve_initial_backoff_seconds = original_initial
+        settings.dns_resolve_max_backoff_seconds = original_max_backoff
+
+test_dns_retry_success()
+
+# Test: DNS permanently fails after retry window exhausted
+def test_dns_retry_exhausted():
+    """Hostname that never resolves — should fail after retry window."""
+    call_count = [0]
+    real_getaddrinfo = registry.socket.getaddrinfo
+
+    def always_fail_getaddrinfo(host, *args, **kwargs):
+        if host == "never-resolves.trycloudflare.com":
+            call_count[0] += 1
+            raise registry.socket.gaierror("Name or service not known")
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    original_max_wait = settings.dns_resolve_max_wait_seconds
+    original_initial = settings.dns_resolve_initial_backoff_seconds
+    original_max_backoff = settings.dns_resolve_max_backoff_seconds
+    try:
+        settings.dns_resolve_max_wait_seconds = 0.5
+        settings.dns_resolve_initial_backoff_seconds = 0.1
+        settings.dns_resolve_max_backoff_seconds = 0.2
+
+        with mock.patch.object(registry.socket, "getaddrinfo", always_fail_getaddrinfo):
+            with mock.patch.object(registry.time, "sleep"):  # Skip actual sleeping
+                try:
+                    registry.validate_endpoint_url("https://never-resolves.trycloudflare.com/v1")
+                    check("DNS retry exhausted rejects", "accepted", "should reject")
+                except HTTPException as e:
+                    check("DNS retry exhausted rejects", e.status_code, 400)
+                    check("DNS retry exhausted error mentions retry",
+                          "Retried for" in e.detail, True)
+                    check("DNS retry multiple attempts", call_count[0] > 1, True)
+    finally:
+        settings.dns_resolve_max_wait_seconds = original_max_wait
+        settings.dns_resolve_initial_backoff_seconds = original_initial
+        settings.dns_resolve_max_backoff_seconds = original_max_backoff
+
+test_dns_retry_exhausted()
+
+# Test: Immediate success doesn't retry
+def test_dns_immediate_success():
+    """Hostname that resolves immediately — no retry needed."""
+    call_count = [0]
+    real_getaddrinfo = registry.socket.getaddrinfo
+
+    def counting_getaddrinfo(host, *args, **kwargs):
+        if host == "immediate-tunnel.trycloudflare.com":
+            call_count[0] += 1
+            return [(2, 1, 6, "", ("104.16.0.1", 0))]
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    with mock.patch.object(registry.socket, "getaddrinfo", counting_getaddrinfo):
+        try:
+            registry.validate_endpoint_url("https://immediate-tunnel.trycloudflare.com/v1")
+            check("DNS immediate success no retry", call_count[0], 1)
+        except HTTPException:
+            check("DNS immediate success no retry", "rejected", "should succeed")
+
+test_dns_immediate_success()
+
+# Test: IP literals skip DNS resolution entirely
+def test_ip_literal_no_dns():
+    """IP address literal — no DNS resolution at all."""
+    call_count = [0]
+    real_getaddrinfo = registry.socket.getaddrinfo
+
+    def counting_getaddrinfo(host, *args, **kwargs):
+        call_count[0] += 1
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    with mock.patch.object(registry.socket, "getaddrinfo", counting_getaddrinfo):
+        try:
+            registry.validate_endpoint_url("http://8.8.8.8:11434/v1")
+            check("IP literal skips DNS", call_count[0], 0)
+        except HTTPException:
+            check("IP literal skips DNS", "rejected", "should succeed")
+
+test_ip_literal_no_dns()
 
 print()
 if FAILURES:

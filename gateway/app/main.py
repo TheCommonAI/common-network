@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
 from app import db, embedder
+from app.client_observability import router as client_router, retention_loop
 from app.admin import router as admin_router
 from app.catalogue import router as catalogue_router, seed_catalogue_from_file
 from app.config import settings
@@ -55,9 +56,12 @@ async def lifespan(app: FastAPI):
               f"serving with whatever is already in the database", flush=True)
 
     health_task = asyncio.create_task(health_check_loop())
+    retention_task = asyncio.create_task(retention_loop())
     print("startup: ready", flush=True)
     yield
     health_task.cancel()
+    retention_task.cancel()
+    await asyncio.gather(health_task, retention_task, return_exceptions=True)
     await db.disconnect()
 
 
@@ -78,6 +82,7 @@ app.include_router(decisions_router)
 app.include_router(catalogue_router)
 app.include_router(demand_router)
 app.include_router(admin_router)
+app.include_router(client_router)
 
 
 @app.get("/health")

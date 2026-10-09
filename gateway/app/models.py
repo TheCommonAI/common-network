@@ -34,27 +34,32 @@ class NodeCreate(BaseModel):
     client: str | None = Field(default=None, max_length=64)
 
 
-class NodeOut(BaseModel):
+class NodePublicOut(BaseModel):
+    """Public node info returned by GET /nodes. No endpoint_url — that is
+    internal to the gateway. Exposing tunnel URLs lets anyone bypass the
+    gateway's rate limiting and contribution gate."""
     id: UUID
     name: str
     operator: str | None
-    endpoint_url: str
     model_name: str
     region: str | None
     cost_per_1k: float
     avg_latency_ms: int
     healthy: bool
     last_heartbeat: str | None
-    # When a health check last *passed*, as opposed to last ran. Null means
-    # this gateway has never seen the node answer. Clients use it to drop
-    # contributors who are gone from the peer list without deleting them.
     last_seen_healthy: str | None = None
     capability_text: str
     domain_tags: list[str] | None = None
     catalogue_id: str | None = None
 
 
-class NodeRegisterOut(NodeOut):
+class NodeOut(NodePublicOut):
+    """Full node info including endpoint_url — only for internal use and
+    admin endpoints. Never returned by the public GET /nodes."""
+    endpoint_url: str
+
+
+class NodeRegisterOut(NodePublicOut):
     # Only ever returned once, from POST /nodes -- the one credential needed
     # to deregister this specific node. Never included in GET /nodes (that
     # would let anyone deregister anyone).

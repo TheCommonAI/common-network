@@ -26,6 +26,8 @@ from fastapi.responses import FileResponse
 
 from app import db, ratelimit
 from app.config import settings
+from app.models import NodeOut
+from app.registry import _row_to_node_out
 
 router = APIRouter()
 
@@ -124,6 +126,26 @@ async def admin_delete_node(node_id: UUID, request: Request):
     if row is None:
         raise HTTPException(status_code=404, detail=f"no node with id {node_id}")
     return {"deleted": str(node_id), "name": row["name"], "was_healthy": row["healthy"]}
+
+
+@router.get("/admin/nodes", response_model=list[NodeOut])
+async def admin_list_nodes(request: Request):
+    """Full node list including endpoint_url — admin only.
+
+    The public GET /nodes deliberately omits endpoint_url: those are
+    Cloudflare tunnel URLs pointing at contributors' Ollama instances, and
+    Ollama has no authentication. Publishing them lets anyone bypass the
+    gateway's contribution gate and rate limiting.
+
+    Operators and diagnostic tools (like `common test --admin-token`) need
+    the URLs to debug connectivity. This endpoint provides them, gated on
+    ADMIN_TOKEN.
+    """
+    _require_admin(request)
+
+    async with db.pool().acquire() as conn:
+        rows = await conn.fetch("select * from nodes order by created_at desc")
+    return [_row_to_node_out(r) for r in rows]
 
 
 @router.get("/admin/state")

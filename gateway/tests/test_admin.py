@@ -102,6 +102,24 @@ try:
           asyncio.run(delete_status(FakeRequest(query={"token": "wrong"}))), 401)
     check("delete: missing token -> 401",
           asyncio.run(delete_status(FakeRequest())), 401)
+
+    # GET /admin/nodes returns full node info including endpoint_url, which
+    # is exactly what GET /nodes must NOT expose. Same gate as everything else.
+    print("\n/admin/nodes (full node list with URLs) is gated identically")
+    async def admin_nodes_status(request) -> int:
+        try:
+            await admin.admin_list_nodes(request)
+            return 200
+        except HTTPException as e:
+            return e.status_code
+    settings.admin_token = ""
+    check("admin_nodes: unconfigured -> 404",
+          asyncio.run(admin_nodes_status(FakeRequest(query={"token": "guess"}))), 404)
+    settings.admin_token = "s3cret-operators-token"
+    check("admin_nodes: wrong token -> 401",
+          asyncio.run(admin_nodes_status(FakeRequest(query={"token": "wrong"}))), 401)
+    check("admin_nodes: missing token -> 401",
+          asyncio.run(admin_nodes_status(FakeRequest())), 401)
 finally:
     settings.admin_token = original
 

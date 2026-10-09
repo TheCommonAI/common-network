@@ -2487,8 +2487,28 @@ def cmd_test(gateway: str, args: argparse.Namespace) -> None:
     host = socket.gethostname()
     run_id = f"{time.strftime('%Y%m%d-%H%M%S', time.localtime(started))}-{host}"
 
+    admin_token = getattr(args, "admin_token", None)
+    has_endpoint_urls = False
+
     try:
-        nodes = http_json("GET", f"{gateway}/nodes")
+        if admin_token:
+            headers = {"X-Common-Admin-Token": admin_token}
+            nodes = http_json("GET", f"{gateway}/admin/nodes", headers=headers)
+            has_endpoint_urls = True
+        else:
+            nodes = http_json("GET", f"{gateway}/nodes")
+            has_endpoint_urls = bool(nodes and nodes[0].get("endpoint_url"))
+    except urllib.error.HTTPError as e:
+        if e.code == 401 and admin_token:
+            print(red("✗ admin token rejected."), file=sys.stderr)
+            print(comment("check COMMON_ADMIN_TOKEN or --admin-token value."), file=sys.stderr)
+            sys.exit(1)
+        if e.code == 404 and admin_token:
+            print(red("✗ /admin/nodes not found — gateway may need updating."), file=sys.stderr)
+            sys.exit(1)
+        print(red("✗ can't reach the network."), file=sys.stderr)
+        print(comment(f"{e}"), file=sys.stderr)
+        sys.exit(1)
     except (urllib.error.URLError, socket.timeout) as e:
         print(red("✗ can't reach the network."), file=sys.stderr)
         print(comment(f"{e}"), file=sys.stderr)
@@ -2526,23 +2546,31 @@ def cmd_test(gateway: str, args: argparse.Namespace) -> None:
     # Together with the gateway-routed TTFT these separate the three things
     # that a single latency number otherwise smears into one: the network to
     # that device, the model on that device, and the gateway in between.
+    #
+    # Requires endpoint_url, which is now admin-only. Without an admin token,
+    # direct link probing is skipped.
     links: dict[str, dict] = {}
     if not args.routing_only:
-        print(f"{GLYPH_WORK} {dim('measuring the link to each node (no inference)')}")
-        for n in healthy:
-            link_rtt = _link_probe(n["endpoint_url"])
-            direct = _probe_once(gateway, "Reply with exactly: OK", timeout=120,
-                                 direct_url=n["endpoint_url"], direct_model=n["model_name"])
-            links[n["name"]] = {
-                "link_rtt_ms": link_rtt,
-                "direct_ttft_ms": direct.get("ttft_ms") if direct.get("ok") else None,
-                "direct_ok": bool(direct.get("ok")),
-                "direct_error": direct.get("error"),
-            }
-            note = "" if direct.get("ok") else red("  (direct probe failed)")
-            print(dim(f"   {n['name']:<30} link {_fmt_ms(link_rtt):>7}   "
-                      f"direct ttft {_fmt_ms(direct.get('ttft_ms')):>7}") + note)
-        print()
+        if not has_endpoint_urls:
+            print(dim("skipping direct link probing — endpoint URLs are admin-only."))
+            print(comment("to measure link latency directly, pass --admin-token or set $COMMON_ADMIN_TOKEN."))
+            print()
+        else:
+            print(f"{GLYPH_WORK} {dim('measuring the link to each node (no inference)')}")
+            for n in healthy:
+                link_rtt = _link_probe(n["endpoint_url"])
+                direct = _probe_once(gateway, "Reply with exactly: OK", timeout=120,
+                                     direct_url=n["endpoint_url"], direct_model=n["model_name"])
+                links[n["name"]] = {
+                    "link_rtt_ms": link_rtt,
+                    "direct_ttft_ms": direct.get("ttft_ms") if direct.get("ok") else None,
+                    "direct_ok": bool(direct.get("ok")),
+                    "direct_error": direct.get("error"),
+                }
+                note = "" if direct.get("ok") else red("  (direct probe failed)")
+                print(dim(f"   {n['name']:<30} link {_fmt_ms(link_rtt):>7}   "
+                          f"direct ttft {_fmt_ms(direct.get('ttft_ms')):>7}") + note)
+            print()
 
     out_path = Path(args.out) if args.out else TEST_DIR / f"{run_id}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2715,6 +2743,7 @@ def _parse_test_flags(args: argparse.Namespace) -> argparse.Namespace:
     p.add_argument("--fusion-path")
     p.add_argument("--fusion-profile")
     p.add_argument("--no-exec", action="store_true")
+    p.add_argument("--admin-token")
     sub, _ = p.parse_known_args(args.rest)
     for key, value in vars(sub).items():
         if value not in (None, False):  # only override what was actually passed
@@ -2868,6 +2897,7 @@ def main() -> None:
     parser.add_argument("--fusion-path", help="test: directory containing the `fusion` package (or set $COMMON_FUSION_PATH)")
     parser.add_argument("--fusion-profile", help="test: fusion config profile (default: the profile recorded in the checkpoint)")
     parser.add_argument("--no-exec", action="store_true", help="test: don't execute model-written code when scoring (lower resolution, nothing runs locally)")
+    parser.add_argument("--admin-token", default=os.environ.get("COMMON_ADMIN_TOKEN"), help="test: gateway admin token for direct link probing (or set $COMMON_ADMIN_TOKEN)")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--version", action="store_true")
     args = parser.parse_args()
