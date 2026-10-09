@@ -10,14 +10,19 @@ should do, and what is deliberately out of scope for Alpha.
 
 - Register a node (it must be reachable, and it will be health-checked).
 - Send `POST /v1/chat/completions` requests and use the network's compute.
-- Read `/nodes` (names, models, endpoint URLs, operators), `/decisions/*`,
-  `/demand/*`, `/catalogue` and the dashboard.
+- Read `/nodes` (names, models, health, tags, operators — but NOT endpoint
+  URLs), `/decisions/*`, `/demand/*`, `/catalogue` and the dashboard.
 
 Legibility is part of the pitch — every response says which machine answered
 it — so the registry is public on purpose. If you operate a gateway, know that
-node names, operators and endpoint URLs are visible to anyone. `common join`
-defaults `--name` to `<hostname>-<random-suffix>` and `--operator` to
-`friend` — it never publishes your OS username unless you pass it.
+node names and operators are visible to anyone. `common join` defaults `--name`
+to `<hostname>-<random-suffix>` and `--operator` to `friend` — it never
+publishes your OS username unless you pass it.
+
+Endpoint URLs (the Cloudflare tunnel addresses) are NOT exposed publicly. They
+are available only via `/admin/nodes`, gated on `ADMIN_TOKEN`. This prevents
+strangers from bypassing the gateway to talk directly to contributors' Ollama
+instances.
 
 ## What a stranger cannot do
 
@@ -86,13 +91,16 @@ to a public deployment**. On a public gateway:
 ## Known limits, stated rather than papered over
 
 - **A contributor's endpoint is an unauthenticated Ollama.** `common join`
-  tunnels straight to `localhost:11434`, and `/nodes` publishes that URL.
-  Ollama's API has no authentication, so anyone who reads the registry can
-  talk to a contributor's Ollama directly — bypassing the gateway's gate and
-  rate limit, and reaching model-management endpoints, not just inference.
-  This is the largest open hole in Alpha. Until a worker sits in front of
-  Ollama, **only donate a machine you are comfortable exposing**, and prefer
-  `--lan` on a trusted network.
+  tunnels straight to `localhost:11434`. Ollama's API has no authentication,
+  so anyone who obtains the tunnel URL can talk to a contributor's Ollama
+  directly — bypassing the gateway's gate and rate limit, and reaching
+  model-management endpoints, not just inference. As of v0.1.2, endpoint URLs
+  are no longer published via `GET /nodes` (they require `ADMIN_TOKEN`), which
+  closes the easiest path to them. However, **an admin or operator with the
+  token can still see them**, and they may leak through other means (logs,
+  Cloudflare dashboard). Until a worker sits in front of Ollama, **only donate
+  a machine you are comfortable exposing**, and prefer `--lan` on a trusted
+  network.
 - **DNS rebinding is narrowed, not closed.** Validation resolves the hostname;
   the actual connection resolves it again. A hostname that answers differently
   between those two moments defeats the check. Fixing it properly means
@@ -140,6 +148,13 @@ for the details privately.
 
 ## History
 
+- 2026-10-08: `GET /nodes` was exposing every node's `endpoint_url` publicly —
+  the Cloudflare tunnel URLs pointing at contributors' Ollama instances.
+  Ollama has no authentication, so anyone who read the registry could bypass
+  the gateway entirely. Fixed by moving `endpoint_url` to the admin-only
+  `GET /admin/nodes` endpoint (requires `ADMIN_TOKEN`). The public `/nodes`
+  now returns `NodePublicOut` without URLs. `common test` updated to skip
+  direct link probing unless `--admin-token` or `$COMMON_ADMIN_TOKEN` is set.
 - 2026-09-08: `api_key_ref` was resolved against the gateway's environment
   with no restriction on which variable a registrant could name. Registering
   an endpoint you controlled and naming any variable (e.g.
