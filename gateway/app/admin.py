@@ -34,6 +34,41 @@ router = APIRouter()
 ADMIN_PATH = Path(__file__).parent / "static" / "admin.html"
 
 
+def _hours(value) -> float | None:
+    """Postgres avg()/max() over an interval come back as Decimal; JSON wants a
+    float. One decimal place is the honest precision for "how long ago did this
+    machine register"."""
+    return round(float(value), 1) if value is not None else None
+
+
+def shape_clients(rows) -> list[dict]:
+    """Rows from the per-client query -> the JSON the operators page renders.
+
+    Pulled out of the route so it can be pinned without a database, the same way
+    test_client.py pins the client-resolution expression rather than calling the
+    endpoint.
+
+    `client` passes through as None rather than being pre-labelled here. Null
+    means "did not say" -- a node registered before this column existed, or a
+    client that predates sending the string -- and migration 008 is explicit
+    that this is a different fact from any string we could invent. The label
+    belongs in the one place that has to render it, not in the data.
+    """
+    return [
+        {
+            "client": r["client"],
+            "nodes": r["nodes"],
+            "healthy": r["healthy"],
+            "legacy": r["legacy"],
+            "first_seen": r["first_seen"].isoformat() if r["first_seen"] else None,
+            "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
+            "avg_tenure_hours": _hours(r["avg_tenure_hours"]),
+            "max_tenure_hours": _hours(r["max_tenure_hours"]),
+        }
+        for r in rows
+    ]
+
+
 def _require_admin(request: Request) -> None:
     """404 when unconfigured, 401 when the password is wrong.
 
@@ -124,7 +159,7 @@ async def admin_state(request: Request):
             select id, name, operator, model_name, endpoint_url, region,
                    healthy, can_aggregate, domain_tags, avg_latency_ms,
                    last_heartbeat, last_seen_healthy, created_at,
-                   (node_token is not null) as has_token
+                   (node_token is not null) as has_token, client
             from nodes
             order by healthy asc, name asc
             """
@@ -167,6 +202,36 @@ async def admin_state(request: Request):
             limit 20
             """
         )
+        # Who is on the network, by the program that registered them.
+        #
+        # The app and the CLI deliberately share the gateway, the endpoints and
+        # one ~/.common-network/identity.json, so `client` is the only thing
+        # that separates them (migration 008). It is self-reported and trivially
+        # forgeable -- a usage statistic, never an authorisation input, nothing
+        # branches on it -- which is why this lives here and not on the public
+        # /dashboard: it is a number about our own distribution, not a claim
+        # about the network a visitor should act on.
+        #
+        # Tenure is computed over nodes still registered, because
+        # `DELETE /nodes/{id}` removes the row: a machine that has left takes its
+        # history with it. So this answers "how long have the app's current
+        # contributors been here", and NOT "how long did the app's contributors
+        # stay" -- the second needs an exit record the registry does not keep.
+        client_rows = await conn.fetch(
+            """
+            select client,
+                   count(*)                                   as nodes,
+                   count(*) filter (where healthy)            as healthy,
+                   count(*) filter (where node_token is null)  as legacy,
+                   min(created_at)                            as first_seen,
+                   max(coalesce(last_seen_healthy, last_heartbeat)) as last_seen,
+                   avg(extract(epoch from now() - created_at)) / 3600 as avg_tenure_hours,
+                   max(extract(epoch from now() - created_at)) / 3600 as max_tenure_hours
+            from nodes
+            group by client
+            order by nodes desc, client asc nulls last
+            """
+        )
 
     rel = {r["id"]: r for r in reliability}
     node_rows = []
@@ -195,6 +260,11 @@ async def admin_state(request: Request):
             # Legacy nodes registered before tokens existed cannot be
             # re-registered safely by their owner and cannot grant access.
             "has_token": n["has_token"],
+            # Which program registered this node. Null is "did not say" -- see
+            # shape_clients. Shown per node so an operator can spot the odd one
+            # out (a machine re-registered by a different path than the rest)
+            # rather than only in aggregate.
+            "client": n["client"],
             "requests_24h": requests,
             "failures_24h": failures,
             "failure_rate": (failures / requests) if requests else None,
@@ -218,7 +288,7 @@ async def admin_state(request: Request):
         buckets.sort(key=lambda b: b["tokens_left"])
 
     return {
-        "version": "0.1.2",
+        "version": "0.1.3",
         "release": "The Common Network Alpha",
         "config": {
             "require_contribution": settings.require_contribution,
@@ -238,6 +308,9 @@ async def admin_state(request: Request):
             "disagreements": totals["disagreements"] or 0,
         },
         "nodes": node_rows,
+        # Aggregate by registering program. See the query above for why tenure
+        # only covers nodes still registered.
+        "clients": shape_clients(client_rows),
         "recent_failures": [
             {
                 "at": f["created_at"].isoformat() if f["created_at"] else None,

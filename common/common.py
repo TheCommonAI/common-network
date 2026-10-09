@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """COMMON. — the commons, belonging to everyone and no one.
 
-The Common Network Alpha (v0.1.2).
+The Common Network Alpha (v0.1.3).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -90,13 +90,50 @@ except ImportError:  # pragma: no cover - Windows
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/common/common.py"
 JOIN_SCRIPT_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
 INSTALL_DIR = Path.home() / ".common-network"
+
+# Which program is speaking, reported to the gateway as X-Common-Client.
+#
+# The desktop app and this CLI share the gateway, the endpoints and the same
+# ~/.common-network/identity.json on purpose -- one machine is one node however
+# it joined -- so the program that spoke for a machine is otherwise invisible in
+# the gateway's records. The gateway stores this string on registration
+# (`nodes.client`, migration 008) so it can answer "how much of the network is
+# the app, and how much is the terminal".
+#
+# The same two spellings common-desktop uses: the header on every gateway
+# request, and the `client` field on POST /nodes (join.py sends that one, since
+# it is the file that registers). Self-reported and trivially forgeable, so it
+# is a usage statistic and never an authorisation input.
+CLIENT = f"common-cli/{VERSION}"
+
+# How long to wait for an answer. Must stay ABOVE the gateway's own read
+# timeout (forward_read_timeout_seconds, 180s), because the gateway's failure
+# carries which node died and why, while a socket timeout here can only say
+# "timed out". The inner timeout has to be the one that fires. Cold starts are
+# the reason the number is large at all: a 7B model on a donated laptop takes
+# ~57s to load before it emits its first token.
+#
+# `common test` and gateway/tests/test_timeouts.py both read this name.
+REQUEST_TIMEOUT_SECONDS = 240
+
+
+def gateway_headers(extra: dict | None = None) -> dict:
+    """Headers every gateway request carries -- the mirror of common-desktop's
+    gatewayHeaders(), so an app user and a terminal user are told apart by one
+    string in one place.
+
+    Deliberately not applied to local requests (Ollama, or a node's own worker):
+    those leave this machine and have no business carrying it.
+    """
+    return {"X-Common-Client": CLIENT, **(extra or {})}
+
 
 # How long a node that has stopped answering stays on the peer list.
 #
@@ -210,9 +247,15 @@ def print_banner_box(subtitle: str) -> None:
 
 # --- HTTP --------------------------------------------------------------------
 
-def http_json(method: str, url: str, body: dict | None = None, headers: dict | None = None, timeout: float = 20.0):
+def http_json(method: str, url: str, body: dict | None = None, headers: dict | None = None, timeout: float = 20.0, *, client: bool = True):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    # Every caller of this is either a gateway request or a local Ollama one,
+    # so the client string goes on by default and the local calls opt out with
+    # client=False. Stamping it here rather than at each of the dozen call
+    # sites is what makes "every gateway request carries it" true by
+    # construction instead of by remembering.
+    headers = gateway_headers(headers) if client else dict(headers or {})
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     if data is not None:
         req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -332,12 +375,14 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
         headers["X-Common-Node"] = node_override
     if compose:
         headers["X-Common-Compose"] = compose
-    headers.update(contributor_headers(gateway))
+    headers.update(gateway_headers(contributor_headers(gateway)))
 
     req = urllib.request.Request(f"{gateway}/v1/chat/completions", data=json.dumps(body).encode(), headers=headers, method="POST")
     start = time.monotonic()
+    # See REQUEST_TIMEOUT_SECONDS: longer than the gateway's read timeout on
+    # purpose, so the gateway's explanation is what the user sees.
     try:
-        resp = urllib.request.urlopen(req, timeout=180)
+        resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS)
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="ignore")
         print(red("✗ the network couldn't answer that."), file=sys.stderr)
@@ -355,6 +400,25 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
         print(dim(f"  → retry:            common ask \"{question}\" --retry"), file=sys.stderr)
         print(dim("  → run local only:   common ask \"...\" --local"), file=sys.stderr)
         sys.exit(1)
+
+    # Three separate clocks, because conflating them is how "routed in 54346ms"
+    # got printed for a request that routed in about ten milliseconds.
+    #
+    # Note what the client cannot separate on its own: time-to-response-headers
+    # is the gateway's routing PLUS the node accepting the connection, and a
+    # cold Ollama sends no headers until it has loaded the weights. So the
+    # gateway reports its own share in a header, and the client takes the rest
+    # from its own clock:
+    #
+    #   routing_ms  the gateway's share, reported by the gateway in a header
+    #   ttft_ms     time to the first token of the answer (model load + prompt)
+    #   total_ms    time to the last token
+    #
+    # A cold 7B on a 16GB laptop is ~57s of model load. That 57s belongs to the
+    # node, and it lands in ttft_ms where it can be seen and acted on, rather
+    # than being reported as a slow router.
+    route_hdr = resp.headers.get("X-Common-Route-Ms")
+    routing_ms = int(route_hdr) if (route_hdr or "").isdigit() else None
 
     node_name = resp.headers.get("X-Common-Node")
     score = resp.headers.get("X-Common-Score")
@@ -442,6 +506,7 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
         print()
 
     full = []
+    ttft_ms: int | None = None
     with resp:
         for raw_line in resp:
             line = raw_line.decode("utf-8", errors="ignore").strip()
@@ -456,6 +521,8 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
                 continue
             delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
             if delta:
+                if ttft_ms is None:
+                    ttft_ms = int((time.monotonic() - start) * 1000)
                 if as_json:
                     full.append(delta)
                 else:
@@ -469,7 +536,14 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
     if as_json:
         print(json.dumps({
             "answer": "".join(full), "node": node_name, "score": score,
-            "latency_ms": latency_ms, "topology": topology,
+            # `latency_ms` is the whole request, kept under its old name so
+            # existing consumers keep working -- it was always this. The three
+            # numbers below it are the ones that actually locate a slowdown.
+            "latency_ms": latency_ms,
+            "routing_ms": routing_ms,
+            "ttft_ms": ttft_ms,
+            "total_ms": latency_ms,
+            "topology": topology,
             "panel": [p.strip() for p in panel.split(",")] if panel else None,
             "aggregator": aggregator,
             "compose_reason": compose_reason,
@@ -493,7 +567,31 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
         # Just the routing facts. What is and isn't stored is a standing
         # property of the network, not news about this request -- it lives in
         # `common privacy` and the README, where it can be read once.
-        print(dim(f"routed in   {latency_ms}ms"))
+        #
+        # Three numbers, not one. This line used to read
+        # "routed in 54346ms", which was false: the clock it printed started
+        # before the request was sent and stopped after the last token, so a
+        # cold 7B loading its weights for ~57s was reported as slow *routing*.
+        # Routing is the gateway picking a node, and it is tens of
+        # milliseconds. The 57s is the node loading a model, and it belongs on
+        # the line that says so -- that is the number that tells you whether to
+        # warm the node or wait.
+        parts = []
+        if routing_ms is not None:
+            parts.append(f"routed in {_fmt_ms(routing_ms)}")
+        if ttft_ms is not None:
+            # First token, measured from send. Includes the routing above plus
+            # the node's model load, which is why it dwarfs it on a cold node.
+            parts.append(f"first token {_fmt_ms(ttft_ms)}")
+        parts.append(f"total {_fmt_ms(latency_ms)}")
+        print(dim("   ·   ".join(parts)))
+        if ttft_ms is not None and routing_ms is not None and ttft_ms > 5000:
+            # Above a few seconds, essentially all of the wait is the node
+            # getting its model into memory -- worth saying once, where the
+            # user is looking, because it is the difference between a network
+            # that is slow and a network that is cold.
+            print(comment(f"   {_fmt_ms(max(ttft_ms - routing_ms, 0))} of that was "
+                          f"{node_name or 'the node'} loading its model — the next one is fast."))
         if verbose:
             print(dim(f"  score: {score}"))
             if compose_reason:
@@ -503,7 +601,7 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
 def _ask_local(question: str, model: str | None, as_json: bool, quiet: bool) -> None:
     ollama_url = "http://localhost:11434"
     try:
-        tags = http_json("GET", f"{ollama_url}/api/tags", timeout=5)
+        tags = http_json("GET", f"{ollama_url}/api/tags", timeout=5, client=False)
     except (urllib.error.URLError, socket.timeout):
         print(red("✗ can't reach Ollama on this machine."), file=sys.stderr)
         print(comment("is it installed and running? https://ollama.com/download"), file=sys.stderr)
@@ -515,20 +613,83 @@ def _ask_local(question: str, model: str | None, as_json: bool, quiet: bool) -> 
     chosen = model or names[0]
     if not quiet:
         print(dim(f"asking {chosen} locally (never leaves this machine)"))
-    body = {"model": chosen, "messages": [{"role": "user", "content": question}], "stream": False}
+
+    # Streamed, not buffered. This used to send stream=False and print the
+    # finished answer in one go, which on a 16GB laptop meant a blank screen
+    # for the entire generation -- and this is the path `ask` *recommends* when
+    # the network can't be reached ("run local only: common ask --local"), so
+    # the slowest route through the tool was also the silent one. Ollama
+    # streams natively; there was never a reason to wait for the last token
+    # before showing the first.
+    #
+    # No gateway_headers here, deliberately: --local promises the prompt never
+    # leaves this machine, so nothing about the network is attached to it.
+    body = {"model": chosen, "messages": [{"role": "user", "content": question}], "stream": True}
+    req = urllib.request.Request(
+        f"{ollama_url}/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    # Same headroom as `ask` (see REQUEST_TIMEOUT_SECONDS), minus the gateway
+    # reasoning: a local call has nothing in front of it but Ollama.
+    start = time.monotonic()
     try:
-        result = http_json("POST", f"{ollama_url}/v1/chat/completions", body=body, timeout=180)
+        resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS)
+    except urllib.error.HTTPError as e:
+        print(red(f"✗ local request failed: {e.code}: {e.read().decode(errors='ignore')[:200]}"), file=sys.stderr)
+        sys.exit(1)
     except (urllib.error.URLError, socket.timeout) as e:
         print(red(f"✗ local request failed: {e}"), file=sys.stderr)
         sys.exit(1)
-    answer = result["choices"][0]["message"]["content"]
+
+    full: list[str] = []
+    ttft_ms: int | None = None
+    with resp:
+        for raw_line in resp:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+            if delta:
+                if ttft_ms is None:
+                    ttft_ms = int((time.monotonic() - start) * 1000)
+                if as_json:
+                    full.append(delta)
+                else:
+                    print(paper(delta), end="", flush=True)
+                    full.append(delta)
+
+    answer = "".join(full)
+    total_ms = int((time.monotonic() - start) * 1000)
     if as_json:
-        print(json.dumps({"answer": answer, "node": "local", "model": chosen}))
+        print(json.dumps({
+            "answer": answer, "node": "local", "model": chosen,
+            # No routing_ms: nothing was routed. The whole wait here is Ollama
+            # loading the model and generating, and ttft_ms is where it shows.
+            "routing_ms": None, "ttft_ms": ttft_ms, "total_ms": total_ms,
+            "latency_ms": total_ms,
+        }))
     else:
-        print(paper(answer))
+        print()
         print()
         print(dim("─" * 63))
         print(dim(f"served by   local ({chosen})   ·   never left this machine"))
+        parts = []
+        if ttft_ms is not None:
+            parts.append(f"first token {_fmt_ms(ttft_ms)}")
+        parts.append(f"total {_fmt_ms(total_ms)}")
+        print(dim("   ·   ".join(parts)))
+        if ttft_ms is not None and ttft_ms > 5000:
+            print(comment(f"   {_fmt_ms(ttft_ms)} of that was {chosen} loading "
+                          f"its model — the next one is fast."))
 
 
 def cmd_recommend(gateway: str, as_json: bool, machines: int, ram_gb: float) -> None:
@@ -1064,8 +1225,8 @@ def _probe_once(gateway: str, prompt: str, node: str | None = None, timeout: flo
         headers["X-Common-Node"] = node
     if not direct_url:
         # Gateway requests carry this machine's contributor token (never sent
-        # straight to a node -- see contributor_headers).
-        headers.update(contributor_headers(gateway))
+        # straight to a node -- see contributor_headers) and the client string.
+        headers.update(gateway_headers(contributor_headers(gateway)))
 
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
     start = time.monotonic()
@@ -1894,7 +2055,7 @@ def _ask_thesis(gateway: str, prompt: str, *, compose: str | None = None,
         headers["X-Common-Compose"] = compose
     if node:
         headers["X-Common-Node"] = node
-    headers.update(contributor_headers(gateway))
+    headers.update(gateway_headers(contributor_headers(gateway)))
 
     req = urllib.request.Request(f"{gateway}/v1/chat/completions",
                                  data=json.dumps(body).encode(), headers=headers, method="POST")

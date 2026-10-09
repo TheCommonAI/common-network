@@ -265,6 +265,7 @@ async def _handle_composed(
     matched_domain: str | None,
     scored: list[ScoredNode],
     start: float,
+    route_ms: int,
 ):
     """Fan out to the panel, verify, aggregate.
 
@@ -282,6 +283,7 @@ async def _handle_composed(
     base_headers = {
         "X-Common-Panel": _header_safe(", ".join(answers.keys())),
         "X-Common-Compose-Reason": _header_safe(plan.reason),
+        "X-Common-Route-Ms": str(route_ms),
     }
 
     # One survivor: hand it back as-is. Aggregating a single answer adds a
@@ -384,10 +386,79 @@ async def _handle_composed(
     )
 
 
+# --- Which node answers, when similarity cannot say ----------------------
+
+def choose_primary(
+    scored: list[ScoredNode],
+    request_text: str,
+) -> tuple[ScoredNode, ScoredNode | None]:
+    """Pick the node that answers, and the one to fall back to. (`primary`, `backup`)
+
+    Extracted from the route so the decision can be pinned without a database or
+    a live node -- the same reason `admin.shape_clients` is its own function, and
+    the same reason: this is the logic the whole product's routing claim rests
+    on, and until now it could only be exercised by asking a real network a real
+    question and reading the answer.
+
+    The premise is a measured property of the shipped embedder, not a guess:
+    topical scores (`ScoredNode.topical_score`, i.e. similarity + tag overlap)
+    span roughly 0.39-0.55 across a clear maths question, a code question, a
+    poem, and the literal gibberish "asdfgh qwerty zxcvbn" -- which scored 0.546
+    and outranked the maths question's 0.451. Cosine similarity against a
+    paragraph of self-description compares *topic*, and a word problem's topic is
+    trains. So above the threshold the ranking is worth following, and below it
+    the ranking is noise worth discarding in favour of signals that are not
+    embeddings at all.
+    """
+    primary, backup = scored[0], (scored[1] if len(scored) > 1 else None)
+
+    if scored[0].topical_score >= settings.routing_confidence_threshold:
+        return primary, backup
+
+    quant_tags = compose.quantitative_tags()
+    lane = [s for s in scored
+            if quant_tags & {t.lower() for t in (s.node.get("domain_tags") or [])}]
+    generalists = [s for s in scored if "general" in (s.node.get("domain_tags") or [])]
+
+    # First: the domain question the embedder cannot answer and a regex can.
+    # This is the reported bug -- a maths question with a maths specialist online
+    # was answered by the generalist, because the maths node scored *last* for
+    # "A train travels 240 km in 3 hours. What is its average speed?" (0.387,
+    # against the coder's 0.400). "Arithmetic" is not in that sentence's
+    # embedding; "train" is.
+    if compose.is_calculation_request(request_text) \
+            and lane and lane[0].node["id"] != scored[0].node["id"]:
+        return lane[0], scored[0]
+
+    # Second: a generalist, but only one that actually outscores what it
+    # replaces. The previous rule swapped on the incumbent being unconfident
+    # without ever asking whether the generalist was better -- on that same maths
+    # question it chose a node scoring 0.392 over one scoring 0.400, strictly
+    # worse by the gateway's own measure, and it did so on a margin of 0.008,
+    # which is why the same question routed correctly one day and not the next.
+    if generalists and generalists[0].node["id"] != scored[0].node["id"] \
+            and generalists[0].topical_score > scored[0].topical_score + settings.generalist_override_margin:
+        return generalists[0], scored[0]
+
+    return primary, backup
+
+
 # --- Entry point ----------------------------------------------------------
 
 @router.post("/v1/chat/completions")
 async def chat_completions(request: Request):
+    # Where the routing clock starts. What a client can measure on its own --
+    # time to response headers -- is routing PLUS the chosen node loading its
+    # model, and on a 16GB laptop that load is ~57s while routing is tens of
+    # milliseconds. Reporting the sum as "routing" made a cold model look like a
+    # slow router, which is the opposite of what an operator needs to know. So
+    # the gateway reports its own half as X-Common-Route-Ms and lets the client
+    # attribute the rest to the node.
+    t0 = time.monotonic()
+
+    def route_ms() -> int:
+        return int((time.monotonic() - t0) * 1000)
+
     body = await request.json()
     stream = bool(body.get("stream", False))
 
@@ -443,6 +514,7 @@ async def chat_completions(request: Request):
             start = time.monotonic()
             composed = await _handle_composed(
                 plan, body, stream, request_embed, matched_domain, scored, start,
+                route_ms=route_ms(),
             )
             if composed is not None:
                 return composed
@@ -451,15 +523,7 @@ async def chat_completions(request: Request):
             plan = PanelPlan(compose=False,
                              reason="panel selected but no member answered — fell back to single routing")
 
-        primary, backup = scored[0], (scored[1] if len(scored) > 1 else None)
-
-        # Low confidence on a narrow specialist match loses to frontier
-        # instantly -- prefer a confident generalist over a guessed specialist.
-        if scored[0].topical_score < settings.routing_confidence_threshold:
-            generalists = [s for s in scored if "general" in (s.node.get("domain_tags") or [])]
-            if generalists and generalists[0].node["id"] != scored[0].node["id"]:
-                primary, backup = generalists[0], scored[0]
-
+        primary, backup = choose_primary(scored, routing_text)
         candidates = [primary] + ([backup] if backup else [])
 
     last_error: Exception | None = None
@@ -503,6 +567,14 @@ async def chat_completions(request: Request):
                     if not forced_node_name and len(scored) > 1 else ""
                 ),
                 "X-Common-Topology": "single",
+                # How long the gateway spent deciding, in milliseconds. This is
+                # the number worth watching if routing ever feels slow: it
+                # covers access control, the node list, the embedding and the
+                # score, and it is the gateway's own half of the client's
+                # time-to-first-byte. Everything the client waits for *after*
+                # this is the chosen node loading and running its model -- on a
+                # laptop with a cold 7B in Ollama, ~57s of it.
+                "X-Common-Route-Ms": str(route_ms()),
                 # Why this request was *not* composed. The negative case is the
                 # one worth explaining -- "why did only one node answer this?"
                 # is the question the composition feature invites.

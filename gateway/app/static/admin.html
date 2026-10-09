@@ -133,6 +133,16 @@
   </section>
 
   <section>
+    <h2>Clients</h2>
+    <p class="hint">
+      Which program registered each node. Self-reported and forgeable — read it as
+      a usage statistic, never as a fact about the network. Tenure covers only nodes
+      still registered, since leaving removes the row.
+    </p>
+    <div class="card scroll"><div id="clients"></div></div>
+  </section>
+
+  <section>
     <h2>Recent failed requests</h2>
     <p class="hint">Requests that errored. No request text is recorded, by design.</p>
     <div class="card scroll"><div id="failures"></div></div>
@@ -212,6 +222,9 @@ function renderNodes(nodes) {
         + (n.has_token ? '' : ' <span class="pill off">no token</span>')
         + (n.can_aggregate ? ' <span class="pill">agg</span>' : ''),
       esc(n.operator || '—'),
+      // Which program registered it. Blank rather than "—" for null: "did not
+      // say" is a real answer, and the aggregate table above names it.
+      n.client ? `<span class="mono">${esc(n.client)}</span>` : '<span class="muted">—</span>',
       `<span class="mono">${esc(n.model)}</span>`,
       `<div class="mono trunc" title="${esc(n.endpoint)}">${esc(n.endpoint)}</div>`,
       n.requests_24h,
@@ -221,7 +234,24 @@ function renderNodes(nodes) {
     ];
   });
   document.getElementById('nodes').innerHTML = table(
-    ['Node', 'Operator', 'Model', 'Endpoint', 'Reqs 24h', 'Fail', 'Latency', 'Heartbeat'],
+    ['Node', 'Operator', 'Client', 'Model', 'Endpoint', 'Reqs 24h', 'Fail', 'Latency', 'Heartbeat'],
+    rows, 'No nodes registered.');
+}
+
+function renderClients(clients) {
+  const label = c => c === null ? '<span class="muted">did not say</span>' : `<span class="mono">${esc(c)}</span>`;
+  const hours = h => h === null ? '—' : (h < 48 ? h + 'h' : (h / 24).toFixed(1) + 'd');
+  const rows = clients.map(c => [
+    label(c.client),
+    c.nodes,
+    c.healthy,
+    c.legacy ? `<span class="muted">${c.legacy}</span>` : '0',
+    `<span class="muted">${esc(ago(c.last_seen))}</span>`,
+    hours(c.avg_tenure_hours),
+    hours(c.max_tenure_hours),
+  ]);
+  document.getElementById('clients').innerHTML = table(
+    ['Client', 'Nodes', 'Healthy', 'Legacy', 'Last seen', 'Avg tenure', 'Longest'],
     rows, 'No nodes registered.');
 }
 
@@ -264,6 +294,7 @@ async function refresh() {
     renderConfig(d.config);
     renderStats(d.totals_24h, d.nodes);
     renderNodes(d.nodes);
+    renderClients(d.clients || []);
     renderFailures(d.recent_failures);
     renderBuckets(d.rate_limit_buckets, d.config.rate_limit_per_minute > 0);
     stamp.textContent = 'updated ' + new Date().toLocaleTimeString();
