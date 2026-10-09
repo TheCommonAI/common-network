@@ -10,3 +10,9 @@ __pycache__/
 PROJECT-THESIS.md
 SCHOOL-LAB-THESIS-RUNBOOK.md
 SCHOOL-NETWORK-REQUIREMENTS.md
+
+# Editor and merge leftovers. A stale copy of a source file must never be
+# committed by accident -- one nearly was (common/common.py.prefusion.bak).
+*.bak
+*.orig
+*.rej

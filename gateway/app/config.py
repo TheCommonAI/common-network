@@ -24,7 +24,35 @@ class Settings(BaseSettings):
 
     health_check_interval_seconds: int = 30
     health_check_timeout_seconds: float = 5.0
-    forward_timeout_seconds: float = 60.0
+
+    # How long to wait on a node, split in two, because a single number could
+    # not express a cold start and got the important case wrong.
+    #
+    # `forward_timeout_seconds = 60.0` used to cover connect AND the wait for
+    # response headers. The panel path had already been given 90s on the
+    # grounds that "a cold 7B model can take ~57s" (see
+    # compose_member_timeout_seconds) -- but the single-route path, which is the
+    # default and the only path the Alpha actually uses, kept 60s. So a cold
+    # node loaded its model for ~57s, blew a ceiling it had no way to know
+    # about, and the request retried the *backup*: a different, lower-ranked
+    # node, for up to another 60s. One number, two complaints -- "sometimes
+    # randomly it's super slow", and an answer from the wrong specialist.
+    #
+    # Split, because the two waits have different natural scales. Connecting to
+    # a node that is up takes milliseconds, and one that is down should fail
+    # fast rather than occupy a request. Loading a model takes tens of seconds
+    # and is not a hang. For a streaming request `read` also bounds the gap
+    # between chunks, so it is the right place for the cold-start allowance:
+    # once tokens are flowing, only the gaps count against it, not the total.
+    #
+    # 180s is ~3x the measured cold start, which is the margin a slower or
+    # busier donor machine needs -- this laptop is the fast case, not the worst
+    # case. Clients must wait longer than this so that this gateway's own error
+    # is what surfaces, rather than a bare socket timeout: `common ask` and
+    # `common chat` use 240s.
+    forward_connect_timeout_seconds: float = 10.0
+    forward_read_timeout_seconds: float = 180.0
+    forward_write_timeout_seconds: float = 30.0
 
     seed_file: str = "nodes.seed.yaml"
     seed_on_startup: bool = True
@@ -45,6 +73,17 @@ class Settings(BaseSettings):
     # Tag overlap contributes this weight alongside the existing similarity/
     # cost/latency score (see app/router.py).
     w_tag_overlap: float = 0.15
+
+    # How far a generalist must outscore an incumbent specialist before the
+    # gateway swaps them, when the incumbent is below the confidence threshold.
+    #
+    # The swap exists so a guessed specialist loses to a confident generalist.
+    # It used to fire on the incumbent being unconfident alone, never checking
+    # that the generalist was better -- measured, it handed a maths question to
+    # a node scoring 0.392 over one scoring 0.400. Two nodes in this network
+    # routinely sit 0.010-0.015 apart, so the margin only has to clear that band
+    # to stop a coin-flip from deciding the answer.
+    generalist_override_margin: float = 0.02
 
     # Node onboarding: only ever assign a catalogue model if it leaves this
     # much RAM headroom, so a specialist never swaps and times out.
@@ -170,7 +209,7 @@ class Settings(BaseSettings):
 
     # Specialists are asked in parallel, so the panel costs one specialist's
     # latency, not the sum -- but the slowest member sets the pace. Deliberately
-    # shorter than forward_timeout_seconds: a panel member that has not answered
+    # shorter than forward_read_timeout_seconds: a panel member that has not answered
     # by now is dropped and the rest proceed, because a degraded answer beats a
     # timed-out one. Development is on a 16GB laptop where a cold 7B model can
     # take ~57s, so this is generous on purpose.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The Common worker: the only thing that should ever face the network.
 
-The Common Network Alpha (v0.1.2).
+The Common Network Alpha (v0.1.3).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with

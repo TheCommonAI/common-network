@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join the Common Network as a node operator.
 
-The Common Network Alpha (v0.1.2).
+The Common Network Alpha (v0.1.3).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -87,11 +87,39 @@ TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
 WORKER_UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/worker.py"
+
+# Which program registered this node.
+#
+# The desktop app and this CLI deliberately share everything that matters --
+# the same gateway, the same endpoints, the same node_token in the same
+# ~/.common-network/identity.json -- so that one machine is one node however it
+# joined. That is the right default and it leaves the two indistinguishable in
+# the registry: `GET /nodes` describes the machine, never the program that
+# spoke for it. This string is the only thing that separates them, and without
+# it the gateway cannot answer "how much of the network is the app, and how
+# much is the terminal".
+#
+# Sent as X-Common-Client on every gateway request and repeated as the `client`
+# field on POST /nodes -- the same two ways common-desktop sends
+# "common-desktop/<its version>". Both are self-reported and trivially
+# forgeable, so this is a usage statistic and never an authorisation input:
+# nothing in the gateway may branch on it.
+CLIENT = f"common-cli/{VERSION}"
+
+
+def gateway_headers(extra: dict | None = None) -> dict:
+    """Headers every gateway request carries.
+
+    Mirror of common-desktop's gatewayHeaders(). Deliberately not applied to
+    local requests -- Ollama, or this node's own worker health checks -- which
+    have no business carrying the network's client string.
+    """
+    return {"X-Common-Client": CLIENT, **(extra or {})}
 
 
 def _enable_windows_ansi() -> None:
@@ -443,11 +471,11 @@ def probe_hardware() -> dict:
 
 
 def fetch_catalogue(gateway: str) -> list[dict]:
-    return http_json("GET", f"{gateway}/catalogue")
+    return http_json("GET", f"{gateway}/catalogue", headers=gateway_headers())
 
 
 def call_assign(gateway: str, hardware: dict) -> dict:
-    return http_json("POST", f"{gateway}/assign", body={"hardware": hardware})
+    return http_json("POST", f"{gateway}/assign", body={"hardware": hardware}, headers=gateway_headers())
 
 
 def source_to_ollama_tag(source: str) -> str | None:
@@ -1042,6 +1070,12 @@ def main() -> None:
         "cost_per_1k": args.cost,
         "domain_tags": domain_tags,
         "catalogue_id": catalogue_id,
+        # Which program is registering, for the gateway's own reporting
+        # (`nodes.client`, migration 008). The gateway also accepts this as the
+        # X-Common-Client header, which every request below carries; sending
+        # both is what the desktop app does, so a row looks the same whichever
+        # path registered it.
+        "client": CLIENT,
         # The gateway must present this to reach the worker started above.
         # Generated here rather than issued by the gateway: the worker has to
         # be running before this endpoint is worth registering.
@@ -1056,7 +1090,9 @@ def main() -> None:
     rejoin_token = (identity.get("node_token")
                     if identity.get("name") == args.name and identity.get("gateway") == gateway
                     else None)
-    reg_headers = {"X-Common-Node-Token": rejoin_token} if rejoin_token else None
+    reg_headers = gateway_headers(
+        {"X-Common-Node-Token": rejoin_token} if rejoin_token else {}
+    )
     try:
         node = http_json("POST", f"{gateway}/nodes", body=payload, headers=reg_headers)
     except urllib.error.HTTPError as e:
@@ -1079,7 +1115,8 @@ def main() -> None:
     def deregister_and_stop_tunnel():
         try:
             req = urllib.request.Request(
-                f"{gateway}/nodes/{node_id}", method="DELETE", headers={"X-Common-Node-Token": node_token},
+                f"{gateway}/nodes/{node_id}", method="DELETE",
+                headers=gateway_headers({"X-Common-Node-Token": node_token}),
             )
             urllib.request.urlopen(req, timeout=5)
         except urllib.error.URLError:
@@ -1116,7 +1153,7 @@ def main() -> None:
                 print(f"{GLYPH_FORMING} this machine's address changed — re-registering at {blue(tunnel_url)}")
                 try:
                     node = http_json("POST", f"{gateway}/nodes", body=payload,
-                                     headers={"X-Common-Node-Token": node_token})
+                                     headers=gateway_headers({"X-Common-Node-Token": node_token}))
                     node_id, node_token = node["id"], node["node_token"]
                 except urllib.error.HTTPError as e:
                     print(f"{GLYPH_FAILED} {red(f'failed to re-register on the new address: {e.code}')}", file=sys.stderr)
@@ -1131,7 +1168,7 @@ def main() -> None:
                 payload["endpoint_url"] = f"{tunnel_url}/v1"
                 try:
                     node = http_json("POST", f"{gateway}/nodes", body=payload,
-                                     headers={"X-Common-Node-Token": node_token})
+                                     headers=gateway_headers({"X-Common-Node-Token": node_token}))
                     node_id = node["id"]
                     node_token = node["node_token"]
                     print(f"{GLYPH_DONE} re-registered '{args.name}' with the new tunnel url.")

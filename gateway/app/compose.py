@@ -219,9 +219,62 @@ def _relevant_domains(sims: list[tuple[str, float]]) -> list[tuple[str, float]]:
 # $340, how much do I owe" qualifies; "I have 2 eggs and 100g of guanciale"
 # does not.
 _FIGURE_RE = re.compile(r"(?<![\w.])[-+]?[$£€]?\s?\d[\d,]*(?:\.\d+)?%?")
+#
+# The cue list was written for the money/legal lane (seam-findings.md) and its
+# vocabulary shows it: owe, payable, refund, balance, interest, cost, pay. Every
+# one of those is a *finance* word. Measured against nine hand-written requests
+# it fired on 3 -- the three with money in them -- and missed every genuine
+# maths question, including "A train travels 240 km in 3 hours. What is its
+# average speed?", which has the two figures but no cue word at all: nothing in
+# the original list matches "average" or "speed", and `\brate\b` does not match
+# "average" either. That miss is the whole routing bug, because the routing lane
+# is chosen by which domain tag a node declares, and the quantitative lane was
+# the only deterministic route to the maths node.
+#
+# So the vocabulary gains the maths lane: the operations, the rate phrasings and
+# the word-problem nouns. The >= 2 figures requirement is untouched -- it is what
+# keeps "I have 2 eggs and 100g of guanciale" out, and it still does.
+#
+# Split into whole words and stems, which is not cosmetic. The original list was
+# one alternation wrapped in `\b(?:...)\b`, and that made every stem in it dead
+# on arrival: `\bcalculat\b` cannot match "calculate", because the "e" that
+# follows is a word character and so is not a boundary. `calculat` is not an
+# English word, so that alternative only ever matched a stem nobody types. The
+# same trap would have caught every stem added here. Whole words keep both
+# boundaries; stems are anchored only at the front, so they match their own
+# inflections ("divid" -> divides, divided, dividing). The front anchor is what
+# still keeps "plus" out of "surplus" and "round" out of "around".
 _CALC_CUE_RE = re.compile(
-    r"\b(how much|how many|calculat|total|owe[ds]?|worth|per week|per year|per month|"
-    r"percent|interest|sum|amount|cost|pay|payable|refund|balance|rate|entitled to)\b",
+    # whole words: short cues that would otherwise match inside longer words
+    r"\b(?:how much|how many|sum|plus|minus|tax|taxes|owed|owes|worth|total|"
+    r"entitled to|mph)\b"
+    # stems: anchored at the front only, deliberately
+    r"|\b(?:calculat|percent|interest|pay|payable|refund|balance|amount|cost|rate|"
+    r"solv|equation|derivativ|differentiat|integral|simplif|factoris|factoriz|"
+    r"expand|remainder|quotient|slope|gradient|logarithm|polynomial|quadratic|"
+    r"simultaneous|proportion|probabilit|permut|combinat|prime|ratio|averag|speed|"
+    r"distance|velocity|nearest|divid|multipl|subtract|discount|percentage|"
+    r"conver(?:t|sion)|round|split|product of)"
+    r"|\bper\s+(?:hour|second|minute|day|week|month|year)\b"
+    r"|\bsquare root\b|\bkm/?h\b|\bm/s\b",
+    re.IGNORECASE,
+)
+
+# A phrase that names a mathematical operation outright, with no figure needed.
+# Deliberately tiny and unambiguous: this arm exists only because some real maths
+# questions carry fewer than two figures ("Convert 45 miles per hour into metres
+# per second", "What is the derivative of sin(x)?") and would otherwise be missed
+# entirely. Every phrase here names an operation rather than a topic, so it
+# cannot be tripped by prose -- "simplify my life" is why bare "simplify" is not
+# on this list, and "convert this file to PDF" is why the conversion arm demands
+# a unit word rather than just the word "convert".
+_MATH_OP_RE = re.compile(
+    r"\b(?:derivative of|integral of|differentiate|solve for|simultaneous equations?|"
+    r"quadratic equations?|factorise|factorize|greatest common (?:divisor|factor)|"
+    r"least common multiple|square root of|sqrt|modulo|factorial)\b"
+    r"|\bconvert\b[^.?!]{0,60}?\b(?:metres?|meters?|miles?|kilometres?|kilometers?|km|"
+    r"feet|foot|inches|pounds?|kilograms?|grams?|celsius|fahrenheit|litres?|liters?|"
+    r"gallons?|seconds?|minutes?|hours?|mph|degrees?)\b",
     re.IGNORECASE,
 )
 
@@ -251,6 +304,35 @@ def has_quantitative_component(text: str) -> bool:
     if not text:
         return False
     return len(_FIGURE_RE.findall(text)) >= 2 and bool(_CALC_CUE_RE.search(text))
+
+
+def is_calculation_request(text: str) -> bool:
+    """Is this request for a calculation, on either signal?
+
+    A strict superset of `has_quantitative_component`, and the predicate the
+    *routing* lane uses (app/gateway.py). The difference is the no-figure arm:
+    a phrase that names an operation outright counts even with one figure or
+    none, because "What is the derivative of sin(x)?" is unambiguously maths and
+    carries no number at all.
+
+    Kept separate rather than folded into `has_quantitative_component` so that
+    the panel gate's calibration keeps the semantics it was measured with --
+    `tests/calibrate_gate.py` pins those cases, and widening the predicate it
+    reads would quietly invalidate a calibration nobody would think to re-run.
+    """
+    if not text:
+        return False
+    return has_quantitative_component(text) or bool(_MATH_OP_RE.search(text))
+
+
+def quantitative_tags() -> set[str]:
+    """Domain tags that count as the arithmetic lane (COMPOSE_QUANTITATIVE_TAGS).
+
+    One definition, because two callers now ask the same question: the panel gate
+    seats the lane alongside a request that spans domains, and single-node
+    routing promotes it when the embedder cannot tell which lane a request is in.
+    """
+    return {t.strip().lower() for t in settings.compose_quantitative_tags.split(",") if t.strip()}
 
 
 def plan_panel(scored: list[ScoredNode], request_embed: list[float],
@@ -295,8 +377,7 @@ def plan_panel(scored: list[ScoredNode], request_embed: list[float],
     # alongside — that is a second domain the embedding could not see.
     quantitative = mode != "always" and has_quantitative_component(request_text or "")
     if quantitative and len(matched) <= 1 and sims:
-        quant_tags = {t.strip().lower()
-                      for t in settings.compose_quantitative_tags.split(",") if t.strip()}
+        quant_tags = quantitative_tags()
         # When the elbow found nothing at all, fall back to the top-ranked
         # domain as the leader. Safe here specifically because the quantitative
         # check has already fired: this branch cannot be reached by a request

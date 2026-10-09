@@ -33,9 +33,20 @@ Interactive chat (keeps conversation context across turns):
 common-chat
 ```
 
-Every reply is followed by a dim line showing which node answered and its
-routing score, e.g. `via ollama-qwen-coder-local (score 0.681)` — the
-network tells you exactly where your request went.
+Every reply is followed by a dim footer: which node answered, and its three
+timings kept apart, e.g.
+
+```
+served by   ollama-qwen-coder-local
+routed in 14ms   ·   first token 57.1s   ·   total 58.4s
+# 57.1s of that was ollama-qwen-coder-local loading its model — the next one is fast.
+```
+
+Routing is the gateway choosing a node, and on its own it is tens of
+milliseconds. The wait a user actually feels is the node loading its model,
+which is why the footer names it rather than folding it into a "routed in"
+number — the network tells you exactly where your request went, *and* where
+the time went.
 
 ## Manual install (advanced / no installer)
 

@@ -80,7 +80,19 @@ async def forward(node: dict, body: dict[str, Any], stream: bool) -> httpx.Respo
     """
     outgoing = dict(body)
     outgoing["model"] = node["model_name"]
-    client = httpx.AsyncClient(timeout=settings.forward_timeout_seconds)
+    # Connect and read are separated on purpose -- see the note in config.py.
+    # A node that is up accepts a connection in milliseconds; a node loading a
+    # cold model sends no response headers for the better part of a minute.
+    # One number for both is what made a cold start look like a dead node.
+    client = httpx.AsyncClient(timeout=httpx.Timeout(
+        connect=settings.forward_connect_timeout_seconds,
+        read=settings.forward_read_timeout_seconds,
+        write=settings.forward_write_timeout_seconds,
+        # Waiting for a connection from the pool. Each forward() builds its own
+        # client and makes one request, so this never pools in practice; set
+        # explicitly rather than left to inherit `read`'s 180s.
+        pool=settings.forward_connect_timeout_seconds,
+    ))
     req = client.build_request("POST", chat_url(node), json=outgoing, headers=auth_headers(node))
     resp = await client.send(req, stream=stream)
     resp.extensions["_client"] = client

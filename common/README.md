@@ -131,6 +131,22 @@ test only:
 Built to the COMMON. CLI design system: a four-colour palette (charcoal /
 paper / dim / blue+red for attention), a fixed glyph vocabulary (`·` `→`
 `←` `✓` `⚠` `✗` `#`), lowercase direct copy, and a transparency footer on
-every `ask` — node, score, latency, and what was actually retained (an
-embedding for demand analytics, not the raw question — the footer says so
-honestly rather than claiming blanket "no data retained").
+every `ask` — which node answered, how long routing took, time to the first
+token, total time, and what was actually retained (an embedding for demand
+analytics, not the raw question — the footer says so honestly rather than
+claiming blanket "no data retained").
+
+The three timings are separate because they answer different questions.
+Routing is the gateway choosing a node and is usually tens of milliseconds;
+time-to-first-token is dominated by the chosen machine loading its model
+(~57s for a cold 7B on a laptop); total is generation. A single number
+labelled "routed in" hid the second inside the first and made a cold node
+look like a slow router. The footer also names the split when the wait is
+long enough to be a cold start, since that is the one a user can act on.
+
+The blended routing score is deliberately **not** printed. It is
+similarity+cost+latency, and the similarity term barely moves: measured
+live, the gibberish `asdfgh qwerty zxcvbn` scored above a real Python
+question. Shown as a match percentage it tells the user the network assessed
+their request and was fairly confident — which is false in a way they cannot
+detect. `common ask -v` still prints the raw value for debugging.

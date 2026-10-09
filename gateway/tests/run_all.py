@@ -10,9 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-TESTS = ["test_verify.py", "test_compose.py", "test_panel_flow.py",
-         "test_registry.py", "test_access.py", "test_admin.py", "test_client.py",
-         "test_worker.py"]
+TESTS = ["test_verify.py", "test_compose.py", "test_routing.py", "test_timeouts.py",
+         "test_panel_flow.py", "test_registry.py", "test_access.py",
+         "test_admin.py", "test_client.py", "test_worker.py"]
 
 here = Path(__file__).resolve().parent
 failed = []
