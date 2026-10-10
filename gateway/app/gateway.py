@@ -528,6 +528,20 @@ async def chat_completions(request: Request):
 
     last_error: Exception | None = None
 
+    # Sampled HERE, before any node is contacted, and deliberately not at the
+    # point the header is assembled. It was called down there, after
+    # `await upstream.forward(...)` had already returned -- and for a streaming
+    # request that return happens when the *node's* response headers arrive,
+    # which is after it has loaded its model. So the number labelled "routing"
+    # contained the node's model load, and the client then subtracted the two
+    # to print "689ms of that was loading its model" while the real load -- 53s
+    # of it -- sat inside the figure it was calling routing. The same mistake as
+    # before, moved from the client to the gateway.
+    #
+    # This is the number worth watching if routing ever feels slow: access
+    # control, the node list, the embedding and the score. Tens of milliseconds.
+    route_ms_at_decision = route_ms()
+
     for attempt, candidate in enumerate(candidates):
         start = time.monotonic()
         try:
@@ -574,7 +588,7 @@ async def chat_completions(request: Request):
                 # time-to-first-byte. Everything the client waits for *after*
                 # this is the chosen node loading and running its model -- on a
                 # laptop with a cold 7B in Ollama, ~57s of it.
-                "X-Common-Route-Ms": str(route_ms()),
+                "X-Common-Route-Ms": str(route_ms_at_decision),
                 # Why this request was *not* composed. The negative case is the
                 # one worth explaining -- "why did only one node answer this?"
                 # is the question the composition feature invites.

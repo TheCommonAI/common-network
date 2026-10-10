@@ -85,7 +85,11 @@ stub.daemon_threads = True
 threading.Thread(target=stub.serve_forever, daemon=True).start()
 STUB_URL = f"http://127.0.0.1:{stub.server_address[1]}"
 
-httpd = worker.serve(TOKEN, MODEL, port=0, ollama_url=STUB_URL)
+# warm=False: the real serve() loads the model in the background, and an
+# unannounced 53s inference landing in the stub's hit log mid-suite would turn
+# the `UPSTREAM_HITS == []` assertions below into a race. The warm-up path has
+# its own section at the end, where it is the subject rather than a bystander.
+httpd = worker.serve(TOKEN, MODEL, port=0, ollama_url=STUB_URL, warm=False)
 BASE = f"http://127.0.0.1:{httpd.server_address[1]}"
 
 
@@ -176,6 +180,53 @@ try:
           "".join(json.loads(line[6:])["choices"][0]["delta"]["content"]
                   for line in body.splitlines()
                   if line.startswith("data: {")), "one two")
+
+    # The cold load is the whole latency story: 53-77s to the first token on a
+    # node whose model has been evicted, against about a second when it is
+    # resident. Ollama's default keep_alive is five minutes and nothing in this
+    # repository used to set it, so every node fell back to that default and
+    # every idle node was cold. These checks exist because the failure mode is
+    # invisible -- the request still succeeds, it just takes a minute.
+    print("\nthe model stays resident (a cold node costs 53-77s of someone's wait)")
+    check("the default outlasts Ollama's own five minutes",
+          worker.DEFAULT_KEEP_ALIVE, "30m")
+
+    UPSTREAM_HITS.clear()
+    request("POST", "/v1/chat/completions", TOKEN,
+            {"messages": [{"role": "user", "content": "hi"}]})
+    check("every request carries the node's keep_alive",
+          UPSTREAM_HITS[0]["body"]["keep_alive"], worker.DEFAULT_KEEP_ALIVE)
+
+    # The node owns its own memory, not the caller. Without this, one request
+    # asking for keep_alive=0 would evict the model and make every request
+    # after it pay the reload -- a caller choosing to be slow, at the
+    # contributor's expense, for everyone else on that node.
+    UPSTREAM_HITS.clear()
+    request("POST", "/v1/chat/completions", TOKEN,
+            {"messages": [{"role": "user", "content": "hi"}], "keep_alive": 0})
+    check("a caller cannot evict the model out from under the next caller",
+          UPSTREAM_HITS[0]["body"]["keep_alive"], worker.DEFAULT_KEEP_ALIVE)
+
+    # warm_model is what `common join` relies on to make the *first* user
+    # request fast. Called directly rather than through serve(), so this is a
+    # statement about the function instead of a race with a background thread.
+    print("\nwarm-up (joining pays the load, not the first person to ask)")
+    UPSTREAM_HITS.clear()
+    worker.warm_model(MODEL, STUB_URL, "7m")
+    check("the warm-up actually reaches Ollama", len(UPSTREAM_HITS), 1)
+    check("and asks Ollama to hold the model afterwards",
+          UPSTREAM_HITS[0]["body"]["keep_alive"], "7m")
+    check("against this node's model", UPSTREAM_HITS[0]["body"]["model"], MODEL)
+    # One token is the point: this exists to move weights into memory, and a
+    # long generation here would just be a join that appears to hang.
+    check("for one token, not a real answer",
+          UPSTREAM_HITS[0]["body"]["max_tokens"], 1)
+
+    # A contributor whose Ollama is not up yet must still be able to join --
+    # the first real request loads the model exactly as it did before this
+    # existed. A raise here would turn a slow start into no node at all.
+    worker.warm_model(MODEL, "http://127.0.0.1:1", "7m")
+    check("an unreachable Ollama is not fatal", True, True)
 finally:
     httpd.shutdown()
     stub.shutdown()
