@@ -231,27 +231,33 @@ same_base = [
 ]
 rows = same_base + [adapter_row("wrongbase", 0.95, base="Other/Base-7B")]
 
-every = select_adapters(CENTROID, same_base, top_k=5, min_similarity=0.0)
+# `margin=1.0` (permissive) throughout this block on purpose: the four filters
+# are independent, and each test below is about exactly one of them. These
+# adapters sit 0.13-0.15 apart, so the default margin would truncate every set
+# here to its anchor and the floor/cap tests would be measuring the margin
+# instead of the thing they name. The margin has its own tests at the end of
+# this section.
+every = select_adapters(CENTROID, same_base, top_k=5, min_similarity=0.0, margin=1.0)
 check("no floor, no cap -> the whole group, nearest first",
       [p.id for p in every], ["near", "mid", "low", "below"])
 check("selection is ordered nearest-first",
       [round(p.similarity, 4) for p in every], [0.90, 0.75, 0.62, 0.55])
 
-unfiltered = select_adapters(CENTROID, rows, top_k=5, min_similarity=0.0)
+unfiltered = select_adapters(CENTROID, rows, top_k=5, min_similarity=0.0, margin=1.0)
 check("without the filter the nearest adapter anchors the set alone",
       [p.id for p in unfiltered], ["wrongbase"])
 
-picked = select_adapters(CENTROID, rows, top_k=5, min_similarity=0.0,
+picked = select_adapters(CENTROID, rows, top_k=5, min_similarity=0.0, margin=1.0,
                          base_models=[QWEN])
 check("base_models excludes a nearer adapter on the wrong base",
       "wrongbase" in [p.id for p in picked], False)
 check("base_models keeps the rest in order",
       [p.id for p in picked], ["near", "mid", "low", "below"])
 
-capped = select_adapters(CENTROID, same_base, top_k=2, min_similarity=0.0)
+capped = select_adapters(CENTROID, same_base, top_k=2, min_similarity=0.0, margin=1.0)
 check("top_k caps the set", [p.id for p in capped], ["near", "mid"])
 
-floored = select_adapters(CENTROID, same_base, top_k=5, min_similarity=0.65)
+floored = select_adapters(CENTROID, same_base, top_k=5, min_similarity=0.65, margin=1.0)
 check("min_similarity drops everything below it", [p.id for p in floored], ["near", "mid"])
 
 check("nothing above the floor -> empty, not a best-effort pick",
@@ -294,6 +300,57 @@ check("require_buildable drops an adapter with no GGUF",
       [p.id for p in require_buildable], ["hasgguf"])
 check("buildable reflects gguf_ref, not the similarity",
       select_adapters(CENTROID, [rows[0]])[0].buildable, False)
+
+# --- margin: membership is "as relevant as the anchor", not "relevant" -------
+#
+# The floor answers "is this adapter relevant at all". On its own it is not
+# enough, and the failure is measured rather than hypothetical: on a
+# code-debugging centroid the maths profiles score 0.61-0.67 and the code ones
+# 0.76-0.78, so every one of them clears a 0.6 floor and `top_k=3` fills its
+# third seat with a maths adapter on a code question. The margin is the second
+# question -- is this as relevant as *the anchor* -- and these pin it.
+margin_near = select_adapters(CENTROID, [
+    adapter_row("anchor", 0.90),
+    adapter_row("intie", 0.87),      # 0.03 below: a near-tie, keeps its seat
+    adapter_row("pastit", 0.80),     # 0.10 below: drops out, and ends the walk
+], top_k=5, min_similarity=0.0)
+check("an adapter inside the margin joins the anchor",
+      [p.id for p in margin_near], ["anchor", "intie"])
+
+# The walk stops at the first pick past the margin because the rows are sorted
+# descending -- so a *further* adapter can never re-enter after one drops out.
+check("nothing past the margin re-enters behind a dropped one",
+      [p.id for p in select_adapters(CENTROID, [
+          adapter_row("anchor", 0.90),
+          adapter_row("gap", 0.80),
+          adapter_row("closer", 0.88),   # nearer than `gap`, sorted ahead of it
+      ], top_k=5, min_similarity=0.0)], ["anchor", "closer"])
+
+# The measured consequence, and the reason this rule changes behaviour rather
+# than just tidying it: profiles inside one domain sit ~0.10 apart on a
+# centroid in that domain (code writing 0.073, maths arithmetic 0.103, medical
+# 0.182), so a one-adapter set is now the ordinary outcome on clean demand
+# rather than the exception.
+far_apart = select_adapters(CENTROID, [
+    adapter_row("best", 0.80), adapter_row("second", 0.70),
+], top_k=5, min_similarity=0.0)
+check("far-apart profiles keep only the anchor", [p.id for p in far_apart], ["best"])
+check("and that lone member carries the whole weight",
+      [p.weight for p in far_apart], [1.0])
+
+# A set is never emptied by the margin: the anchor is a member before the
+# filter is consulted, so the worst case is one adapter, never zero.
+check("the margin can never drop the anchor itself",
+      len(select_adapters(CENTROID, same_base, min_similarity=0.0)), 1)
+
+# What the margin does NOT do, recorded here so it is not mistaken for an
+# oversight later: it cannot repair top-1. On a logic-puzzle centroid the maths
+# adapter scores 0.699 against the reasoning adapter's 0.681 and stays the
+# anchor; a margin restricts the rest of the set and leaves that choice alone.
+check("the margin does not change who anchors the set",
+      first(select_adapters(CENTROID, [
+          adapter_row("nearest", 0.90), adapter_row("right", 0.86),
+      ], min_similarity=0.0), MISSING).id, "nearest")
 
 # ===========================================================================
 print()
@@ -401,8 +458,13 @@ check("no nodes at all -> (None, 0.0)",
 check("an empty centroid -> (None, 0.0)",
       nearest_node_similarity([], [node_row("any", 0.90)]), (None, 0.0))
 
-# The adapter that would be recommended for CENTROID.
-mathlike = [adapter_row("math-12k", 0.89), adapter_row("math-pilot", 0.74)]
+# The adapter that would be recommended for CENTROID. The two scores are 0.03
+# apart on purpose: that is inside ADAPTER_MARGIN, so both keep their seats and
+# this section can test what a *multi-adapter* need carries -- the set, the
+# tag, the weights. A 0.15 gap (the first draft of this fixture) now yields a
+# one-adapter need, which is the common real case and is tested in section 7
+# rather than here.
+mathlike = [adapter_row("math-12k", 0.89), adapter_row("math-pilot", 0.86)]
 
 served_node = [node_row("codebox", 0.90)]
 need_free = detect_adapter_needs([cluster(9, CENTROID)], served_node, mathlike)
@@ -443,7 +505,7 @@ print("=" * 62)
 print("7. plan_adapters — assignment, one blend per node, reuse")
 print("=" * 62)
 
-needs_rows = [adapter_row("math-12k", 0.89), adapter_row("math-pilot", 0.74)]
+needs_rows = [adapter_row("math-12k", 0.89), adapter_row("math-pilot", 0.86)]
 uncovered = [cluster(9, CENTROID)]
 
 # (a) no node reports the base at all — the honest answer, since every adapter
@@ -500,6 +562,25 @@ reordered = plan_adapters(uncovered,
                           needs_rows)
 check("reuse ignores the order the node reported",
       first(reordered.assignments, MISSING).reused, True)
+
+# (e2) the measured common case, not an edge case: profiles inside one domain
+# sit ~0.10 apart on a centroid in that domain, so the margin leaves a
+# one-adapter set. Everything downstream has to hold for a set of one.
+apart_rows = [adapter_row("math-12k", 0.89), adapter_row("math-pilot", 0.74)]
+plan = plan_adapters(uncovered, [node_row("qwenbox", 0.20, base=QWEN)], apart_rows)
+solo = first(plan.assignments, MISSING)
+check("a far-apart pair yields a one-adapter need", solo.adapter_ids, ["math-12k"])
+check("a lone member carries the whole weight", solo.weights, [1.0])
+check("the tag is the one-adapter tag",
+      solo.blend_tag, blend_tag(QWEN, ["math-12k"], [1.0]))
+check("which is not the two-adapter tag",
+      solo.blend_tag != blend_tag(QWEN, ["math-12k", "math-pilot"], [0.5, 0.5]), True)
+
+plan = plan_adapters(uncovered,
+                     [node_row("warm", 0.20, base=QWEN, adapter_ids=["math-12k"])],
+                     apart_rows)
+check("a node serving the one-adapter blend is reused",
+      first(plan.assignments, MISSING).reused, True)
 
 # (f) one blend per node. Two different regions need two different sets, and
 # there is only one node on the base.

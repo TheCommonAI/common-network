@@ -83,6 +83,37 @@ NODE_DISTANCE_FLOOR = 0.6
 # validated. Report, do not trust.
 ADAPTER_MIN_SIMILARITY = 0.6
 
+# How far below the *best* adapter's score another adapter may sit and still join
+# the fused set. The floor above cannot do this job on its own: on a
+# code-debugging centroid the maths adapters score 0.61-0.67 while the code ones
+# score 0.76-0.78, so every one of them clears 0.6 and `top_k=3` fills its third
+# seat with a maths adapter on a code question. The floor answers "is this
+# relevant at all"; the margin answers "is this as relevant as the anchor".
+#
+# Measured with BAAI/bge-small-en-v1.5 (the gateway's embedder, app/config.py:16),
+# 5 hand-written queries per domain, comparing each cluster centroid against the
+# seeded domain_text profiles. Gap between the best adapter and the next:
+#
+#   code writing 0.073 | code debugging 0.020 | maths arithmetic 0.103
+#   algebra      0.024 | medical        0.182 | logic puzzle     0.018
+#
+# 0.05 keeps the genuine near-ties (two code adapters on debugging, maths on
+# algebra) and drops the adapter that is merely *also* above the floor.
+#
+# Two things it does NOT do, both measured rather than assumed:
+#
+#   * It does not fix top-1. On a logic-puzzle centroid math-12k outscores the
+#     reasoning adapter 0.699 to 0.681 and remains the anchor. A margin can
+#     shrink a padded set; it cannot repair a mis-anchored one.
+#   * It makes a single-adapter set the common case on clean demand, because
+#     these profiles sit ~0.10 apart from each other on a maths centroid. That
+#     is the honest consequence of the correction: the floor was over-recruiting,
+#     and removing the over-recruitment means fewer adapters, not more.
+#
+# Five hand-written sentences per domain is not a calibration. Re-measure against
+# real demand clusters before trusting it.
+ADAPTER_MARGIN = 0.05
+
 # Nodes report the Hugging Face repo id of the weights they run, e.g.
 # 'Qwen/Qwen2.5-1.5B-Instruct' -- the same namespace as adapters.base_model,
 # and the identifier the adapter was fitted against.
@@ -181,17 +212,23 @@ def select_adapters(
     base_models: Sequence[str] | None = None,
     top_k: int = 3,
     min_similarity: float = ADAPTER_MIN_SIMILARITY,
+    margin: float = ADAPTER_MARGIN,
     require_buildable: bool = False,
 ) -> list[AdapterPick]:
     """The adapters nearest a cluster's centroid, as one fusable set.
 
-    Three filters, in order, and each one is a different kind of "no":
+    Four filters, in order, and each one is a different kind of "no":
 
     * `base_models` -- a hard restriction on which bases are acceptable at all.
       A LoRA is meaningless on weights it was not fitted against, so an adapter
       on the wrong base is not a weaker recommendation, it is an invalid one.
     * `min_similarity` -- how close is close enough to be worth the operator's
       time. Below the floor nothing is recommended at all.
+    * `margin` -- how far below the *anchor* a further adapter may score and
+      still join. The floor alone pads the set with the wrong domain, because
+      maths and code profiles both clear 0.6 on either kind of centroid; the
+      margin is what keeps membership to things as relevant as the anchor
+      rather than merely relevant enough.
     * `require_buildable` -- whether the operator must not have to convert a
       GGUF themselves. Off by default, because refusing to *name* the right
       adapter for a cluster just because nobody has published its GGUF would
@@ -249,6 +286,10 @@ def select_adapters(
         if len(members) >= top_k:
             break
         if anchor.blend_group is None:
+            break
+        # `scored` is sorted descending, so the first pick past the margin ends
+        # the walk -- everything after it scores no higher.
+        if anchor.similarity - pick.similarity > margin:
             break
         if pick.blend_group == anchor.blend_group and pick.base_model == anchor.base_model:
             members.append(pick)
