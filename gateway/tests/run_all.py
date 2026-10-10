@@ -3,8 +3,8 @@
 
 No pytest, no database, no network beyond localhost, no embedding model — the
 suites stub what they need. If this passes, the composition gate, the verifier,
-the panel transport, the registry's security checks and the access controls
-are all behaving.
+the panel transport, the registry's security checks, the access controls and
+the on-demand adapter plan are all behaving.
 """
 import subprocess
 import sys
@@ -14,10 +14,11 @@ from pathlib import Path
 # other. This branch adds the routing and timeout suites; upstream adds client
 # observability and the node-URL exposure check. Order is not meaningful;
 # roughly cheap-and-pure first, anything touching a live node last.
-TESTS = ["test_verify.py", "test_compose.py", "test_routing.py", "test_timeouts.py",
-         "test_panel_flow.py", "test_registry.py", "test_access.py",
-         "test_admin.py", "test_client.py", "test_client_observability.py",
-         "test_node_url_exposure.py", "test_worker.py"]
+TESTS = ["test_verify.py", "test_compose.py", "test_adapter_plan.py",
+         "test_routing.py", "test_timeouts.py", "test_panel_flow.py",
+         "test_registry.py", "test_access.py", "test_admin.py", "test_client.py",
+         "test_client_observability.py", "test_node_url_exposure.py",
+         "test_worker.py"]
 
 here = Path(__file__).resolve().parent
 failed = []

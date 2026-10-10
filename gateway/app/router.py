@@ -34,6 +34,20 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return float(np.dot(va, vb) / denom)
 
 
+# Below this, no declared domain is really about the request, and
+# decisions.matched_domain is recorded as null.
+#
+# Named rather than left as a literal default because another module reads the
+# *absence* it creates: app/demand.py selects its unserved population with
+# `matched_domain is null`, which means "scored below this floor against every
+# declared tag" only for as long as both sides agree on the number. They were
+# two independent 0.3 literals, and demand.py's comment claimed they agreed "by
+# construction" when what they agreed by was coincidence. One constant now, so
+# the claim is true.
+DOMAIN_MATCH_FLOOR = 0.3
+
+
+
 # Tag embeddings are cheap to compute and reused across requests -- cache
 # them in-process rather than re-embedding the same handful of domain tags
 # on every call.
@@ -75,7 +89,8 @@ def domain_similarities(nodes: list[dict], request_embed: list[float]) -> list[t
     return ranked
 
 
-def best_matched_domain(nodes: list[dict], request_embed: list[float], floor: float = 0.3) -> str | None:
+def best_matched_domain(nodes: list[dict], request_embed: list[float],
+                        floor: float = DOMAIN_MATCH_FLOOR) -> str | None:
     """The single domain tag (across all candidate nodes) that best matches this
     request, for logging as decisions.matched_domain -- the demand signal that
     assignment reads back. None if nothing clears the floor."""

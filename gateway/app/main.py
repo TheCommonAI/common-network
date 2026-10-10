@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
 from app import db, embedder
+from app.adapters import router as adapters_router, seed_adapters_from_file
 from app.client_observability import router as client_router, retention_loop
 from app.admin import router as admin_router
 from app.catalogue import router as catalogue_router, seed_catalogue_from_file
@@ -51,6 +52,10 @@ async def lifespan(app: FastAPI):
             await seed_from_file()
         print("startup: seeding catalogue...", flush=True)
         await seed_catalogue_from_file()
+        # No-ops unless adapters_mode is 'plan', so this line is inert in the
+        # default configuration and merging it cannot change the database.
+        print("startup: seeding adapters...", flush=True)
+        await seed_adapters_from_file()
     except Exception as exc:
         print(f"startup: WARNING seeding failed ({type(exc).__name__}: {exc}) — "
               f"serving with whatever is already in the database", flush=True)
@@ -81,6 +86,7 @@ app.include_router(gateway_router)
 app.include_router(decisions_router)
 app.include_router(catalogue_router)
 app.include_router(demand_router)
+app.include_router(adapters_router)
 app.include_router(admin_router)
 app.include_router(client_router)
 

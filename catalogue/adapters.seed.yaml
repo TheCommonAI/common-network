@@ -1,0 +1,192 @@
+# Common Network adapter catalogue — what the network can fuse, not install.
+#
+# This file is the SOURCE OF TRUTH for which LoRA adapters the gateway may
+# recommend, exactly as catalogue.seed.yaml is for models. An entry removed from
+# here is deleted from the gateway on next boot (see seed_adapters_from_file).
+# Separate file and separate table on purpose: the catalogue seeder ends in a
+# `delete ... where id <> all(...)`, so an adapter stored in catalogue_models
+# would be wiped the first time somebody trimmed *that* file.
+#
+# This is a commons asset — PRs welcome. Add adapters you have actually
+# verified: `revision` pinned to a commit you read the adapter_config.json at,
+# `base_model` the exact repo the adapter was fitted against, and `size_mb` the
+# real weight file. A recommendation here becomes a build on somebody's laptop.
+#
+# --- WHAT THIS LIST IS FOR -------------------------------------------------
+#
+# When requests cluster somewhere no node covers, the gateway names the nearest
+# adapters so a node on the matching base can average them into a specialist
+# locally. Nobody trains anything and nothing is downloaded by the gateway.
+#
+# --- THE TWO FIELDS THAT DECIDE WHAT CAN BE FUSED TOGETHER -----------------
+#
+# `base_model` — the weights the adapter was fitted against, as a Hugging Face
+# repo id. A LoRA on the wrong base is not a weak recommendation, it is an
+# invalid one, so this is NOT NULL in the table and every recommendation is
+# filtered on it. Nodes report their base in this same namespace; note that
+# catalogue_models.base_model uses a different one ('ollama:*' pull-names), and
+# app/adapters.py keeps the two apart rather than comparing them.
+#
+# `blend_group` — which adapters may be averaged *together*. LoraHub-style
+# fusion sums the A and B matrices across adapters and multiplies the sums,
+# which is only a LoRA at all if every member agrees on r, lora_alpha and target
+# modules. A shared label is that agreement, stated once instead of re-derived
+# per query. NULL means "blends with nothing": the adapter can be recommended
+# alone, and never as one of a pair.
+#
+# All six of the Qwen2.5-1.5B-Instruct adapters below are r=16, alpha=32, 7
+# targets (q,k,v,o,gate,up,down_proj) and share one group. The medical adapter
+# is r=64, alpha=16, 4 targets and cannot join them — recorded as such rather
+# than left to be discovered by a failed build.
+#
+# --- `domain_text` IS LOAD-BEARING, SO BE SPECIFIC -------------------------
+#
+# It is what gets embedded and compared against a demand cluster's centroid, so
+# it decides which adapters are recommended for a region. A vague profile
+# ("good at maths and reasoning") sits near everything and will be chosen for
+# everything. Name the actual subject matter.
+#
+# Measured evidence that this matters, 7 synthetic demands against these seven
+# profiles: with generic one-line profiles, math-12k was the nearest adapter for
+# *five of seven* unrelated demands including beekeeping and translation. The
+# wording below is topical on purpose. It is not calibrated and should be
+# re-measured against real demand before any threshold here is trusted.
+#
+# --- TWO THINGS TO KNOW BEFORE ADDING AN ENTRY -----------------------------
+#
+# `gguf_ref` is NULL for everything below, and that is the honest state of the
+# ecosystem rather than an omission. Ollama's ADAPTER directive takes a PEFT
+# directory or a GGUF, but its safetensors adapter support is documented for the
+# Llama, Mistral and Gemma families — Qwen is not among them. Every adapter here
+# is on Qwen2.5. So the reliable path is a GGUF converted with llama.cpp's
+# convert_lora_to_gguf.py, and no GGUF of these has been published. A NULL means
+# the operator converts before building; the CLI says so rather than failing
+# obscurely. Set gguf_ref only when you have checked one actually resolves.
+#
+# `licence` is NULL for everything below because it was not verified — not
+# because it is permissive. The seven repos' licence metadata was not read when
+# these were added. NULL means unverified: check before redistributing a fused
+# model, and fill this in when you do.
+#
+# --- WHAT HAS ACTUALLY BEEN MEASURED --------------------------------------
+#
+# One thing: github.com/TheCommonAI/lora-blend, a separate repository (not this
+# one) — a 50-question maths word-problem experiment blending three of these on
+# Qwen2.5-1.5B-Instruct. Read its README before quoting any number from it. It
+# does *not* establish that a fusion recommended here answers better than the
+# base — the weights it searched for are not the uniform weights this path would
+# use, and it says so itself. The claim this list supports is that the network
+# *can* build a specialist on demand. Not that the specialist is better.
+
+base_model: "Qwen/Qwen2.5-1.5B-Instruct"
+
+adapters:
+  - id: math-12k
+    display_name: "Maths LoRA (12k, Qwen2.5-1.5B)"
+    hf_repo: "mdhamidhosen/baamr-math-qwen2.5-1.5b-lora-12k"
+    revision: "598b9d6deb23f2179c890c541aa1093da32daf7e"
+    base_model: "Qwen/Qwen2.5-1.5B-Instruct"
+    blend_group: "qwen2.5-1.5b-r16-a32-7t"
+    domain_text: >-
+      arithmetic word problems: unit prices, percentage discounts, speed and
+      distance, averages and ratio sharing, worked through to one numeric answer
+    domain_tags: ["math", "arithmetic", "word-problems"]
+    size_mb: 71
+    min_ram_gb: 2
+    licence: null
+    gguf_ref: null
+
+  - id: math-pilot
+    display_name: "Maths LoRA (pilot, Qwen2.5-1.5B)"
+    hf_repo: "mdhamidhosen/baamr-math-qwen2.5-1.5b-lora-pilot-577"
+    revision: "acbac01fd45c0317b1b2bc3bec9dd65a4e75a9f7"
+    base_model: "Qwen/Qwen2.5-1.5B-Instruct"
+    blend_group: "qwen2.5-1.5b-r16-a32-7t"
+    domain_text: >-
+      school mathematics: adding, subtracting, multiplying and dividing whole
+      numbers, fractions and decimals
+    domain_tags: ["math", "arithmetic"]
+    size_mb: 71
+    min_ram_gb: 2
+    licence: null
+    gguf_ref: null
+
+  - id: math-adaanchor
+    display_name: "Maths LoRA (AdaAnchor, Qwen2.5-1.5B)"
+    hf_repo: "disha20041005/adaanchor-qwen2.5-1.5b-lora-math-k2"
+    revision: "0a84f6b69e7e9ec00a4d159e8d4e752b20425c76"
+    base_model: "Qwen/Qwen2.5-1.5B-Instruct"
+    blend_group: "qwen2.5-1.5b-r16-a32-7t"
+    domain_text: >-
+      algebra and equation solving: isolating an unknown, rearranging formulas,
+      evaluating expressions with variables
+    domain_tags: ["math", "algebra"]
+    size_mb: 71
+    min_ram_gb: 2
+    licence: null
+    gguf_ref: null
+    # Ships adapter_model.bin (a pickle) rather than safetensors. Loadable, and
+    # the experiment did load it — worth knowing before a build fails oddly.
+
+  - id: code-r16
+    display_name: "Code LoRA (r16, Qwen2.5-1.5B)"
+    hf_repo: "bharati2324/Qwen2.5-1.5B-Instruct-Code-LoRA-r16"
+    revision: "57a4a23b934ea6c3f25615e13a6979d55c48fd68"
+    base_model: "Qwen/Qwen2.5-1.5B-Instruct"
+    blend_group: "qwen2.5-1.5b-r16-a32-7t"
+    domain_text: >-
+      python programming: writing functions, classes, loops, list and dict
+      handling, and standard library usage
+    domain_tags: ["code", "programming", "python"]
+    size_mb: 71
+    min_ram_gb: 2
+    licence: null
+    gguf_ref: null
+
+  - id: code-r16v3
+    display_name: "Code LoRA (r16v3, Qwen2.5-1.5B)"
+    hf_repo: "bharati2324/Qwen2.5-1.5B-Instruct-Code-LoRA-r16v3"
+    revision: "15e9e3e96aba2d6a23bdfd5606be43862488fac3"
+    base_model: "Qwen/Qwen2.5-1.5B-Instruct"
+    blend_group: "qwen2.5-1.5b-r16-a32-7t"
+    domain_text: >-
+      debugging broken programs: reading tracebacks, index errors, syntax
+      errors, failing unit tests and broken imports
+    domain_tags: ["code", "debugging"]
+    size_mb: 71
+    min_ram_gb: 2
+    licence: null
+    gguf_ref: null
+
+  - id: reasoning
+    display_name: "Reasoning LoRA (Qwen2.5-1.5B)"
+    hf_repo: "DarkyMan/Qwen2.5-1.5B-Opus46-Reasoning-LoRA"
+    revision: "5a30ed71d72acde650766e57052b3b864c367555"
+    base_model: "Qwen/Qwen2.5-1.5B-Instruct"
+    blend_group: "qwen2.5-1.5b-r16-a32-7t"
+    domain_text: >-
+      logical deduction and puzzles: syllogisms, constraint satisfaction,
+      multi-step entailment and consistency checking
+    domain_tags: ["reasoning", "logic"]
+    size_mb: 71
+    min_ram_gb: 2
+    licence: null
+    gguf_ref: null
+
+  - id: medical
+    display_name: "Medical LoRA (Qwen2.5-1.5B)"
+    hf_repo: "Arthur-77/QWEN2.5-1.5B-medical-finetuned"
+    revision: "3ff4b05835d9d0af645f2a4e9c33edeb149bcef8"
+    base_model: "Qwen/Qwen2.5-1.5B-Instruct"
+    # NULL on purpose. r=64, alpha=16, 4 target modules — averaging it with any
+    # adapter above would not produce a LoRA at all, so it is recorded as
+    # blending with nothing and is only ever recommended alone.
+    blend_group: null
+    domain_text: >-
+      clinical medicine: disease symptoms, diagnoses, drug interactions,
+      dosages and treatment guidelines
+    domain_tags: ["medical", "clinical", "biomedical"]
+    size_mb: 67
+    min_ram_gb: 2
+    licence: null
+    gguf_ref: null

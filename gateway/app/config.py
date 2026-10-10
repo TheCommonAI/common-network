@@ -64,6 +64,37 @@ class Settings(BaseSettings):
     catalogue_seed_file: str = "../catalogue/catalogue.seed.yaml"
     catalogue_seed_on_startup: bool = True
 
+    # --- Adapters (on-demand specialist fusion) ---------------------------
+    #
+    # 'never'  — the default, and the only safe default. Nothing in the adapter
+    #            path runs: /adapters/plan returns an empty plan and the seeder
+    #            no-ops. Worth being precise about what the feature is, because
+    #            it is less than it sounds: join/worker.py pins one model name
+    #            at startup and /api/create is a deliberate 404, so the gateway
+    #            can *name* a model and can never make a node load one. What
+    #            this channel does is recommend -- which adapters sit nearest a
+    #            cluster of demand no node covers, and which node on the
+    #            matching base could fuse them locally.
+    # 'plan'   — serve that recommendation. Still mutates nothing: the node
+    #            owner runs the build.
+    #
+    # Same vocabulary as compose_mode rather than a third one, and 'never' is
+    # what ships, so merging this cannot change behaviour by itself.
+    adapters_mode: str = "never"
+
+    # Resolved the way catalogue_seed_file is: local dev runs uvicorn from
+    # gateway/, where catalogue/ is a sibling (../catalogue); the Docker image
+    # copies catalogue/ in as a child of /app, and Railway overrides this with
+    # ADAPTERS_SEED_FILE=catalogue/adapters.seed.yaml.
+    #
+    # A separate seed file and a *separate table*, deliberately. The catalogue
+    # seeder ends in `delete from catalogue_models where id <> all($1::text[])`
+    # and its seed file calls itself the source of truth whose removed entries
+    # are deleted on next boot -- so adapters stored in catalogue_models would
+    # be wiped the moment someone trimmed that YAML.
+    adapters_seed_file: str = "../catalogue/adapters.seed.yaml"
+    adapters_seed_on_startup: bool = True
+
     # Routing refinement (v0.3): below this *topical* score (similarity + tag
     # overlap only, not cost/latency -- see ScoredNode.topical_score), prefer
     # a generalist node over a low-confidence specialist match. Calibrated

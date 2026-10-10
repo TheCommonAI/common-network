@@ -141,6 +141,8 @@ def _row_to_node_public_out(row) -> NodePublicOut:
         capability_text=row["capability_text"],
         domain_tags=row["domain_tags"],
         catalogue_id=row["catalogue_id"],
+        base_model=row["base_model"],
+        adapter_ids=row["adapter_ids"],
     )
 
 
@@ -164,6 +166,8 @@ def _row_to_node_out(row) -> NodeOut:
         capability_text=row["capability_text"],
         domain_tags=row["domain_tags"],
         catalogue_id=row["catalogue_id"],
+        base_model=row["base_model"],
+        adapter_ids=row["adapter_ids"],
     )
 
 
@@ -232,13 +236,31 @@ async def register_node(
                     worker_token = $13,
                     -- coalesce, not overwrite: a client that does not send the
                     -- field must not erase what an earlier registration said.
-                    client = coalesce($14, client)
+                    client = coalesce($14, client),
+                    -- Overwritten, not coalesced, for both of these -- the
+                    -- opposite of `client` above, and deliberately.
+                    --
+                    -- `client` is a statistic, so the harmful direction is
+                    -- erasure. These two describe what the node is serving
+                    -- *now*, so the harmful direction is a stale value: a
+                    -- base_model left over from a base the owner has since
+                    -- moved off would have the gateway offer a fusion the
+                    -- node cannot perform. Losing it degrades to NULL, and
+                    -- NULL means refuse to assign -- the safe way to fail.
+                    --
+                    -- Omitted means NULL means cleared, with one exception
+                    -- worth knowing: an explicit `[]` also arrives as an
+                    -- empty array rather than NULL, so a node can state "I
+                    -- am running no adapters" and that is recorded as stated
+                    -- rather than as unknown.
+                    base_model = $15, adapter_ids = $16
                 where name = $1
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
                 node.capability_text, vec, node.region, node.cost_per_1k,
                 node.domain_tags, node.catalogue_id, new_token, node.worker_token, client,
+                node.base_model, node.adapter_ids,
             )
         else:
             row = await conn.fetchrow(
@@ -246,13 +268,16 @@ async def register_node(
                 insert into nodes
                     (name, operator, endpoint_url, model_name, api_key_ref,
                      capability_text, capability_embed, region, cost_per_1k,
-                     domain_tags, catalogue_id, node_token, worker_token, client, healthy)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, false)
+                     domain_tags, catalogue_id, node_token, worker_token, client,
+                     base_model, adapter_ids, healthy)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                        $15, $16, false)
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
                 node.capability_text, vec, node.region, node.cost_per_1k,
                 node.domain_tags, node.catalogue_id, new_token, node.worker_token, client,
+                node.base_model, node.adapter_ids,
             )
 
     out = _row_to_node_public_out(row)

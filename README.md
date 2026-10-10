@@ -337,14 +337,33 @@ disagreement detection. It runs only where deliberately enabled
 (`COMPOSE_MODE`, or `X-Common-Compose` per request) until compose-test has
 proven a non-dominated panel beats its own best member against live models.
 
+**Built but off by default:** on-demand specialists from LoRA adapters. When
+demand clusters where no node covers, the gateway names the nearest public
+adapters for a node on the matching base to fuse locally, and `common adapters`
+builds the blend on that machine. With `ADAPTERS_MODE` unset the seeder no-ops
+and both endpoints return empty, so the feature is inert until switched on.
+
+This is a capability to *specialise on demand*, **not a claim of better
+answers**. Whether a fused specialist answers better is what the separate
+[`lora-blend`](https://github.com/TheCommonAI/lora-blend) experiment measures;
+until that holds, the wording stays "can build", never "better". The fusion is
+**per-node and local**: the node's own owner runs `ollama create` on their own
+machine, and there is no route from the network to Ollama's management API (the
+worker 404s `/api/create`). The gateway recommends; it never makes a machine
+load anything.
+
 **Still explicitly out of scope:** no DHT/peer-to-peer/consensus, no token or
-incentive mechanism, no weight merging or Soup of Experts, no sequential
-specialist chaining (measured harmful), no learned router, no vector-native
-model-to-model communication, no production-grade auth.
+incentive mechanism, **no global cross-model Soup of Experts and no shared
+weight-merging service** — merging weights across *different* architectures or
+tokenizers does not work, so what exists is per-node adapter fusion on one
+shared base, done locally by that node's owner, never by the gateway. Also out
+of scope: no sequential specialist chaining (measured harmful), no learned
+router, no vector-native model-to-model communication, no production-grade auth.
 
 `/demand/gaps` reports demand clusters the catalogue cannot serve — the signal
-Soup of Experts would need. It does not merge weights, and says so where the
-theory would claim otherwise.
+that drives adapter selection. `/adapters/plan` is what turns that signal into a
+recommendation; it is read-only, and nothing changes on any machine until that
+machine's owner runs the build themselves.
 
 ## Licence
 
