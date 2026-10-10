@@ -916,13 +916,21 @@ def remove_linux_service() -> None:
 
 
 def install_windows_service(argv: list[str]) -> None:
+    log_path = Path.home() / ".common-network" / "join.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     cmd_str = " ".join(f'"{a}"' if " " in a else a for a in argv)
-    subprocess.run([
+    cmd_str = f'cmd /c "{cmd_str} >> "{log_path}" 2>&1"'
+    result = subprocess.run([
         "schtasks", "/create", "/f", "/sc", "onlogon", "/rl", "highest",
         "/tn", SCHTASKS_NAME, "/tr", cmd_str,
-    ], check=True)
+    ], capture_output=True, text=True)
+    if result.returncode != 0:
+        if "Access is denied" in result.stderr or "access" in result.stderr.lower():
+            die("creating the scheduled task requires an elevated (admin) PowerShell.")
+        die(f"schtasks failed: {result.stderr.strip()}")
     subprocess.run(["schtasks", "/run", "/tn", SCHTASKS_NAME], check=True)
     print(f"{GLYPH_DONE} {blue('installed as a scheduled task', bold=True)} — starts at login.")
+    print(comment(f"logs: {log_path}"))
     print(comment("Windows Task Scheduler doesn't auto-restart on crash like launchd/systemd do."))
     print(comment(f"to stop: python3 {os.path.abspath(__file__)} --remove-permanent --no-update"))
 
