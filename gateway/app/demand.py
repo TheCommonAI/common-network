@@ -42,15 +42,30 @@ from pydantic import BaseModel, Field
 
 from app import db
 from app.config import settings
+from app.router import DOMAIN_MATCH_FLOOR
 
 router = APIRouter()
 
 
 # A request whose best domain match is below this is treated as unserved —
-# nothing the network declares is really about it. Same floor
-# `best_matched_domain` uses to decide whether to record a domain at all, so
-# "matched_domain is null" and "unserved" mean the same thing by construction.
-UNSERVED_FLOOR = 0.3
+# nothing the network declares is really about it. Not a second literal: it is
+# the same constant `best_matched_domain` applies when deciding whether to
+# record a domain at all, so "matched_domain is null" and "unserved" really do
+# mean the same thing by construction rather than by two numbers happening to
+# match. See the note on DOMAIN_MATCH_FLOOR in app/router.py.
+UNSERVED_FLOOR = DOMAIN_MATCH_FLOOR
+
+# The unserved population, in one place because two callers now need it:
+# analyse() for the report, and load_unserved_clusters() for the adapter plan.
+# A second copy would be a second definition of "unserved".
+UNSERVED_REQUESTS_SQL = """
+    select request_embed
+    from decisions
+    where matched_domain is null
+      and request_embed is not null
+      and created_at > now() - make_interval(days => $1)
+    limit 5000
+    """
 
 
 @dataclass
@@ -74,17 +89,44 @@ class UnservedCluster:
     """A region of request space the catalogue does not reach."""
     size: int
     nearest_domain: str | None
-    nearest_similarity: float
+
+    # An *upper bound* on how close this cluster sits to any declared domain —
+    # not a measurement of it.
+    #
+    # It is a constant because the population is selected by a constant.
+    # analyse() takes only requests whose decisions.matched_domain is null, and
+    # best_matched_domain writes null exactly when the best declared-domain
+    # similarity came in below DOMAIN_MATCH_FLOOR. So every member of every
+    # cluster scored below that floor against every declared tag. The real
+    # nearest similarity is below this number by an amount nobody recorded.
+    #
+    # Which is why it must not be used to decide "is this far from every
+    # node". It is not even a statement about nodes — it is a bound against
+    # declared *domain tags*, and a node's capability embedding is a different
+    # thing this module never compares against. app/adapters.py measures that
+    # separately, against nodes.capability_embed, and that is the measurement
+    # to use for any decision.
+    similarity_bound: float = UNSERVED_FLOOR
+
+    # The mean of the cluster's request embeddings. Computed here and returned
+    # by as_dict() as nothing at all — it is not part of the published payload,
+    # it is the vector adapter selection matches against. Carried on the
+    # dataclass so that path can reach it, which is the only reason it is not
+    # a local variable inside analyse() as it used to be.
     centroid: list[float] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
             "requests": self.size,
             "nearest_declared_domain": self.nearest_domain,
-            "similarity_to_nearest": round(self.nearest_similarity, 3),
+            # Key unchanged so nothing reading this payload breaks. The bound
+            # is what it always was; what changed is that the value is now
+            # compared correctly, so the verdict below finally says what the
+            # selection rule guarantees instead of the opposite.
+            "similarity_to_nearest": round(self.similarity_bound, 3),
             "verdict": (
                 "no specialist covers this — a new catalogue entry is warranted"
-                if self.nearest_similarity < UNSERVED_FLOOR else
+                if self.similarity_bound <= UNSERVED_FLOOR else
                 "partially covered — an existing domain is adjacent"
             ),
         }
@@ -128,6 +170,50 @@ def cluster(vectors: np.ndarray, threshold: float, min_size: int) -> list[list[i
 
     clusters.sort(key=len, reverse=True)
     return clusters
+
+
+def cluster_centroids(vectors: np.ndarray, threshold: float,
+                      min_size: int) -> list[tuple[list[int], np.ndarray]]:
+    """`cluster()`, plus each cluster's centroid, as (member indices, centroid).
+
+    The centroid used to be computed inside analyse() and then effectively
+    dropped: UnservedCluster carried it, but as_dict() never published it, so
+    nothing outside could reach it. Adapter selection needs exactly this — the
+    mean of a cluster is the vector to match candidate adapters against — so it
+    is returned here rather than left as a local.
+    """
+    return [(members, vectors[members].mean(axis=0))
+            for members in cluster(vectors, threshold, min_size)]
+
+
+def unserved_clusters(vectors: np.ndarray, threshold: float,
+                      min_size: int) -> list[UnservedCluster]:
+    """The clusters as dataclasses, each carrying the vector to match against.
+
+    Pure: takes vectors, touches no database, so the adapter tests can call it
+    with hand-built ones exactly as test_compose.py does. See UnservedCluster
+    for why the "how far from a declared domain" figure is a bound rather than
+    a measurement, and why nothing should decide anything on it.
+    """
+    return [
+        UnservedCluster(
+            size=len(members),
+            nearest_domain=None,
+            centroid=centroid.tolist(),
+        )
+        for members, centroid in cluster_centroids(vectors, threshold, min_size)
+    ]
+
+
+async def load_unserved_clusters(window_days: int = 30, cluster_threshold: float = 0.6,
+                                 min_cluster_size: int = 3) -> list[UnservedCluster]:
+    """unserved_clusters(), reading the request embeddings from the database."""
+    async with db.pool().acquire() as conn:
+        rows = await conn.fetch(UNSERVED_REQUESTS_SQL, window_days)
+    if not rows:
+        return []
+    vectors = np.array([list(r["request_embed"]) for r in rows], dtype=float)
+    return unserved_clusters(vectors, cluster_threshold, min_cluster_size)
 
 
 async def _catalogue_by_domain(conn) -> dict[str, list[dict]]:
@@ -183,17 +269,7 @@ async def analyse(window_days: int = 30, cluster_threshold: float = 0.6,
             group by tag
             """
         )
-        unserved_rows = await conn.fetch(
-            """
-            select request_embed
-            from decisions
-            where matched_domain is null
-              and request_embed is not null
-              and created_at > now() - make_interval(days => $1)
-            limit 5000
-            """,
-            window_days,
-        )
+        unserved_rows = await conn.fetch(UNSERVED_REQUESTS_SQL, window_days)
         total = await conn.fetchval(
             "select count(*) from decisions where created_at > now() - make_interval(days => $1)",
             window_days,
@@ -217,18 +293,7 @@ async def analyse(window_days: int = 30, cluster_threshold: float = 0.6,
     clusters: list[UnservedCluster] = []
     if unserved_rows:
         vectors = np.array([list(r["request_embed"]) for r in unserved_rows], dtype=float)
-        for members in cluster(vectors, cluster_threshold, min_cluster_size):
-            centroid = vectors[members].mean(axis=0)
-            clusters.append(UnservedCluster(
-                size=len(members),
-                nearest_domain=None,
-                # By construction every request here failed to clear the floor
-                # against any declared domain, so the nearest similarity is
-                # below it. Reported rather than recomputed per-tag: the useful
-                # number is "how many people asked", not a third decimal place.
-                nearest_similarity=UNSERVED_FLOOR,
-                centroid=centroid.tolist(),
-            ))
+        clusters = unserved_clusters(vectors, cluster_threshold, min_cluster_size)
 
     unserved_total = len(unserved_rows)
     return {

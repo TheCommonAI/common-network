@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -33,6 +33,29 @@ class NodeCreate(BaseModel):
     # since an unrecognised client is data, not an error.
     client: str | None = Field(default=None, max_length=64)
 
+    # --- On-demand specialists -------------------------------------------
+    # What a node could still be fused from, and what it is running now.
+    #
+    # `base_model` is the weights underneath. This is load-bearing rather than
+    # descriptive: while a node is serving a blend its model_name is the blend
+    # tag, not a real model, so base_model is the only thing that survives the
+    # swap and says what it can be fused *from*. It is a hint, not an
+    # authority -- where a node has a catalogue_id the gateway prefers the base
+    # that entry names, because that one is ours. Either way a NULL means
+    # "unknown" and the rule is refuse to assign, never guess.
+    #
+    # `adapter_ids` is the set fused on top of it. Small on purpose: a blend is
+    # a distinct Ollama model with its own residency slot, so a node holds one
+    # blend at a time, and this array is that blend.
+    #
+    # Both are self-reported by a stranger, so both are bounded. An adapter id
+    # is a lookup key, and truncating one would produce a key that matches
+    # nothing -- so an over-long value is refused rather than trimmed, unlike
+    # `client` above, which is a statistic and is cut to fit.
+    base_model: str | None = Field(default=None, max_length=128)
+    adapter_ids: list[Annotated[str, Field(max_length=64)]] | None = Field(
+        default=None, max_length=8)
+
 
 class NodePublicOut(BaseModel):
     """Public node info returned by GET /nodes. No endpoint_url — that is
@@ -51,6 +74,12 @@ class NodePublicOut(BaseModel):
     capability_text: str
     domain_tags: list[str] | None = None
     catalogue_id: str | None = None
+    # Which adapters this node is serving, and the base under them. Public
+    # deliberately -- it is a capability description like domain_tags, not a
+    # credential. It is what lets a reader see the network building a
+    # specialist instead of only being told it happened.
+    base_model: str | None = None
+    adapter_ids: list[str] | None = None
 
 
 class NodeOut(NodePublicOut):

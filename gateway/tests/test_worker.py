@@ -22,6 +22,8 @@ import worker  # noqa: E402
 FAILURES = []
 TOKEN = "test-worker-token-0123456789"
 MODEL = "test-model:1b"
+# The base a served blend was built from -- the one thing the allowlist is for.
+BASE_MODEL = "test-base:1b"
 
 
 def check(name: str, got, want) -> None:
@@ -150,6 +152,55 @@ try:
             {"messages": [{"role": "user", "content": "hi"}]})
     check("a missing model is filled in, not rejected",
           UPSTREAM_HITS[0]["body"]["model"], MODEL)
+
+    # The optional allowlist. It exists so a node serving a blend can still be
+    # asked for the base it was built from, without a worker restart -- and the
+    # assertions that matter are the ones proving it did NOT widen the pin: a
+    # third name, a prefix of an allowed name, and a name that differs by case
+    # must all still be refused. A regression here would turn a one-model
+    # donation into an open proxy for whoever can reach the tunnel.
+    print("\nmodel allowlist (a closed set, not a wildcard)")
+    base_worker = worker.serve(TOKEN, MODEL, port=0, ollama_url=STUB_URL,
+                               warm=False, extra_models=frozenset({BASE_MODEL}))
+    base_url = f"http://127.0.0.1:{base_worker.server_address[1]}"
+
+    def request_allowed(body):
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(base_url + "/v1/chat/completions", data=data,
+                                     headers={"Content-Type": "application/json",
+                                              "Authorization": f"Bearer {TOKEN}"},
+                                     method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    for allowed in (MODEL, BASE_MODEL, "auto"):
+        UPSTREAM_HITS.clear()
+        status, _ = request_allowed({"model": allowed,
+                                     "messages": [{"role": "user", "content": "hi"}]})
+        check(f"{allowed!r} (allowed) -> 200", status, 200)
+
+    UPSTREAM_HITS.clear()
+    status, _ = request_allowed({"model": MODEL,
+                                 "messages": [{"role": "user", "content": "hi"}]})
+    check("the primary is passed through unchanged",
+          UPSTREAM_HITS[0]["body"]["model"], MODEL)
+
+    UPSTREAM_HITS.clear()
+    request_allowed({"model": BASE_MODEL,
+                     "messages": [{"role": "user", "content": "hi"}]})
+    check("an allowed extra is passed through, not rewritten",
+          UPSTREAM_HITS[0]["body"]["model"], BASE_MODEL)
+
+    for refused in ("llama3.1:70b", MODEL.split(":")[0], MODEL.upper(),
+                    BASE_MODEL + ":latest"):
+        UPSTREAM_HITS.clear()
+        status, _ = request_allowed({"model": refused,
+                                     "messages": [{"role": "user", "content": "hi"}]})
+        check(f"{refused!r} (not allowed) -> 400", status, 400)
+        check(f"{refused!r} never reached the upstream", UPSTREAM_HITS, [])
 
     print("\nrequest shape")
     check("non-JSON body -> 400",

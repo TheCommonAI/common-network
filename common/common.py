@@ -15,6 +15,10 @@ Usage:
     common leave                   take this machine off the commons
     common status                  this node: health, position, requests served
     common demand                  live domain coverage gaps
+    common adapters plan           specialists the network would build, and where
+    common adapters list           the adapter catalogue: what can be fused
+    common adapters build <tag>    fuse one on this machine (needs the base pulled)
+    common adapters apply <tag>    serve a blend you built, as this node
     common recommend               what specialist the network needs next
     common recommend --machines 20 plan a whole computer lab at once
     common peers                   connected nodes and their coverage
@@ -61,6 +65,15 @@ a copy that lives in a git checkout -- a clone updates with `git pull`, and
 clobbering someone's working tree is not this function's job. Pass
 --force-update (or COMMON_FORCE_UPDATE=1) to override, which discards local
 changes. An installed copy keeps a .bak of the version it replaced.
+
+`common adapters` is the on-demand-specialist path. When requests cluster
+somewhere no node covers, the gateway names the nearest small public LoRA
+adapters for a node already on the matching base to fuse locally -- no training,
+no GPU, no new dataset. `plan` shows what it would build and which node it would
+land on; `list` is the catalogue; `build <tag>` does the fusion on this machine
+with `ollama create`; `apply <tag>` puts this machine back on the commons
+serving it. The gateway only ever *recommends* -- it cannot make a node load
+anything, and there is no route to Ollama's management API from the network.
 """
 import argparse
 import json
@@ -1173,7 +1186,587 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
     if args.region:
         argv += ["--region", args.region]
 
+    # If what this machine is putting out is a blend it built here, join.py has
+    # to be told the base it was fused from -- the network matches adapters
+    # against a Hugging Face repo id, and nothing in the local Modelfile says
+    # it. The record is the only place that pair is written down. A tag with no
+    # record registers a NULL base, which the gateway reads as "cannot be
+    # assigned an adapter" -- the honest answer, not a guess.
+    served = extra_model or args.model
+    record = read_adapter_record(served) if served and BLEND_TAG_RE.match(served) else None
+    if record:
+        if record.get("base_model"):
+            argv += ["--base-model", str(record["base_model"])]
+        if record.get("adapter_ids"):
+            argv += ["--adapter-ids", ",".join(record["adapter_ids"])]
+        if record.get("local_from"):
+            # The base's own local name, so the worker can still answer for it
+            # while the blend is resident -- an A/B with no restart.
+            argv += ["--allow-model", str(record["local_from"])]
+        print(dim(f"reported base: {record.get('base_model')} "
+                  f"({len(record.get('adapter_ids') or [])} adapter(s) fused)"))
+
     os.execv(sys.executable, argv)
+
+
+# --- Adapters ----------------------------------------------------------------
+# On-demand specialists: the gateway recommends a fusion, this machine builds
+# it. The direction is one-way and deliberate -- the gateway names adapters, it
+# never makes a node load one. There is no route to Ollama's /api/create from
+# the network (the worker 404s it; see gateway/tests/test_worker.py), so
+# `ollama create` runs here, on the machine of the person who chose to run it.
+#
+# `list` and `plan` only read. `build` writes a model on this machine and
+# `apply` puts this machine back on the commons serving it -- both typed by the
+# operator, neither reachable from the gateway.
+
+OLLAMA_URL = "http://localhost:11434"
+ADAPTER_STATE_DIR = INSTALL_DIR / "adapters"
+
+# A blend tag as the gateway mints it (app/adapters.blend_tag): `blend-` + 8 hex.
+#
+# Checked here rather than trusted, because this string arrives in a gateway
+# response and then becomes three things on this machine: a filename, an
+# `ollama create` model name, and the name this node re-registers under. None of
+# the three is a good place for an unvalidated string chosen by whoever runs the
+# gateway you pointed --gateway at.
+BLEND_TAG_RE = re.compile(r"^blend-[0-9a-f]{8}$")
+
+# How long Ollama holds a freshly-built blend. The same half hour `common join`
+# warms its base with, and for the same reason -- see worker.DEFAULT_KEEP_ALIVE.
+ADAPTER_WARM_KEEP_ALIVE = "30m"
+
+
+def _ollama_tags(timeout: float = 5.0) -> set[str]:
+    """Local model names, as Ollama itself resolves them.
+
+    Empty on any failure, and the caller says what that means -- "your Ollama is
+    not answering" and "you have nothing pulled" are the same set and different
+    problems. client=False: this is a local Ollama call and carries no identity
+    of yours.
+    """
+    try:
+        data = http_json("GET", f"{OLLAMA_URL}/api/tags", timeout=timeout, client=False)
+    except (urllib.error.URLError, socket.timeout, json.JSONDecodeError):
+        return set()
+    names: set[str] = set()
+    for model in data.get("models") or []:
+        for key in ("name", "model"):
+            if model.get(key):
+                names.add(model[key])
+    return names
+
+
+def _adapter_record_path(blend_tag: str) -> Path:
+    # Safe because every caller validated the tag against BLEND_TAG_RE first.
+    return ADAPTER_STATE_DIR / f"{blend_tag}.json"
+
+
+def read_adapter_record(blend_tag: str) -> dict | None:
+    """What this machine built under that tag, or None.
+
+    The record exists because the base cannot be recovered from Ollama. A
+    Modelfile says `FROM qwen2.5:1.5b`, and that is a local pull-name, not the
+    Hugging Face repo id the network matches adapters against -- two names for
+    the same weights, and only the operator knows the pair. So the build writes
+    the pair down, and `apply` and `join` read it rather than guessing.
+    """
+    try:
+        return json.loads(_adapter_record_path(blend_tag).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def write_adapter_record(record: dict) -> Path:
+    ADAPTER_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _adapter_record_path(record["blend_tag"])
+    path.write_text(json.dumps(record, indent=2) + "\n")
+    return path
+
+
+def _fetch_plan(gateway: str) -> dict | None:
+    """The gateway's adapter plan, or None when adapters are off there.
+
+    `None` is not an error: off is the shipped default and a gateway is entitled
+    to it. Every caller decides for itself whether it can carry on -- `plan`
+    prints the reason and stops, `build` has nothing to build from and says so.
+    """
+    try:
+        plan = http_json("GET", f"{gateway}/adapters/plan")
+    except (urllib.error.URLError, socket.timeout) as e:
+        print(red(f"✗ couldn't reach the gateway: {e}"), file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(plan, dict):
+        print(red("✗ the gateway returned an unexpected plan shape"), file=sys.stderr)
+        sys.exit(1)
+    if plan.get("mode") != "plan":
+        return None
+    return plan
+
+
+def _adapters_off_note(gateway: str, mode: str | None = None) -> None:
+    print(dim(f"adapters are off on this gateway"
+              f"{f' (adapters_mode = {mode!r})' if mode else ''}."))
+    print(comment("nothing is recommended and nothing would be built — the gateway"))
+    print(comment("operator switches it on with ADAPTERS_MODE=plan. a gateway that"))
+    print(comment("has it off is the shipped default, not a broken one."))
+
+
+def _find_blend(plan: dict, blend_tag: str) -> dict | None:
+    """The plan entry naming this tag, whether it was placed or not.
+
+    An unmet need is as buildable as an assignment, and often the more useful
+    one: it means demand clustered on a base nobody is currently online with, so
+    the node owner who does have that base is exactly who should see it. An
+    assignment additionally names the node the gateway would put it on, which
+    this command deliberately does not act on -- the gateway does not control
+    anyone's machine, and neither does this.
+    """
+    for key in ("assignments", "unassigned"):
+        for entry in plan.get(key) or []:
+            if entry.get("blend_tag") == blend_tag:
+                return entry
+    return None
+
+
+def _blend_adapters(entry: dict) -> list[tuple[str, float]]:
+    """(adapter id, weight) for a plan entry. The two shapes carry the same
+    thing in different places -- assignments list ids and weights side by side,
+    needs carry a full pick per adapter."""
+    if entry.get("selected_adapters"):
+        return [(p["id"], float(p.get("weight") or 0.0))
+                for p in entry["selected_adapters"]]
+    weights = [float(w) for w in (entry.get("weights") or [])]
+    return list(zip(entry.get("adapter_ids") or [], weights))
+
+
+def _download(url: str, dest: Path) -> Path:
+    """Fetch an adapter artifact to `dest`, landing it atomically.
+
+    Straight urllib rather than this file's http_json: this is somebody else's
+    host, and the Common client header has no business following a download to a
+    third party. The `.part` suffix and the rename matter for a different
+    reason -- a build that reads a half-written GGUF fails in a way that looks
+    like a broken adapter rather than an interrupted download.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    print(dim(f"  downloading {url}"))
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp, open(tmp, "wb") as f:
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                f.write(chunk)
+        tmp.replace(dest)
+    except (urllib.error.URLError, socket.timeout, OSError) as e:
+        tmp.unlink(missing_ok=True)
+        print(red(f"✗ download failed: {e}"), file=sys.stderr)
+        sys.exit(1)
+    print(dim(f"  {dest.name}  ({dest.stat().st_size / 1e6:.1f} MB)"))
+    return dest
+
+
+def _warm_blend(model: str) -> bool:
+    """Load the blend once, so the first person to ask does not pay the load.
+
+    Same call `join.py` warms its base with, same reason: the cold load on this
+    fleet is 53-77s, and `common adapters build` has already spent minutes
+    downloading. Failure is not fatal -- the first real request loads it, which
+    is what would have happened anyway.
+    """
+    body = {"model": model, "messages": [{"role": "user", "content": "hi"}],
+            "stream": False, "max_tokens": 1, "keep_alive": ADAPTER_WARM_KEEP_ALIVE}
+    try:
+        http_json("POST", f"{OLLAMA_URL}/v1/chat/completions", body=body,
+                  timeout=180, client=False)
+        return True
+    except (urllib.error.URLError, socket.timeout) as e:
+        print(dim(f"  warm-up didn't finish ({e}) — the first request will load it instead."))
+        return False
+
+
+def cmd_adapters_list(gateway: str, as_json: bool) -> None:
+    try:
+        rows = http_json("GET", f"{gateway}/adapters")
+    except (urllib.error.URLError, socket.timeout) as e:
+        print(red(f"✗ couldn't reach the gateway: {e}"), file=sys.stderr)
+        sys.exit(1)
+
+    if as_json:
+        print(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        _adapters_off_note(gateway)
+        print(dim("  (an empty list here is either that, or a gateway with the mode on"))
+        print(dim("   and an empty catalogue — the two are the same answer from outside.)"))
+        return
+
+    print(dim("adapter catalogue   ·   what the network can fuse, not install\n"))
+    for r in rows:
+        group = r.get("blend_group") or "—"
+        size = f"{r['size_mb']} MB" if r.get("size_mb") else "?"
+        ready = paper("gguf ready") if r.get("gguf_ref") else dim("needs conversion")
+        licence = r.get("licence") or red("unverified")
+        print(f"  {paper(r['id'], bold=True):24s} {size:>8s}   {ready}")
+        print(dim(f"    {r.get('display_name') or r.get('hf_repo')}"))
+        print(dim(f"    base {r.get('base_model')}   ·   group {group}   ·   licence {licence}"))
+        print()
+    print(comment("group is the fusion precondition: adapters share one only if r,"))
+    print(comment("alpha and target modules all agree. '—' means it blends with"))
+    print(comment("nothing and is only ever recommended alone."))
+    print(comment("'licence unverified' is not 'permissive' — read it before you"))
+    print(comment("redistribute anything you fuse from here."))
+
+
+def cmd_adapters_plan(gateway: str, as_json: bool) -> None:
+    plan = _fetch_plan(gateway)
+    if plan is None:
+        if as_json:
+            print(json.dumps({"mode": "off", "assignments": [], "unassigned": []}))
+            return
+        _adapters_off_note(gateway)
+        return
+
+    if as_json:
+        print(json.dumps(plan, indent=2))
+        return
+
+    print(dim("on-demand specialists   ·   what the network would build\n"))
+    print(dim(f"  {plan.get('clusters_considered', 0)} demand cluster(s) considered"))
+    print(dim(f"  {len(plan.get('covered') or [])} already covered by a node\n"))
+
+    assignments = plan.get("assignments") or []
+    if assignments:
+        print(paper("placed", bold=True))
+        for a in assignments:
+            reused = paper("already built") if a.get("reused") else dim("to build")
+            print(f"  {paper(a['node'], bold=True)}  →  {paper(a['blend_tag'])}   {reused}")
+            print(dim(f"    base    {a.get('base_model')}  ({a.get('base_source')})"))
+            for adapter_id, weight in _blend_adapters(a):
+                print(dim(f"    + {adapter_id:24s} weight {weight:.2f}"))
+            print(dim(f"    {a.get('requests')} request(s)  ·  nearest node "
+                      f"{a.get('nearest_node_similarity')}"))
+            if a.get("note"):
+                print(comment(a["note"]))
+            print(comment(f"build it: common adapters build {a['blend_tag']} --from <local base tag>"))
+            print()
+    else:
+        print(dim("nothing to place.\n"))
+
+    unassigned = plan.get("unassigned") or []
+    if unassigned:
+        print(paper("unmet", bold=True))
+        for u in unassigned:
+            print(f"  {paper(u.get('blend_tag') or '(no blend)')}   {u.get('requests')} request(s)")
+            print(dim(f"    base {u.get('base_model') or '— none usable'}"))
+            for adapter_id, weight in _blend_adapters(u):
+                print(dim(f"    + {adapter_id:24s} weight {weight:.2f}"))
+            if u.get("note"):
+                print(comment(u["note"]))
+            if u.get("blend_tag"):
+                print(comment(f"if you have that base: common adapters build "
+                              f"{u['blend_tag']} --from <local base tag>"))
+            print()
+
+    print(comment("this is a recommendation. nothing here has changed any machine,"))
+    print(comment("and nothing will until its owner runs build on it themselves."))
+
+
+def cmd_adapters_build(gateway: str, blend_tag: str, args: argparse.Namespace) -> None:
+    if not BLEND_TAG_RE.match(blend_tag):
+        print(red(f"✗ {blend_tag!r} is not a blend tag"), file=sys.stderr)
+        print(dim("  → a tag looks like blend-1a2b3c4d. get one from: common adapters plan"),
+              file=sys.stderr)
+        sys.exit(1)
+
+    plan = _fetch_plan(gateway)
+    if plan is None:
+        _adapters_off_note(gateway)
+        print(dim("  → nothing to build from. ask the gateway operator to set "
+                  "ADAPTERS_MODE=plan."))
+        sys.exit(1)
+    entry = _find_blend(plan, blend_tag)
+    if entry is None:
+        print(red(f"✗ the gateway's current plan doesn't name {blend_tag}"), file=sys.stderr)
+        print(dim("  → common adapters plan"), file=sys.stderr)
+        sys.exit(1)
+
+    pairs = _blend_adapters(entry)
+    if not pairs:
+        print(red(f"✗ {blend_tag} names no adapters"), file=sys.stderr)
+        sys.exit(1)
+
+    # The catalogue supplies the artifacts; the plan supplies the choice. Kept
+    # separate because the plan is a recommendation computed from live demand
+    # and the catalogue is the standing list -- a tag can outlive the demand
+    # that produced it, and the artifacts must still be findable when it does.
+    try:
+        catalogue = {r["id"]: r for r in http_json("GET", f"{gateway}/adapters")}
+    except (urllib.error.URLError, socket.timeout) as e:
+        print(red(f"✗ couldn't read the adapter catalogue: {e}"), file=sys.stderr)
+        sys.exit(1)
+    unknown = [i for i, _ in pairs if i not in catalogue]
+    if unknown:
+        print(red(f"✗ the plan names adapter(s) the catalogue doesn't publish: "
+                  f"{', '.join(unknown)}"), file=sys.stderr)
+        print(dim("  the two disagree — worth reporting rather than working around."),
+              file=sys.stderr)
+        sys.exit(1)
+
+    base_model = entry.get("base_model")
+    print(dim(f"blend {paper(blend_tag, bold=True)}"))
+    print(dim(f"  base model (hf)  {base_model}"))
+    for adapter_id, weight in pairs:
+        row = catalogue[adapter_id]
+        print(dim(f"  + {adapter_id:24s} weight {weight:.2f}  "
+                  f"{row.get('hf_repo')}@{str(row.get('revision'))[:8]}"))
+    print()
+
+    # --- the ADAPTER line: the one file `ollama create` reads -----------------
+    if args.fused:
+        adapter_file = Path(args.fused).expanduser()
+        if not adapter_file.is_file():
+            print(red(f"✗ no such file: {adapter_file}"), file=sys.stderr)
+            sys.exit(1)
+    elif len(pairs) == 1:
+        pick = catalogue[pairs[0][0]]
+        if not pick.get("gguf_ref"):
+            print(red(f"✗ {pick['id']} has no published GGUF to download"), file=sys.stderr)
+            print()
+            print(dim("  Ollama's ADAPTER directive takes a PEFT directory or a GGUF, but its"))
+            print(dim("  safetensors adapter support is documented for the Llama, Mistral and"))
+            print(dim("  Gemma families — this one is on Qwen2.5, which is not among them."))
+            print(dim("  So the reliable path is a GGUF converted with llama.cpp's"))
+            print(dim("  convert_lora_to_gguf.py, and none has been published for this adapter."))
+            print()
+            print(dim("  convert it yourself, then:"))
+            print(dim(f"    → common adapters build {blend_tag} --from <local base tag> "
+                      f"--fused <path.gguf>"))
+            sys.exit(1)
+        adapter_file = _download(str(pick["gguf_ref"]),
+                                 ADAPTER_STATE_DIR / f"{pick['id']}.gguf")
+    else:
+        # The important refusal. Several ADAPTER lines is a *sum of products*:
+        # each adapter is applied to the base on its own and the results added.
+        # A LoraHub blend is the other order -- the A and B matrices are summed
+        # first, then the sums multiplied. They are different models, and the
+        # tag hashes the weights, so building one under this name would serve
+        # something the gateway did not ask for under a name that says it did.
+        print(red(f"✗ {len(pairs)} adapters, and no fused GGUF to apply"), file=sys.stderr)
+        print()
+        print(dim("  `ollama create` with several ADAPTER lines applies each adapter to the"))
+        print(dim("  base separately and adds the results. The blend this tag names is the"))
+        print(dim("  other order: the A and B matrices are averaged first, then multiplied."))
+        print(dim("  Those are different models, and the tag's hash covers the weights, so"))
+        print(dim("  a build here would serve something other than what the tag claims."))
+        print()
+        print(dim("  fuse them into one GGUF first — experiments/lora-blend in the"))
+        print(dim("  repository does exactly this and documents the arithmetic — then:"))
+        print(dim(f"    → common adapters build {blend_tag} --from <local base tag> "
+                  f"--fused <path.gguf>"))
+        sys.exit(1)
+
+    # --- the FROM line: a name *this* Ollama can resolve ---------------------
+    #
+    # The plan's base_model is a Hugging Face repo id and Ollama cannot resolve
+    # it. The same weights under a local tag is the only thing that works on the
+    # FROM line, and only the operator knows that pair -- so it is required
+    # rather than guessed, and verified against Ollama rather than taken on
+    # faith. An `ollama create` against a name that isn't there either fails
+    # obscurely or, worse, starts a multi-GB pull.
+    tags = _ollama_tags()
+    local_from = args.from_
+    if not local_from:
+        print(red("✗ which local model is this blend built on?"), file=sys.stderr)
+        print(dim(f"  the plan's base is {base_model}, a Hugging Face repo id — Ollama"),
+              file=sys.stderr)
+        print(dim("  can't resolve that. it needs the same weights as this machine has them:"),
+              file=sys.stderr)
+        print(dim("    → common adapters build " + blend_tag + " --from qwen2.5:1.5b"),
+              file=sys.stderr)
+        if tags:
+            print(dim(f"  local models: {', '.join(sorted(tags))}"), file=sys.stderr)
+        else:
+            print(dim("  (no local models answered — is Ollama running?)"), file=sys.stderr)
+        sys.exit(1)
+    if "://" in local_from:
+        print(red("✗ --from must be a local name, not a URL"), file=sys.stderr)
+        sys.exit(1)
+    if local_from not in tags and not Path(local_from).expanduser().is_file():
+        print(red(f"✗ Ollama has no model called {local_from!r}"), file=sys.stderr)
+        if tags:
+            print(dim(f"  local models: {', '.join(sorted(tags))}"), file=sys.stderr)
+        else:
+            print(dim("  no local models answered — is Ollama running?"), file=sys.stderr)
+        sys.exit(1)
+
+    # --- the Modelfile -------------------------------------------------------
+    #
+    # This mirrors gateway/app/adapters.blend_modelfile, and the duplication is
+    # deliberate: this file is stdlib-only and cannot import gateway code. What
+    # is duplicated is Ollama's two-line grammar, not a project rule. The one
+    # rule that *is* ours -- no URL may reach either line, so `ollama create`
+    # can never be turned into a fetch of a remote artifact -- is asserted
+    # explicitly below, in the same words the gateway uses.
+    for label, value in (("base", local_from), ("adapter", str(adapter_file))):
+        if "://" in value:
+            print(red(f"✗ refusing to write a URL into the {label} line: {value!r}"),
+                  file=sys.stderr)
+            sys.exit(1)
+    lines = [f"FROM {local_from}", f"ADAPTER {adapter_file}"]
+    if args.system:
+        lines.append(f"SYSTEM {args.system}")
+    modelfile = "\n".join(lines) + "\n"
+
+    ADAPTER_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    modelfile_path = ADAPTER_STATE_DIR / f"{blend_tag}.Modelfile"
+    modelfile_path.write_text(modelfile)
+    print(dim("Modelfile"))
+    for line in modelfile.rstrip("\n").splitlines():
+        print(dim(f"  {line}"))
+    print()
+
+    # --- build ---------------------------------------------------------------
+    print(dim(f"  ollama create {blend_tag} ..."))
+    try:
+        proc = subprocess.run(["ollama", "create", blend_tag, "-f", str(modelfile_path)],
+                              capture_output=True, text=True, timeout=1800)
+    except FileNotFoundError:
+        print(red("✗ couldn't run `ollama`"), file=sys.stderr)
+        print(dim("  → is it installed and on PATH? https://ollama.com/download"), file=sys.stderr)
+        sys.exit(1)
+    except subprocess.TimeoutExpired:
+        print(red("✗ ollama create timed out after 30 minutes"), file=sys.stderr)
+        sys.exit(1)
+    if proc.returncode != 0:
+        print(red(f"✗ ollama create failed (exit {proc.returncode})"), file=sys.stderr)
+        for line in (proc.stderr or proc.stdout or "").strip().splitlines()[-10:]:
+            print(dim(f"  {line}"), file=sys.stderr)
+        sys.exit(1)
+
+    if blend_tag not in _ollama_tags():
+        # `create` reported success and the model is not there. Better to say so
+        # than to write a record for something that doesn't exist.
+        print(red(f"✗ ollama create reported success but {blend_tag} isn't in `ollama list`"),
+              file=sys.stderr)
+        sys.exit(1)
+    print(f"{GLYPH_DONE} built {paper(blend_tag)}\n")
+
+    # --- warm, then remember the base ---------------------------------------
+    print(dim("  loading it once so the first request doesn't pay the cold load..."))
+    warmed = _warm_blend(blend_tag)
+    record = {
+        "blend_tag": blend_tag,
+        "base_model": base_model,
+        "local_from": local_from,
+        "adapter_ids": [i for i, _ in pairs],
+        "weights": [w for _, w in pairs],
+        "adapter_file": str(adapter_file),
+        "warmed": warmed,
+    }
+    path = write_adapter_record(record)
+    print(dim(f"  recorded in {path}\n"))
+    print(comment("that record is how `common adapters apply` and `common join` know"))
+    print(comment("this model's base — Ollama's Modelfile only ever says the local"))
+    print(comment("tag, and the network matches adapters against the hf repo id."))
+    print()
+    print("  put this machine on the commons serving it:")
+    print(dim(f"    → common adapters apply {blend_tag}"))
+
+
+def cmd_adapters_apply(gateway: str, blend_tag: str, args: argparse.Namespace) -> None:
+    if not BLEND_TAG_RE.match(blend_tag):
+        print(red(f"✗ {blend_tag!r} is not a blend tag"), file=sys.stderr)
+        sys.exit(1)
+    record = read_adapter_record(blend_tag)
+    if record is None:
+        print(red(f"✗ this machine has no record of building {blend_tag}"), file=sys.stderr)
+        print(dim(f"  → common adapters build {blend_tag} --from <local base tag>"),
+              file=sys.stderr)
+        sys.exit(1)
+    if blend_tag not in _ollama_tags():
+        # The record is local and written only after a verified create, so this
+        # means the model was removed since -- `ollama rm`, or a pruned store.
+        print(red(f"✗ {blend_tag} is recorded here but Ollama doesn't have it"), file=sys.stderr)
+        print(dim("  it was removed after the build (`ollama rm`, or a pruned model store)."),
+              file=sys.stderr)
+        print(dim(f"  → rebuild it: common adapters build {blend_tag} --from "
+                  f"{record.get('local_from') or '<local base tag>'}"), file=sys.stderr)
+        sys.exit(1)
+
+    print(dim(f"swapping this machine onto {paper(blend_tag, bold=True)}"))
+    print(dim(f"  base {record.get('base_model')}  ·  "
+              f"{len(record.get('adapter_ids') or [])} adapter(s)"))
+    if record.get("local_from"):
+        print(dim(f"  the worker will still answer for {record['local_from']}, so an A/B "
+                  f"against the base needs no restart."))
+    print()
+    # Re-registering is `common serve`'s job, and it already does the whole
+    # sequence correctly -- fresh worker token, tunnel, warm, register. Doing it
+    # again here would be a second implementation of a security-sensitive path.
+    args.model = blend_tag
+    cmd_join_or_serve("serve", gateway, args, extra_model=blend_tag)
+
+
+def _parse_adapters_flags(args: argparse.Namespace) -> argparse.Namespace:
+    """Re-parse what `rest` swallowed, same as test flags and for the same
+    reason: the top-level parser uses argparse.REMAINDER, so `common adapters
+    plan --json` puts --json in rest and the flag would be silently dropped."""
+    p = argparse.ArgumentParser(prog="common adapters", add_help=False)
+    p.add_argument("action", nargs="?", default=None)
+    p.add_argument("target", nargs="?", default=None)
+    p.add_argument("--from", dest="from_", default=None)
+    p.add_argument("--fused", default=None)
+    p.add_argument("--system", default=None)
+    p.add_argument("--json", action="store_true")
+    sub, _ = p.parse_known_args(args.rest)
+    args.action = sub.action
+    args.target = sub.target
+    args.from_ = sub.from_
+    args.fused = sub.fused
+    args.system = sub.system
+    if sub.json:
+        args.json = True
+    return args
+
+
+def _adapters_from_parts(gateway: str, args: argparse.Namespace, parts: list[str]) -> None:
+    """Run `common adapters` on words split from a REPL line.
+
+    `_parse_adapters_flags` reads `args.rest`, which only the command line ever
+    fills, so the session lends it the words and takes it back afterwards --
+    the same shape `_parse_test_flags` has on the `common test` path.
+    """
+    saved = args.rest
+    args.rest = parts
+    try:
+        cmd_adapters(gateway, _parse_adapters_flags(args))
+    finally:
+        args.rest = saved
+
+
+def cmd_adapters(gateway: str, args: argparse.Namespace) -> None:
+    action = args.action or "plan"
+    if action == "list":
+        cmd_adapters_list(gateway, args.json)
+    elif action == "plan":
+        cmd_adapters_plan(gateway, args.json)
+    elif action in ("build", "apply"):
+        if not args.target:
+            print(red(f"✗ adapters {action} needs a blend tag"), file=sys.stderr)
+            print(dim(f"  → common adapters plan   (then: common adapters {action} "
+                      f"blend-1a2b3c4d)"), file=sys.stderr)
+            sys.exit(1)
+        if action == "build":
+            cmd_adapters_build(gateway, args.target, args)
+        else:
+            cmd_adapters_apply(gateway, args.target, args)
+    else:
+        print(red(f"✗ unknown adapters action: {action}"), file=sys.stderr)
+        print(dim("  → common adapters [list|plan|build|apply]"), file=sys.stderr)
+        sys.exit(1)
 
 
 # --- Test --------------------------------------------------------------------
@@ -2814,6 +3407,30 @@ def _parse_test_flags(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def cmd_help(verb: str | None) -> None:
+    if verb == "adapters":
+        print(dim("common adapters [list|plan|build <tag>|apply <tag>]"))
+        print()
+        print(paper("read-only", bold=True))
+        print("  common adapters list              the adapter catalogue")
+        print("  common adapters plan              what the network would build, and where")
+        print()
+        print(paper("on this machine", bold=True))
+        print("  common adapters build <tag> --from <local base>")
+        print("                                    fuse the adapters onto a base you have")
+        print("  common adapters apply <tag>       serve the blend instead of the base")
+        print()
+        print(comment("--from is the name Ollama knows those weights by on *this* machine"))
+        print(comment("(qwen2.5:1.5b), not the Hugging Face repo id the plan shows -- the"))
+        print(comment("network matches adapters against the repo id and Ollama cannot"))
+        print(comment("resolve it. build records the pair, so apply and join don't guess."))
+        print(comment("--fused <path.gguf> applies a single already-fused adapter, which"))
+        print(comment("is the only correct path when the plan names more than one."))
+        print()
+        print(comment("nothing here claims a fused specialist answers better. that is"))
+        print(comment("what experiments/lora-blend measures, and it has not shown it."))
+        print(comment("what this does is let the network build a specialist where demand"))
+        print(comment("clusters and no node covers -- instead of waiting for a donation."))
+        return
     if verb == "synth":
         print(dim("common synth <region>"))
         print()
@@ -2838,7 +3455,7 @@ def cmd_help(verb: str | None) -> None:
 def build_repl_help() -> str:
     return dim(
         "/ask (implicit: just type)  /join  /serve  /leave  /status\n"
-        "/demand  /recommend  /peers  /contrib  /whoami  /privacy  /config  /test  /model  /local  /help  /exit"
+        "/demand  /adapters  /recommend  /peers  /contrib  /whoami  /privacy  /config  /test  /model  /local  /help  /exit"
     )
 
 
@@ -2873,6 +3490,15 @@ def interactive_session(gateway: str, args: argparse.Namespace) -> None:
             continue
         if line == "/demand":
             cmd_demand(gateway, False)
+            continue
+        if line == "/adapters" or line.startswith("/adapters "):
+            # `/adapters` alone is the plan -- the read-only verb, and the one
+            # worth looking at without having to remember its name. `build` and
+            # `apply` are deliberately not reachable from here: both change this
+            # machine, and typing them out at the shell is the smallest possible
+            # speed bump in front of that.
+            parts = line.split()[1:] or ["plan"]
+            _adapters_from_parts(gateway, args, parts)
             continue
         if line == "/recommend" or line.startswith("/recommend "):
             parts = line.split()
@@ -3013,6 +3639,8 @@ def main() -> None:
         )
     elif args.verb == "demand":
         cmd_demand(gateway, args.json)
+    elif args.verb == "adapters":
+        cmd_adapters(gateway, _parse_adapters_flags(args))
     elif args.verb == "status":
         cmd_status(gateway, args.json)
     elif args.verb == "whoami":

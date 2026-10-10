@@ -81,11 +81,34 @@ DEFAULT_KEEP_ALIVE = "30m"
 
 class WorkerConfig:
     def __init__(self, token: str, model: str, ollama_url: str = DEFAULT_OLLAMA,
-                 keep_alive: str = DEFAULT_KEEP_ALIVE):
+                 keep_alive: str = DEFAULT_KEEP_ALIVE,
+                 extra_models: frozenset[str] = frozenset()):
         self.token = token
         self.model = model
         self.ollama_url = ollama_url.rstrip("/")
         self.keep_alive = keep_alive
+        # Models this node will also answer for, beyond the one it advertises.
+        #
+        # The point is a swap window, not a second capability. A node that has
+        # built a blend from its base can be asked for either while the other
+        # is still resident, so an A/B against the base does not need the
+        # worker restarted and the owner does not have to guess which name the
+        # gateway will send. It is deliberately a closed set fixed at startup
+        # and never a prefix or a wildcard: the pin exists so a donated laptop
+        # cannot be made to pull somebody else's multi-GB model, and an
+        # allowlist that could grow at request time would be that pin removed.
+        #
+        # `/v1/models` still advertises only `model`. What the node *is* --
+        # and what the gateway routes on via `nodes.model_name` -- is the
+        # primary; the extras are a compatibility affordance, not a claim.
+        self.extra_models = frozenset(extra_models)
+
+    @property
+    def allowed_models(self) -> frozenset[str]:
+        """Names a request may carry. `auto` is the client saying "you pick",
+        which the handler rewrites to `model` -- never a way to name a fourth
+        model."""
+        return self.extra_models | {self.model, "auto"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -203,20 +226,29 @@ class Handler(BaseHTTPRequestHandler):
                                        "type": "invalid_request_error"}})
             return
 
-        # This machine donated one model. Anything else is refused rather than
-        # forwarded -- Ollama would happily start pulling a model nobody here
-        # agreed to host.
+        # This machine donated one model (plus, optionally, the base its blend
+        # was built from -- see WorkerConfig.extra_models). Anything else is
+        # refused rather than forwarded -- Ollama would happily start pulling a
+        # model nobody here agreed to host.
         requested = body.get("model")
-        if requested and requested not in (self.config.model, "auto"):
+        if requested and requested not in self.config.allowed_models:
             self._json(400, {"error": {
                 "message": f"this node serves {self.config.model!r}, not {requested!r}",
                 "type": "invalid_request_error",
             }})
             return
-        body["model"] = self.config.model
+        # Only a missing name or an explicit "auto" is filled in. This line used
+        # to assign the primary unconditionally, which was correct while the pin
+        # admitted exactly one name and became a silent substitution the moment
+        # it admitted two: a caller asking for the base would be served the
+        # blend, and nothing in the reply would say so. Found by the allowlist
+        # test, which is the only reason to have written it.
+        if not requested or requested == "auto":
+            requested = self.config.model
+        body["model"] = requested
 
         # Stamp the node's own retention policy, overriding whatever the caller
-        # sent -- the same way the model above is overwritten. Ollama restarts
+        # sent -- the model above is validated but otherwise left alone. Ollama restarts
         # its unload timer on every request, so this has to travel with each one:
         # setting it once at start-up would still let the model evict five
         # minutes later, which is the bug being fixed. And the node owns its own
@@ -325,7 +357,8 @@ def warm_model(model: str, ollama_url: str, keep_alive: str = DEFAULT_KEEP_ALIVE
 def serve(token: str, model: str, port: int = 11435,
           ollama_url: str = DEFAULT_OLLAMA,
           keep_alive: str = DEFAULT_KEEP_ALIVE,
-          warm: bool = True) -> ThreadingHTTPServer:
+          warm: bool = True,
+          extra_models: frozenset[str] = frozenset()) -> ThreadingHTTPServer:
     """Start the worker on a background thread and return the server.
 
     Bound to 0.0.0.0 because the whole point is to be reachable -- by the
@@ -339,7 +372,7 @@ def serve(token: str, model: str, port: int = 11435,
     request in the stub's hit log and turn a real assertion into a coin toss.
     """
     handler = type("BoundHandler", (Handler,), {
-        "config": WorkerConfig(token, model, ollama_url, keep_alive),
+        "config": WorkerConfig(token, model, ollama_url, keep_alive, extra_models),
     })
     httpd = ThreadingHTTPServer(("0.0.0.0", port), handler)
     httpd.daemon_threads = True
@@ -367,10 +400,19 @@ def main() -> int:
     p.add_argument("--keep-alive", default=os.environ.get("COMMON_KEEP_ALIVE", DEFAULT_KEEP_ALIVE),
                    help="how long Ollama keeps the model resident, e.g. 30m or -1 "
                         "(default: %(default)s)")
+    p.add_argument("--allow-model", action="append", default=[], metavar="NAME",
+                   help="also answer for this model name (repeatable). Use for the base "
+                        "a served blend was built from, so an A/B against it does not "
+                        "need the worker restarted. Closed set, fixed at startup.")
     args = p.parse_args()
 
-    serve(args.token, args.model, args.port, args.ollama, args.keep_alive)
+    # An allowlist entry identical to the primary is not an error, just noise.
+    extra = frozenset(m for m in args.allow_model if m != args.model)
+    serve(args.token, args.model, args.port, args.ollama, args.keep_alive,
+          extra_models=extra)
     print(f"common-worker on :{args.port} → {args.ollama} (model: {args.model})")
+    if extra:
+        print(f"also answering for: {', '.join(sorted(extra))}")
     print(f"the model stays loaded for {args.keep_alive} after each request; "
           f"Ollama unloads it once idle for longer.")
     print("only /v1/models and /v1/chat/completions are reachable; both need the token.")

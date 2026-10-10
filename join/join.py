@@ -980,6 +980,17 @@ def main() -> None:
     parser.add_argument("--lan", action="store_true", help="Join over the local network instead of a Cloudflare tunnel. For a computer lab or anywhere the gateway is on the same network — no tunnel, nothing exposed to the internet")
     parser.add_argument("--permanent", action="store_true", help="Install as a background service that starts at login/boot and restarts if it crashes, then exit")
     parser.add_argument("--remove-permanent", action="store_true", help="Remove the background service installed by --permanent, then exit")
+    # What this node is underneath, for the on-demand-adapter plan. Set by
+    # `common adapters apply`, which reads them from the record the build wrote
+    # -- not typed by hand, and never guessed. `base_model` is a Hugging Face
+    # repo id; the Ollama tag this node serves is NOT one, so a node that has
+    # not been told its base registers with the field NULL. The gateway reads a
+    # NULL base as "cannot be assigned an adapter" and refuses, which is the
+    # honest answer: it is better than a guessed base producing a build against
+    # weights this machine does not have.
+    parser.add_argument("--base-model", default=None, help="Hugging Face repo id of the weights this node runs (only known after a blend build)")
+    parser.add_argument("--adapter-ids", default=None, help="Comma-separated adapter ids fused into the model this node serves")
+    parser.add_argument("--allow-model", action="append", default=[], metavar="NAME", help="Also answer for this model name (repeatable). For the base a served blend was built from.")
     args = parser.parse_args()
 
     if not args.no_update:
@@ -1022,8 +1033,12 @@ def main() -> None:
     # two routes, and pins the node to the model resolved above -- so Ollama
     # itself never has to be reachable from outside, on either path.
     worker_token = secrets.token_urlsafe(24)
+    # A name identical to the one being served is not an extra -- it would just
+    # make `/v1/models`'s "the one model" claim read as two.
+    extra_models = frozenset(m for m in args.allow_model if m and m != ollama_tag)
     try:
-        worker.serve(worker_token, ollama_tag, port=WORKER_PORT)
+        worker.serve(worker_token, ollama_tag, port=WORKER_PORT,
+                     extra_models=extra_models)
     except OSError as e:
         die_with_fix(
             f"couldn't start the Common worker on port {WORKER_PORT}: {e}",
@@ -1064,6 +1079,22 @@ def main() -> None:
         f"{ollama_tag} running locally via Ollama, contributed by {args.operator}. Free, community-hosted."
     )
 
+    # Validate the two adapter fields here rather than letting the gateway 422.
+    # The limits are the gateway's own (models.NodeCreate), and being rejected
+    # after the tunnel is already open costs the operator a whole join to find
+    # out. Both are optional: a node that has not been told its base sends
+    # NULL, and the gateway treats that as "cannot be assigned an adapter".
+    base_model = (args.base_model or "").strip() or None
+    if base_model and len(base_model) > 128:
+        die_with_fix(f"base model name is too long ({len(base_model)}, max 128)",
+                     "It should be a Hugging Face repo id, e.g. Qwen/Qwen2.5-1.5B-Instruct.")
+    adapter_ids = [a.strip() for a in (args.adapter_ids or "").split(",") if a.strip()] or None
+    for adapter_id in adapter_ids or []:
+        if len(adapter_id) > 64:
+            die_with_fix(f"adapter id is too long: {adapter_id!r} (max 64)",
+                         "Adapter ids are short slugs, e.g. math-12k. Check the record "
+                         "`common adapters build` wrote rather than typing one.")
+
     payload = {
         "name": args.name,
         "operator": args.operator,
@@ -1074,6 +1105,8 @@ def main() -> None:
         "cost_per_1k": args.cost,
         "domain_tags": domain_tags,
         "catalogue_id": catalogue_id,
+        "base_model": base_model,
+        "adapter_ids": adapter_ids,
         # Which program is registering, for the gateway's own reporting
         # (`nodes.client`, migration 008). The gateway also accepts this as the
         # X-Common-Client header, which every request below carries; sending
