@@ -344,12 +344,13 @@ builds the blend on that machine. With `ADAPTERS_MODE` unset the seeder no-ops
 and both endpoints return empty, so the feature is inert until switched on.
 
 This is a capability to *specialise on demand*, **not a claim of better
-answers**. Whether a fused specialist answers better is what
-`experiments/lora-blend` measures; until that holds, the wording stays "can
-build", never "better". The fusion is **per-node and local**: the node's own
-owner runs `ollama create` on their own machine, and there is no route from the
-network to Ollama's management API (the worker 404s `/api/create`). The gateway
-recommends; it never makes a machine load anything.
+answers**. Whether a fused specialist answers better is what the separate
+[`lora-blend`](https://github.com/TheCommonAI/lora-blend) experiment measures;
+until that holds, the wording stays "can build", never "better". The fusion is
+**per-node and local**: the node's own owner runs `ollama create` on their own
+machine, and there is no route from the network to Ollama's management API (the
+worker 404s `/api/create`). The gateway recommends; it never makes a machine
+load anything.
 
 **Still explicitly out of scope:** no DHT/peer-to-peer/consensus, no token or
 incentive mechanism, **no global cross-model Soup of Experts and no shared

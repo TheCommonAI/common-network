@@ -70,13 +70,13 @@
 #
 # --- WHAT HAS ACTUALLY BEEN MEASURED --------------------------------------
 #
-# One thing: experiments/lora-blend, a 50-question maths word-problem
-# experiment blending three of these on Qwen2.5-1.5B-Instruct. Read its README
-# before quoting any number from it. It does *not* establish that a fusion
-# recommended here answers better than the base — the weights it searched for
-# are not the uniform weights this path would use, and it says so itself. The
-# claim this list supports is that the network *can* build a specialist on
-# demand. Not that the specialist is better.
+# One thing: github.com/TheCommonAI/lora-blend, a separate repository (not this
+# one) — a 50-question maths word-problem experiment blending three of these on
+# Qwen2.5-1.5B-Instruct. Read its README before quoting any number from it. It
+# does *not* establish that a fusion recommended here answers better than the
+# base — the weights it searched for are not the uniform weights this path would
+# use, and it says so itself. The claim this list supports is that the network
+# *can* build a specialist on demand. Not that the specialist is better.
 
 base_model: "Qwen/Qwen2.5-1.5B-Instruct"
 

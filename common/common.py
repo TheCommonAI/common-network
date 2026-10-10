@@ -1562,8 +1562,8 @@ def cmd_adapters_build(gateway: str, blend_tag: str, args: argparse.Namespace) -
         print(dim("  Those are different models, and the tag's hash covers the weights, so"))
         print(dim("  a build here would serve something other than what the tag claims."))
         print()
-        print(dim("  fuse them into one GGUF first — experiments/lora-blend in the"))
-        print(dim("  repository does exactly this and documents the arithmetic — then:"))
+        print(dim("  fuse them into one GGUF first — github.com/TheCommonAI/lora-blend"))
+        print(dim("  does exactly this and documents the arithmetic — then:"))
         print(dim(f"    → common adapters build {blend_tag} --from <local base tag> "
                   f"--fused <path.gguf>"))
         sys.exit(1)
@@ -3427,7 +3427,8 @@ def cmd_help(verb: str | None) -> None:
         print(comment("is the only correct path when the plan names more than one."))
         print()
         print(comment("nothing here claims a fused specialist answers better. that is"))
-        print(comment("what experiments/lora-blend measures, and it has not shown it."))
+        print(comment("what github.com/TheCommonAI/lora-blend measures, and it has not"))
+        print(comment("shown it."))
         print(comment("what this does is let the network build a specialist where demand"))
         print(comment("clusters and no node covers -- instead of waiting for a donation."))
         return
