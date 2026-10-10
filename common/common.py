@@ -56,7 +56,11 @@ isolates those cases and breaks each arm down by lane.
 
 "synth" and "map" are recognised but not yet built -- see `common help synth`
 / `common help map`. This CLI checks GitHub for a newer version of itself on
-every run and updates in place (pass --no-update to skip).
+every run and updates in place (pass --no-update to skip). It never overwrites
+a copy that lives in a git checkout -- a clone updates with `git pull`, and
+clobbering someone's working tree is not this function's job. Pass
+--force-update (or COMMON_FORCE_UPDATE=1) to override, which discards local
+changes. An installed copy keeps a .bak of the version it replaced.
 """
 import argparse
 import json
@@ -264,7 +268,32 @@ def http_json(method: str, url: str, body: dict | None = None, headers: dict | N
 
 # --- Self-update (same pattern as join.py/chat.py) ---------------------------
 
-def self_update() -> None:
+def _in_git_work_tree(path: str) -> bool:
+    """Is this file inside a git working tree?
+
+    Two copies of this file exist in the world and they need opposite treatment.
+    An *installed* copy lives under ~/.common-network and nobody edits it: the
+    update channel exists precisely to keep it current. A *checkout* is somebody's
+    work in progress, and overwriting it destroys whatever they were doing.
+
+    Asking git is what tells them apart, and it is the right question for both.
+    Note that "has uncommitted changes" is NOT the right question: a contributor
+    who commits an edit to a branch and then runs the CLI loses that edit from
+    the working tree just the same, and `git status` would call the tree clean.
+
+    False whenever git is absent or the answer is unclear -- so an installed
+    copy, and any machine without git, keeps self-updating exactly as before.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", os.path.dirname(path), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
+
+
+def self_update(force: bool = False) -> None:
     try:
         with urllib.request.urlopen(UPDATE_URL, timeout=5) as resp:
             remote = resp.read()
@@ -296,7 +325,32 @@ def self_update() -> None:
         return
     if remote == local:
         return
+
+    # Never overwrite a checkout. This is the case that lost eight edits in one
+    # run: a local copy that differed from upstream was replaced silently, with
+    # no warning and no backup, the first time the CLI was run from the source
+    # tree. A checkout is managed by git -- `git pull` is how it updates -- and
+    # this function's job is to keep *deployed* copies current.
+    if _in_git_work_tree(local_path) and not force:
+        print(dim("note: this is a git checkout, not an installed copy — not "
+                  "self-updating."), file=sys.stderr)
+        print(comment("your working tree differs from the published version. "
+                      "update it with `git pull`."), file=sys.stderr)
+        print(comment("to update anyway (discarding local changes): "
+                      "COMMON_FORCE_UPDATE=1"), file=sys.stderr)
+        return
+
     print(dim("updating common to the latest version..."))
+    # Keep the outgoing copy. The guard above covers the checkout case, but an
+    # *installed* copy can still be hand-edited by the person who installed it,
+    # and a deployment that silently eats a local fix is the same bug in a
+    # different directory.
+    backup_path = local_path + ".bak"
+    try:
+        with open(backup_path, "wb") as f:
+            f.write(local)
+    except OSError:
+        pass  # a failed backup must not block the update
     try:
         with open(local_path, "wb") as f:
             f.write(remote)
@@ -2882,6 +2936,9 @@ def main() -> None:
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--no-update", action="store_true", default=bool(os.environ.get("COMMON_NO_UPDATE")))
+    parser.add_argument("--force-update", action="store_true",
+                        default=bool(os.environ.get("COMMON_FORCE_UPDATE")),
+                        help="self-update even from a git checkout, discarding local changes")
     # Composition control. Default (unset) sends no header, and the gateway's
     # shipped default is `never` (Alpha: donation platform). --compose opts a
     # request in; --no-compose makes the default explicit — the control arm
@@ -2913,7 +2970,7 @@ def main() -> None:
     _ARGS_NO_COLOR[0] = args.no_color
 
     if not args.no_update:
-        self_update()
+        self_update(force=args.force_update)
 
     if args.version:
         print_wordmark()
