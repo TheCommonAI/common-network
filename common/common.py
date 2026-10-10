@@ -624,7 +624,15 @@ def _ask_local(question: str, model: str | None, as_json: bool, quiet: bool) -> 
     #
     # No gateway_headers here, deliberately: --local promises the prompt never
     # leaves this machine, so nothing about the network is attached to it.
-    body = {"model": chosen, "messages": [{"role": "user", "content": question}], "stream": True}
+    body = {"model": chosen, "messages": [{"role": "user", "content": question}], "stream": True,
+            # Ollama's default is five minutes, so a question asked after a
+            # longer pause pays the full cold load -- ~57s for a 7B on this
+            # laptop, against about a second warm. This path talks to Ollama
+            # directly rather than through the worker (which stamps its own
+            # value), so it has to say so itself. --local is a single-shot
+            # command, so half an hour also means the next `--local` in this
+            # session is warm.
+            "keep_alive": "30m"}
     req = urllib.request.Request(
         f"{ollama_url}/v1/chat/completions",
         data=json.dumps(body).encode(),

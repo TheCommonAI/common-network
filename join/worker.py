@@ -36,6 +36,7 @@ install anything to donate a machine.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import sys
 import threading
@@ -56,12 +57,35 @@ ROUTE_CHAT = "/v1/chat/completions"
 # forever.
 UPSTREAM_TIMEOUT = 120
 
+# How long Ollama should keep this node's model resident between requests.
+#
+# Ollama's own default is five minutes. That is fine for a chat session and
+# wrong for a network, because it means the first question of the day -- or the
+# first after any lull longer than five minutes -- pays the full cold load.
+# Measured on this fleet that is 53-77s to the first token, against roughly one
+# second once the weights are in memory. Nothing in this repository set
+# keep_alive anywhere, so every node was on Ollama's default and every idle node
+# was cold.
+#
+# A machine that has run `common join` has already decided its hardware is for
+# this, so the model stays resident for half an hour of quiet before Ollama
+# reclaims the RAM. Half an hour and not forever: a contributor's laptop is
+# still a laptop, and `-1` (never unload) is a deliberate choice for a dedicated
+# always-on donor rather than a sensible default for someone's Air.
+#
+# Overridable per node with COMMON_KEEP_ALIVE (see main()), and on the Ollama
+# side by OLLAMA_KEEP_ALIVE -- but this is the one the project controls and the
+# one that travels with the node.
+DEFAULT_KEEP_ALIVE = "30m"
+
 
 class WorkerConfig:
-    def __init__(self, token: str, model: str, ollama_url: str = DEFAULT_OLLAMA):
+    def __init__(self, token: str, model: str, ollama_url: str = DEFAULT_OLLAMA,
+                 keep_alive: str = DEFAULT_KEEP_ALIVE):
         self.token = token
         self.model = model
         self.ollama_url = ollama_url.rstrip("/")
+        self.keep_alive = keep_alive
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -191,6 +215,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         body["model"] = self.config.model
 
+        # Stamp the node's own retention policy, overriding whatever the caller
+        # sent -- the same way the model above is overwritten. Ollama restarts
+        # its unload timer on every request, so this has to travel with each one:
+        # setting it once at start-up would still let the model evict five
+        # minutes later, which is the bug being fixed. And the node owns its own
+        # memory, not the client: a request that asked for keep_alive=0 would
+        # otherwise make every caller after it pay a 53s reload.
+        body["keep_alive"] = self.config.keep_alive
+
         self._proxy_chat(body)
 
     def _proxy_chat(self, body: dict) -> None:
@@ -250,20 +283,70 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
 
+def warm_model(model: str, ollama_url: str, keep_alive: str = DEFAULT_KEEP_ALIVE) -> None:
+    """Load the model into memory before any user needs it.
+
+    The cold load is 53-77s to the first token on this fleet and about a second
+    once the weights are resident, so it is paid once per load. There is no
+    reason for a user to be the one who pays it: `common join` already spends
+    tens of seconds coming up, most of it waiting on a tunnel and on
+    registration. Loading the model inside that window moves the cost to the
+    person who chose to donate, at the moment they chose to, and leaves every
+    request after it warm.
+
+    Runs on a background thread so registration is not held up behind it -- the
+    model is loading while the tunnel is being minted. A request that arrives
+    mid-warm-up waits on Ollama's queue exactly as it would have anyway.
+
+    Failure is deliberately silent. If Ollama is not up yet, or this model name
+    is not pulled, the first real request loads it instead -- precisely the
+    behaviour that existed before this function, so there is nothing to report
+    and nothing to break.
+    """
+    req = urllib.request.Request(
+        f"{ollama_url}/v1/chat/completions",
+        data=json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "max_tokens": 1,
+            "keep_alive": keep_alive,
+        }).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT):
+            pass
+    except (urllib.error.URLError, OSError):
+        return
+
+
 def serve(token: str, model: str, port: int = 11435,
-          ollama_url: str = DEFAULT_OLLAMA) -> ThreadingHTTPServer:
+          ollama_url: str = DEFAULT_OLLAMA,
+          keep_alive: str = DEFAULT_KEEP_ALIVE,
+          warm: bool = True) -> ThreadingHTTPServer:
     """Start the worker on a background thread and return the server.
 
     Bound to 0.0.0.0 because the whole point is to be reachable -- by the
     tunnel, or by other machines in LAN mode. What protects it is the token,
     not the bind address.
+
+    `warm=False` skips the background model load: for a caller that is not
+    really serving, and cannot afford an unannounced 53s inference against
+    whatever happens to be behind `ollama_url`. The test suite is the caller
+    that matters -- a warm-up thread firing mid-suite would land an extra
+    request in the stub's hit log and turn a real assertion into a coin toss.
     """
     handler = type("BoundHandler", (Handler,), {
-        "config": WorkerConfig(token, model, ollama_url),
+        "config": WorkerConfig(token, model, ollama_url, keep_alive),
     })
     httpd = ThreadingHTTPServer(("0.0.0.0", port), handler)
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    if warm:
+        threading.Thread(target=warm_model, args=(model, ollama_url, keep_alive),
+                         daemon=True).start()
     return httpd
 
 
@@ -281,10 +364,15 @@ def main() -> int:
     p.add_argument("--model", required=True, help="the one model this node serves")
     p.add_argument("--port", type=int, default=11435)
     p.add_argument("--ollama", default=DEFAULT_OLLAMA)
+    p.add_argument("--keep-alive", default=os.environ.get("COMMON_KEEP_ALIVE", DEFAULT_KEEP_ALIVE),
+                   help="how long Ollama keeps the model resident, e.g. 30m or -1 "
+                        "(default: %(default)s)")
     args = p.parse_args()
 
-    serve(args.token, args.model, args.port, args.ollama)
+    serve(args.token, args.model, args.port, args.ollama, args.keep_alive)
     print(f"common-worker on :{args.port} → {args.ollama} (model: {args.model})")
+    print(f"the model stays loaded for {args.keep_alive} after each request; "
+          f"Ollama unloads it once idle for longer.")
     print("only /v1/models and /v1/chat/completions are reachable; both need the token.")
     try:
         threading.Event().wait()
