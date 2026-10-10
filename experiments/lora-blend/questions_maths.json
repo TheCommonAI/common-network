@@ -1,0 +1,742 @@
+{
+  "_note": "Stage 1 maths set. Every answer is the generator's own exact arithmetic.",
+  "generator": "make_questions.py",
+  "base_seed": 20261010,
+  "items": [
+    {
+      "id": "m001",
+      "family": "unit_price_change",
+      "question": "A shop sells mugs at £0.50 each. Omar buys 5 of them and pays with a £20 note. How much change, in pounds, does Omar receive?",
+      "answer": "17.50",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "cents": 50,
+        "n": 5,
+        "paid_cents": 2000
+      },
+      "held_out": false
+    },
+    {
+      "id": "m002",
+      "family": "percent_discount_tax",
+      "question": "A jacket is priced at £291. In a sale it is discounted by 15%. 20% VAT is then added to the discounted price. What is the final price, in pounds?",
+      "answer": "296.82",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "pounds": 291,
+        "discount_pct": 15,
+        "tax_pct": 20
+      },
+      "held_out": false
+    },
+    {
+      "id": "m003",
+      "family": "rate_time_distance",
+      "question": "A train travels at a steady 100 km/h for 1 hour and 5 minutes. How far does it travel, in kilometres?",
+      "answer": "108.33",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "speed": 100,
+        "hours": 1,
+        "minutes": 5
+      },
+      "held_out": false
+    },
+    {
+      "id": "m004",
+      "family": "average",
+      "question": "Aisha scores 81, 73, 85, 89 and 77 in five tests. What is the average score?",
+      "answer": "81",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "scores": [
+          81,
+          73,
+          85,
+          89,
+          77
+        ]
+      },
+      "held_out": false
+    },
+    {
+      "id": "m005",
+      "family": "ratio_sharing",
+      "question": "£182 is shared between three people in the ratio 6:5:2. How much, in pounds, does the first person receive?",
+      "answer": "84",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "parts": [
+          6,
+          5,
+          2
+        ],
+        "total": 182
+      },
+      "held_out": false
+    },
+    {
+      "id": "m006",
+      "family": "compound_growth",
+      "question": "A sum of £3200 is invested at 3% compound interest per year. What is its value after 3 years, in pounds?",
+      "answer": "3496.73",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "principal": 3200,
+        "rate_pct": 3,
+        "years": 3
+      },
+      "held_out": false
+    },
+    {
+      "id": "m007",
+      "family": "work_rate",
+      "question": "One machine can complete a job in 5 hours, and a second machine can complete the same job in 14 hours. Working together, how long do they take? Give your answer in hours.",
+      "answer": "3.68",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "a": 5,
+        "b": 14
+      },
+      "held_out": false
+    },
+    {
+      "id": "m008",
+      "family": "pct_increase_then_decrease",
+      "question": "A population of 3750 increases by 10% in one year and then decreases by 25% the next year. What is the population after the two years? Give your answer to the nearest whole number.",
+      "answer": "3094",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "value": 3750,
+        "up_pct": 10,
+        "down_pct": 25
+      },
+      "held_out": false
+    },
+    {
+      "id": "m009",
+      "family": "mixture",
+      "question": "8 litres of a solution that is 10% salt is mixed with 12 litres of a solution that is 85% salt. What percentage of the resulting mixture is salt? Give your answer to 2 decimal places.",
+      "answer": "55.00",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "l1": 8,
+        "l2": 12,
+        "c1": 10,
+        "c2": 85
+      },
+      "held_out": false
+    },
+    {
+      "id": "m010",
+      "family": "series_sum",
+      "question": "What is the sum of the first 15 terms of an arithmetic sequence whose first term is 20 and whose common difference is 7?",
+      "answer": "1035",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "a": 20,
+        "d": 7,
+        "n": 15
+      },
+      "held_out": false
+    },
+    {
+      "id": "m011",
+      "family": "unit_price_change",
+      "question": "A shop sells markers at £4.80 each. Omar buys 7 of them and pays with a £50 note. How much change, in pounds, does Omar receive?",
+      "answer": "16.40",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "cents": 480,
+        "n": 7,
+        "paid_cents": 5000
+      },
+      "held_out": false
+    },
+    {
+      "id": "m012",
+      "family": "percent_discount_tax",
+      "question": "A jacket is priced at £213. In a sale it is discounted by 15%. 5% VAT is then added to the discounted price. What is the final price, in pounds?",
+      "answer": "190.10",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "pounds": 213,
+        "discount_pct": 15,
+        "tax_pct": 5
+      },
+      "held_out": false
+    },
+    {
+      "id": "m013",
+      "family": "rate_time_distance",
+      "question": "A train travels at a steady 35 km/h for 1 hour and 50 minutes. How far does it travel, in kilometres?",
+      "answer": "64.17",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "speed": 35,
+        "hours": 1,
+        "minutes": 50
+      },
+      "held_out": false
+    },
+    {
+      "id": "m014",
+      "family": "average",
+      "question": "Alex scores 45, 53, 53, 56 and 53 in five tests. What is the average score?",
+      "answer": "52",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "scores": [
+          45,
+          53,
+          53,
+          56,
+          53
+        ]
+      },
+      "held_out": false
+    },
+    {
+      "id": "m015",
+      "family": "ratio_sharing",
+      "question": "£592 is shared between three people in the ratio 7:4:5. How much, in pounds, does the first person receive?",
+      "answer": "259",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "parts": [
+          7,
+          4,
+          5
+        ],
+        "total": 592
+      },
+      "held_out": false
+    },
+    {
+      "id": "m016",
+      "family": "compound_growth",
+      "question": "A sum of £6600 is invested at 2% compound interest per year. What is its value after 2 years, in pounds?",
+      "answer": "6866.64",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "principal": 6600,
+        "rate_pct": 2,
+        "years": 2
+      },
+      "held_out": false
+    },
+    {
+      "id": "m017",
+      "family": "work_rate",
+      "question": "One machine can complete a job in 11 hours, and a second machine can complete the same job in 11 hours. Working together, how long do they take? Give your answer in hours.",
+      "answer": "5.50",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "a": 11,
+        "b": 11
+      },
+      "held_out": false
+    },
+    {
+      "id": "m018",
+      "family": "pct_increase_then_decrease",
+      "question": "A population of 2500 increases by 40% in one year and then decreases by 10% the next year. What is the population after the two years? Give your answer to the nearest whole number.",
+      "answer": "3150",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "value": 2500,
+        "up_pct": 40,
+        "down_pct": 10
+      },
+      "held_out": false
+    },
+    {
+      "id": "m019",
+      "family": "mixture",
+      "question": "18 litres of a solution that is 10% salt is mixed with 19 litres of a solution that is 65% salt. What percentage of the resulting mixture is salt? Give your answer to 2 decimal places.",
+      "answer": "38.24",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "l1": 18,
+        "l2": 19,
+        "c1": 10,
+        "c2": 65
+      },
+      "held_out": false
+    },
+    {
+      "id": "m020",
+      "family": "series_sum",
+      "question": "What is the sum of the first 26 terms of an arithmetic sequence whose first term is 8 and whose common difference is 9?",
+      "answer": "3133",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "a": 8,
+        "d": 9,
+        "n": 26
+      },
+      "held_out": false
+    },
+    {
+      "id": "m021",
+      "family": "unit_price_change",
+      "question": "A shop sells notebooks at £1.50 each. Aisha buys 4 of them and pays with a £10 note. How much change, in pounds, does Aisha receive?",
+      "answer": "4.00",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "cents": 150,
+        "n": 4,
+        "paid_cents": 1000
+      },
+      "held_out": false
+    },
+    {
+      "id": "m022",
+      "family": "percent_discount_tax",
+      "question": "A jacket is priced at £60. In a sale it is discounted by 15%. 20% VAT is then added to the discounted price. What is the final price, in pounds?",
+      "answer": "61.20",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "pounds": 60,
+        "discount_pct": 15,
+        "tax_pct": 20
+      },
+      "held_out": false
+    },
+    {
+      "id": "m023",
+      "family": "rate_time_distance",
+      "question": "A train travels at a steady 115 km/h for 6 hours and 10 minutes. How far does it travel, in kilometres?",
+      "answer": "709.17",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "speed": 115,
+        "hours": 6,
+        "minutes": 10
+      },
+      "held_out": false
+    },
+    {
+      "id": "m024",
+      "family": "average",
+      "question": "Nina scores 77, 92, 76, 74 and 81 in five tests. What is the average score?",
+      "answer": "80",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "scores": [
+          77,
+          92,
+          76,
+          74,
+          81
+        ]
+      },
+      "held_out": false
+    },
+    {
+      "id": "m025",
+      "family": "ratio_sharing",
+      "question": "£475 is shared between three people in the ratio 3:6:10. How much, in pounds, does the first person receive?",
+      "answer": "75",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "parts": [
+          3,
+          6,
+          10
+        ],
+        "total": 475
+      },
+      "held_out": false
+    },
+    {
+      "id": "m026",
+      "family": "compound_growth",
+      "question": "A sum of £800 is invested at 6% compound interest per year. What is its value after 2 years, in pounds?",
+      "answer": "898.88",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "principal": 800,
+        "rate_pct": 6,
+        "years": 2
+      },
+      "held_out": false
+    },
+    {
+      "id": "m027",
+      "family": "work_rate",
+      "question": "One machine can complete a job in 13 hours, and a second machine can complete the same job in 13 hours. Working together, how long do they take? Give your answer in hours.",
+      "answer": "6.50",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "a": 13,
+        "b": 13
+      },
+      "held_out": false
+    },
+    {
+      "id": "m028",
+      "family": "pct_increase_then_decrease",
+      "question": "A population of 6400 increases by 30% in one year and then decreases by 30% the next year. What is the population after the two years? Give your answer to the nearest whole number.",
+      "answer": "5824",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "value": 6400,
+        "up_pct": 30,
+        "down_pct": 30
+      },
+      "held_out": false
+    },
+    {
+      "id": "m029",
+      "family": "mixture",
+      "question": "3 litres of a solution that is 25% salt is mixed with 10 litres of a solution that is 60% salt. What percentage of the resulting mixture is salt? Give your answer to 2 decimal places.",
+      "answer": "51.92",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "l1": 3,
+        "l2": 10,
+        "c1": 25,
+        "c2": 60
+      },
+      "held_out": false
+    },
+    {
+      "id": "m030",
+      "family": "series_sum",
+      "question": "What is the sum of the first 30 terms of an arithmetic sequence whose first term is 10 and whose common difference is 2?",
+      "answer": "1170",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "a": 10,
+        "d": 2,
+        "n": 30
+      },
+      "held_out": false
+    },
+    {
+      "id": "m031",
+      "family": "unit_price_change",
+      "question": "A shop sells pens at £1.65 each. Nina buys 7 of them and pays with a £20 note. How much change, in pounds, does Nina receive?",
+      "answer": "8.45",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "cents": 165,
+        "n": 7,
+        "paid_cents": 2000
+      },
+      "held_out": false
+    },
+    {
+      "id": "m032",
+      "family": "percent_discount_tax",
+      "question": "A jacket is priced at £59. In a sale it is discounted by 30%. 5% VAT is then added to the discounted price. What is the final price, in pounds?",
+      "answer": "43.37",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "pounds": 59,
+        "discount_pct": 30,
+        "tax_pct": 5
+      },
+      "held_out": false
+    },
+    {
+      "id": "m033",
+      "family": "rate_time_distance",
+      "question": "A train travels at a steady 70 km/h for 4 hours and 5 minutes. How far does it travel, in kilometres?",
+      "answer": "285.83",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "speed": 70,
+        "hours": 4,
+        "minutes": 5
+      },
+      "held_out": false
+    },
+    {
+      "id": "m034",
+      "family": "average",
+      "question": "Aisha scores 62, 70, 82, 67 and 69 in five tests. What is the average score?",
+      "answer": "70",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "scores": [
+          62,
+          70,
+          82,
+          67,
+          69
+        ]
+      },
+      "held_out": false
+    },
+    {
+      "id": "m035",
+      "family": "ratio_sharing",
+      "question": "£210 is shared between three people in the ratio 5:3:7. How much, in pounds, does the first person receive?",
+      "answer": "70",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "parts": [
+          5,
+          3,
+          7
+        ],
+        "total": 210
+      },
+      "held_out": false
+    },
+    {
+      "id": "m036",
+      "family": "compound_growth",
+      "question": "A sum of £7200 is invested at 5% compound interest per year. What is its value after 3 years, in pounds?",
+      "answer": "8334.90",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "principal": 7200,
+        "rate_pct": 5,
+        "years": 3
+      },
+      "held_out": false
+    },
+    {
+      "id": "m037",
+      "family": "work_rate",
+      "question": "One machine can complete a job in 9 hours, and a second machine can complete the same job in 11 hours. Working together, how long do they take? Give your answer in hours.",
+      "answer": "4.95",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "a": 9,
+        "b": 11
+      },
+      "held_out": false
+    },
+    {
+      "id": "m038",
+      "family": "pct_increase_then_decrease",
+      "question": "A population of 6850 increases by 30% in one year and then decreases by 30% the next year. What is the population after the two years? Give your answer to the nearest whole number.",
+      "answer": "6234",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "value": 6850,
+        "up_pct": 30,
+        "down_pct": 30
+      },
+      "held_out": false
+    },
+    {
+      "id": "m039",
+      "family": "mixture",
+      "question": "19 litres of a solution that is 5% salt is mixed with 18 litres of a solution that is 65% salt. What percentage of the resulting mixture is salt? Give your answer to 2 decimal places.",
+      "answer": "34.19",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "l1": 19,
+        "l2": 18,
+        "c1": 5,
+        "c2": 65
+      },
+      "held_out": false
+    },
+    {
+      "id": "m040",
+      "family": "series_sum",
+      "question": "What is the sum of the first 26 terms of an arithmetic sequence whose first term is 6 and whose common difference is 2?",
+      "answer": "806",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "a": 6,
+        "d": 2,
+        "n": 26
+      },
+      "held_out": false
+    },
+    {
+      "id": "m041",
+      "family": "unit_price_change",
+      "question": "A shop sells notebooks at £0.70 each. Omar buys 7 of them and pays with a £10 note. How much change, in pounds, does Omar receive?",
+      "answer": "5.10",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "cents": 70,
+        "n": 7,
+        "paid_cents": 1000
+      },
+      "held_out": false
+    },
+    {
+      "id": "m042",
+      "family": "percent_discount_tax",
+      "question": "A jacket is priced at £383. In a sale it is discounted by 15%. 10% VAT is then added to the discounted price. What is the final price, in pounds?",
+      "answer": "358.11",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "pounds": 383,
+        "discount_pct": 15,
+        "tax_pct": 10
+      },
+      "held_out": false
+    },
+    {
+      "id": "m043",
+      "family": "rate_time_distance",
+      "question": "A train travels at a steady 60 km/h for 2 hours and 50 minutes. How far does it travel, in kilometres?",
+      "answer": "170.00",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "speed": 60,
+        "hours": 2,
+        "minutes": 50
+      },
+      "held_out": false
+    },
+    {
+      "id": "m044",
+      "family": "average",
+      "question": "Mei scores 79, 63, 60, 63 and 80 in five tests. What is the average score?",
+      "answer": "69",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "scores": [
+          79,
+          63,
+          60,
+          63,
+          80
+        ]
+      },
+      "held_out": false
+    },
+    {
+      "id": "m045",
+      "family": "ratio_sharing",
+      "question": "£384 is shared between three people in the ratio 5:4:7. How much, in pounds, does the first person receive?",
+      "answer": "120",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "parts": [
+          5,
+          4,
+          7
+        ],
+        "total": 384
+      },
+      "held_out": false
+    },
+    {
+      "id": "m046",
+      "family": "compound_growth",
+      "question": "A sum of £7800 is invested at 8% compound interest per year. What is its value after 4 years, in pounds?",
+      "answer": "10611.81",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "principal": 7800,
+        "rate_pct": 8,
+        "years": 4
+      },
+      "held_out": false
+    },
+    {
+      "id": "m047",
+      "family": "work_rate",
+      "question": "One machine can complete a job in 7 hours, and a second machine can complete the same job in 10 hours. Working together, how long do they take? Give your answer in hours.",
+      "answer": "4.12",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "a": 7,
+        "b": 10
+      },
+      "held_out": false
+    },
+    {
+      "id": "m048",
+      "family": "pct_increase_then_decrease",
+      "question": "A population of 4400 increases by 30% in one year and then decreases by 15% the next year. What is the population after the two years? Give your answer to the nearest whole number.",
+      "answer": "4862",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "value": 4400,
+        "up_pct": 30,
+        "down_pct": 15
+      },
+      "held_out": false
+    },
+    {
+      "id": "m049",
+      "family": "mixture",
+      "question": "6 litres of a solution that is 10% salt is mixed with 5 litres of a solution that is 65% salt. What percentage of the resulting mixture is salt? Give your answer to 2 decimal places.",
+      "answer": "35.00",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "l1": 6,
+        "l2": 5,
+        "c1": 10,
+        "c2": 65
+      },
+      "held_out": false
+    },
+    {
+      "id": "m050",
+      "family": "series_sum",
+      "question": "What is the sum of the first 28 terms of an arithmetic sequence whose first term is 16 and whose common difference is 6?",
+      "answer": "2716",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "a": 16,
+        "d": 6,
+        "n": 28
+      },
+      "held_out": false
+    }
+  ]
+}

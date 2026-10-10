@@ -1,0 +1,104 @@
+{
+  "_comment": [
+    "Public LoRA adapters for Qwen/Qwen2.5-1.5B-Instruct, verified 2026-10-10 by",
+    "reading each repo's adapter_config.json from the Hugging Face API.",
+    "",
+    "The 'blendable' flag is decided by a single thing: whether the adapter can be",
+    "averaged with the others in factor space. LoraHub-style blending sums the A and",
+    "B matrices across adapters and multiplies the sums, so every adapter in a blend",
+    "must agree on r, lora_alpha and target_modules. Six of the seven agree exactly.",
+    "The medical adapter does not and is therefore evaluated only as a single adapter.",
+    "",
+    "Revisions are pinned so a re-run months from now loads the same bytes these",
+    "numbers came from. A 'main' that has moved on would silently change the result."
+  ],
+  "base_model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "adapters": [
+    {
+      "id": "math-12k",
+      "hf_repo": "mdhamidhosen/baamr-math-qwen2.5-1.5b-lora-12k",
+      "revision": "598b9d6deb23f2179c890c541aa1093da32daf7e",
+      "domain": "maths",
+      "weight_file": "adapter_model.safetensors",
+      "size_mb": 70.5,
+      "r": 16,
+      "lora_alpha": 32,
+      "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+      "blendable": true
+    },
+    {
+      "id": "math-pilot",
+      "hf_repo": "mdhamidhosen/baamr-math-qwen2.5-1.5b-lora-pilot-577",
+      "revision": "acbac01fd45c0317b1b2bc3bec9dd65a4e75a9f7",
+      "domain": "maths",
+      "weight_file": "adapter_model.safetensors",
+      "size_mb": 70.5,
+      "r": 16,
+      "lora_alpha": 32,
+      "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+      "blendable": true
+    },
+    {
+      "id": "math-adaanchor",
+      "hf_repo": "disha20041005/adaanchor-qwen2.5-1.5b-lora-math-k2",
+      "revision": "0a84f6b69e7e9ec00a4d159e8d4e752b20425c76",
+      "domain": "maths",
+      "weight_file": "adapter_model.bin",
+      "size_mb": 70.6,
+      "r": 16,
+      "lora_alpha": 32,
+      "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+      "blendable": true,
+      "_note": "ships a pickle (adapter_model.bin), not safetensors. Loaded with torch.load(weights_only=True) and dropped to a single-adapter-only result if that fails."
+    },
+    {
+      "id": "code-r16",
+      "hf_repo": "bharati2324/Qwen2.5-1.5B-Instruct-Code-LoRA-r16",
+      "revision": "57a4a23b934ea6c3f25615e13a6979d55c48fd68",
+      "domain": "code",
+      "weight_file": "adapter_model.safetensors",
+      "size_mb": 70.5,
+      "r": 16,
+      "lora_alpha": 32,
+      "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+      "blendable": true
+    },
+    {
+      "id": "code-r16v3",
+      "hf_repo": "bharati2324/Qwen2.5-1.5B-Instruct-Code-LoRA-r16v3",
+      "revision": "15e9e3e96aba2d6a23bdfd5606be43862488fac3",
+      "domain": "code",
+      "weight_file": "adapter_model.safetensors",
+      "size_mb": 70.5,
+      "r": 16,
+      "lora_alpha": 32,
+      "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+      "blendable": true
+    },
+    {
+      "id": "reasoning",
+      "hf_repo": "DarkyMan/Qwen2.5-1.5B-Opus46-Reasoning-LoRA",
+      "revision": "5a30ed71d72acde650766e57052b3b864c367555",
+      "domain": "reasoning",
+      "weight_file": "adapter_model.safetensors",
+      "size_mb": 70.5,
+      "r": 16,
+      "lora_alpha": 32,
+      "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+      "blendable": true
+    },
+    {
+      "id": "medical",
+      "hf_repo": "Arthur-77/QWEN2.5-1.5B-medical-finetuned",
+      "revision": "3ff4b05835d9d0af645f2a4e9c33edeb149bcef8",
+      "domain": "medical",
+      "weight_file": "adapter_model.safetensors",
+      "size_mb": 66.5,
+      "r": 64,
+      "lora_alpha": 16,
+      "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+      "blendable": false,
+      "_note": "r=64, alpha=16, 4 targets. Cannot be averaged with the other six; single-adapter evaluation only."
+    }
+  ]
+}

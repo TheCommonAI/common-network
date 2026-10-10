@@ -1,0 +1,296 @@
+{
+  "_note": "Held out for the blend-weight search only. Never scored.",
+  "generator": "make_questions.py",
+  "base_seed": 20261010,
+  "items": [
+    {
+      "id": "h001",
+      "family": "unit_price_change",
+      "question": "A shop sells pencils at £2.45 each. Aisha buys 4 of them and pays with a £50 note. How much change, in pounds, does Aisha receive?",
+      "answer": "40.20",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "cents": 245,
+        "n": 4,
+        "paid_cents": 5000
+      },
+      "held_out": true
+    },
+    {
+      "id": "h002",
+      "family": "percent_discount_tax",
+      "question": "A jacket is priced at £93. In a sale it is discounted by 25%. 15% VAT is then added to the discounted price. What is the final price, in pounds?",
+      "answer": "80.21",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "pounds": 93,
+        "discount_pct": 25,
+        "tax_pct": 15
+      },
+      "held_out": true
+    },
+    {
+      "id": "h003",
+      "family": "rate_time_distance",
+      "question": "A train travels at a steady 60 km/h for 4 hours and 30 minutes. How far does it travel, in kilometres?",
+      "answer": "270.00",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "speed": 60,
+        "hours": 4,
+        "minutes": 30
+      },
+      "held_out": true
+    },
+    {
+      "id": "h004",
+      "family": "average",
+      "question": "Sam scores 47, 50, 65, 62 and 61 in five tests. What is the average score?",
+      "answer": "57",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "scores": [
+          47,
+          50,
+          65,
+          62,
+          61
+        ]
+      },
+      "held_out": true
+    },
+    {
+      "id": "h005",
+      "family": "ratio_sharing",
+      "question": "£224 is shared between three people in the ratio 4:1:2. How much, in pounds, does the first person receive?",
+      "answer": "128",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "parts": [
+          4,
+          1,
+          2
+        ],
+        "total": 224
+      },
+      "held_out": true
+    },
+    {
+      "id": "h006",
+      "family": "compound_growth",
+      "question": "A sum of £6200 is invested at 6% compound interest per year. What is its value after 4 years, in pounds?",
+      "answer": "7827.36",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "principal": 6200,
+        "rate_pct": 6,
+        "years": 4
+      },
+      "held_out": true
+    },
+    {
+      "id": "h007",
+      "family": "work_rate",
+      "question": "One machine can complete a job in 6 hours, and a second machine can complete the same job in 10 hours. Working together, how long do they take? Give your answer in hours.",
+      "answer": "3.75",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "a": 6,
+        "b": 10
+      },
+      "held_out": true
+    },
+    {
+      "id": "h008",
+      "family": "pct_increase_then_decrease",
+      "question": "A population of 700 increases by 20% in one year and then decreases by 15% the next year. What is the population after the two years? Give your answer to the nearest whole number.",
+      "answer": "714",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "value": 700,
+        "up_pct": 20,
+        "down_pct": 15
+      },
+      "held_out": true
+    },
+    {
+      "id": "h009",
+      "family": "mixture",
+      "question": "19 litres of a solution that is 35% salt is mixed with 7 litres of a solution that is 90% salt. What percentage of the resulting mixture is salt? Give your answer to 2 decimal places.",
+      "answer": "49.81",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "l1": 19,
+        "l2": 7,
+        "c1": 35,
+        "c2": 90
+      },
+      "held_out": true
+    },
+    {
+      "id": "h010",
+      "family": "series_sum",
+      "question": "What is the sum of the first 19 terms of an arithmetic sequence whose first term is 8 and whose common difference is 7?",
+      "answer": "1349",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "a": 8,
+        "d": 7,
+        "n": 19
+      },
+      "held_out": true
+    },
+    {
+      "id": "h011",
+      "family": "unit_price_change",
+      "question": "A shop sells pens at £0.45 each. Nina buys 6 of them and pays with a £5 note. How much change, in pounds, does Nina receive?",
+      "answer": "2.30",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "cents": 45,
+        "n": 6,
+        "paid_cents": 500
+      },
+      "held_out": true
+    },
+    {
+      "id": "h012",
+      "family": "percent_discount_tax",
+      "question": "A jacket is priced at £386. In a sale it is discounted by 10%. 10% VAT is then added to the discounted price. What is the final price, in pounds?",
+      "answer": "382.14",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "pounds": 386,
+        "discount_pct": 10,
+        "tax_pct": 10
+      },
+      "held_out": true
+    },
+    {
+      "id": "h013",
+      "family": "rate_time_distance",
+      "question": "A train travels at a steady 85 km/h for 5 hours and 45 minutes. How far does it travel, in kilometres?",
+      "answer": "488.75",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "speed": 85,
+        "hours": 5,
+        "minutes": 45
+      },
+      "held_out": true
+    },
+    {
+      "id": "h014",
+      "family": "average",
+      "question": "Aisha scores 65, 50, 62, 56 and 62 in five tests. What is the average score?",
+      "answer": "59",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "scores": [
+          65,
+          50,
+          62,
+          56,
+          62
+        ]
+      },
+      "held_out": true
+    },
+    {
+      "id": "h015",
+      "family": "ratio_sharing",
+      "question": "£60 is shared between three people in the ratio 7:4:1. How much, in pounds, does the first person receive?",
+      "answer": "35",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "parts": [
+          7,
+          4,
+          1
+        ],
+        "total": 60
+      },
+      "held_out": true
+    },
+    {
+      "id": "h016",
+      "family": "compound_growth",
+      "question": "A sum of £6000 is invested at 2% compound interest per year. What is its value after 3 years, in pounds?",
+      "answer": "6367.25",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "principal": 6000,
+        "rate_pct": 2,
+        "years": 3
+      },
+      "held_out": true
+    },
+    {
+      "id": "h017",
+      "family": "work_rate",
+      "question": "One machine can complete a job in 10 hours, and a second machine can complete the same job in 8 hours. Working together, how long do they take? Give your answer in hours.",
+      "answer": "4.44",
+      "answer_type": "number",
+      "places": 2,
+      "params": {
+        "a": 10,
+        "b": 8
+      },
+      "held_out": true
+    },
+    {
+      "id": "h018",
+      "family": "pct_increase_then_decrease",
+      "question": "A population of 4850 increases by 40% in one year and then decreases by 15% the next year. What is the population after the two years? Give your answer to the nearest whole number.",
+      "answer": "5772",
+      "answer_type": "number",
+      "places": 0,
+      "params": {
+        "value": 4850,
+        "up_pct": 40,
+        "down_pct": 15
+      },
+      "held_out": true
+    },
+    {
+      "id": "h019",
+      "family": "element_symbol",
+      "question": "What is the chemical symbol for the element Tellurium?",
+      "answer": "Te",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Tellurium"
+      },
+      "held_out": true
+    },
+    {
+      "id": "h020",
+      "family": "element_atomic_number",
+      "question": "What is the atomic number of the element Gold?",
+      "answer": "79",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Gold"
+      },
+      "held_out": true
+    }
+  ]
+}

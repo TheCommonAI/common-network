@@ -1,0 +1,629 @@
+{
+  "_note": "Stage 1 control set. Every answer is a lookup in a table in make_questions.py.",
+  "generator": "make_questions.py",
+  "base_seed": 20261010,
+  "items": [
+    {
+      "id": "c001",
+      "family": "element_symbol",
+      "question": "What is the chemical symbol for the element Technetium?",
+      "answer": "Tc",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Technetium"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c002",
+      "family": "element_atomic_number",
+      "question": "What is the atomic number of the element Molybdenum?",
+      "answer": "42",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Molybdenum"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c003",
+      "family": "country_capital",
+      "question": "What is the capital city of Hungary?",
+      "answer": "Budapest",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Hungary"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c004",
+      "family": "country_currency",
+      "question": "What is the official currency of Russia?",
+      "answer": "Russian ruble",
+      "answer_type": "text",
+      "aliases": [
+        "ruble",
+        "rouble",
+        "RUB"
+      ],
+      "params": {
+        "key": "Russia"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c005",
+      "family": "country_continent",
+      "question": "On which continent is Sweden?",
+      "answer": "Europe",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Sweden"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c006",
+      "family": "si_unit",
+      "question": "What is the SI unit of voltage?",
+      "answer": "volt",
+      "answer_type": "text",
+      "aliases": [
+        "V"
+      ],
+      "params": {
+        "key": "voltage"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c007",
+      "family": "planet_order",
+      "question": "Which planet is number 4 counting outward from the Sun?",
+      "answer": "Mars",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Mars"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c008",
+      "family": "compound_formula",
+      "question": "What is the chemical formula for water?",
+      "answer": "H2O",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "water"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c009",
+      "family": "element_symbol",
+      "question": "What is the chemical symbol for the element Molybdenum?",
+      "answer": "Mo",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Molybdenum"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c010",
+      "family": "element_atomic_number",
+      "question": "What is the atomic number of the element Arsenic?",
+      "answer": "33",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Arsenic"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c011",
+      "family": "country_capital",
+      "question": "What is the capital city of Greece?",
+      "answer": "Athens",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Greece"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c012",
+      "family": "country_currency",
+      "question": "What is the official currency of Mexico?",
+      "answer": "Mexican peso",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Mexico"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c013",
+      "family": "country_continent",
+      "question": "On which continent is Austria?",
+      "answer": "Europe",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Austria"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c014",
+      "family": "si_unit",
+      "question": "What is the SI unit of mass?",
+      "answer": "kilogram",
+      "answer_type": "text",
+      "aliases": [
+        "kg",
+        "kilogramme"
+      ],
+      "params": {
+        "key": "mass"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c015",
+      "family": "planet_order",
+      "question": "Which planet is number 3 counting outward from the Sun?",
+      "answer": "Earth",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Earth"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c016",
+      "family": "compound_formula",
+      "question": "What is the chemical formula for ethanol?",
+      "answer": "C2H5OH",
+      "answer_type": "text",
+      "aliases": [
+        "C2H6O",
+        "CH3CH2OH"
+      ],
+      "params": {
+        "key": "ethanol"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c017",
+      "family": "element_symbol",
+      "question": "What is the chemical symbol for the element Radium?",
+      "answer": "Ra",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Radium"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c018",
+      "family": "element_atomic_number",
+      "question": "What is the atomic number of the element Selenium?",
+      "answer": "34",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Selenium"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c019",
+      "family": "country_capital",
+      "question": "What is the capital city of Chile?",
+      "answer": "Santiago",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Chile"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c020",
+      "family": "country_currency",
+      "question": "What is the official currency of France?",
+      "answer": "euro",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "France"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c021",
+      "family": "country_continent",
+      "question": "On which continent is Hungary?",
+      "answer": "Europe",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Hungary"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c022",
+      "family": "si_unit",
+      "question": "What is the SI unit of capacitance?",
+      "answer": "farad",
+      "answer_type": "text",
+      "aliases": [
+        "F"
+      ],
+      "params": {
+        "key": "capacitance"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c023",
+      "family": "planet_order",
+      "question": "Which planet is number 6 counting outward from the Sun?",
+      "answer": "Saturn",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Saturn"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c024",
+      "family": "compound_formula",
+      "question": "What is the chemical formula for carbon monoxide?",
+      "answer": "CO",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "carbon monoxide"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c025",
+      "family": "element_symbol",
+      "question": "What is the chemical symbol for the element Germanium?",
+      "answer": "Ge",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Germanium"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c026",
+      "family": "element_atomic_number",
+      "question": "What is the atomic number of the element Ruthenium?",
+      "answer": "44",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Ruthenium"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c027",
+      "family": "country_capital",
+      "question": "What is the capital city of Kenya?",
+      "answer": "Nairobi",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Kenya"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c028",
+      "family": "country_currency",
+      "question": "What is the official currency of Vietnam?",
+      "answer": "Vietnamese dong",
+      "answer_type": "text",
+      "aliases": [
+        "dong",
+        "đồng",
+        "VND"
+      ],
+      "params": {
+        "key": "Vietnam"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c029",
+      "family": "country_continent",
+      "question": "On which continent is Thailand?",
+      "answer": "Asia",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Thailand"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c030",
+      "family": "si_unit",
+      "question": "What is the SI unit of magnetic flux?",
+      "answer": "weber",
+      "answer_type": "text",
+      "aliases": [
+        "Wb"
+      ],
+      "params": {
+        "key": "magnetic flux"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c031",
+      "family": "planet_order",
+      "question": "Which planet is number 5 counting outward from the Sun?",
+      "answer": "Jupiter",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Jupiter"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c032",
+      "family": "compound_formula",
+      "question": "What is the chemical formula for nitrogen dioxide?",
+      "answer": "NO2",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "nitrogen dioxide"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c033",
+      "family": "element_symbol",
+      "question": "What is the chemical symbol for the element Thallium?",
+      "answer": "Tl",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Thallium"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c034",
+      "family": "element_atomic_number",
+      "question": "What is the atomic number of the element Bromine?",
+      "answer": "35",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Bromine"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c035",
+      "family": "country_capital",
+      "question": "What is the capital city of Nigeria?",
+      "answer": "Abuja",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Nigeria"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c036",
+      "family": "country_currency",
+      "question": "What is the official currency of Egypt?",
+      "answer": "Egyptian pound",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Egypt"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c037",
+      "family": "country_continent",
+      "question": "On which continent is Ghana?",
+      "answer": "Africa",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Ghana"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c038",
+      "family": "si_unit",
+      "question": "What is the SI unit of luminous intensity?",
+      "answer": "candela",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "luminous intensity"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c039",
+      "family": "planet_order",
+      "question": "Which planet is number 2 counting outward from the Sun?",
+      "answer": "Venus",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Venus"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c040",
+      "family": "compound_formula",
+      "question": "What is the chemical formula for nitric acid?",
+      "answer": "HNO3",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "nitric acid"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c041",
+      "family": "element_symbol",
+      "question": "What is the chemical symbol for the element Palladium?",
+      "answer": "Pd",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Palladium"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c042",
+      "family": "element_atomic_number",
+      "question": "What is the atomic number of the element Platinum?",
+      "answer": "78",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Platinum"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c043",
+      "family": "country_capital",
+      "question": "What is the capital city of Poland?",
+      "answer": "Warsaw",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Poland"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c044",
+      "family": "country_currency",
+      "question": "What is the official currency of South Korea?",
+      "answer": "South Korean won",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "South Korea"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c045",
+      "family": "country_continent",
+      "question": "On which continent is Ukraine?",
+      "answer": "Europe",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Ukraine"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c046",
+      "family": "si_unit",
+      "question": "What is the SI unit of frequency?",
+      "answer": "hertz",
+      "answer_type": "text",
+      "aliases": [
+        "Hz"
+      ],
+      "params": {
+        "key": "frequency"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c047",
+      "family": "planet_order",
+      "question": "Which planet is number 8 counting outward from the Sun?",
+      "answer": "Neptune",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Neptune"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c048",
+      "family": "compound_formula",
+      "question": "What is the chemical formula for hydrogen peroxide?",
+      "answer": "H2O2",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "hydrogen peroxide"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c049",
+      "family": "element_symbol",
+      "question": "What is the chemical symbol for the element Silicon?",
+      "answer": "Si",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Silicon"
+      },
+      "held_out": false
+    },
+    {
+      "id": "c050",
+      "family": "element_atomic_number",
+      "question": "What is the atomic number of the element Technetium?",
+      "answer": "43",
+      "answer_type": "text",
+      "aliases": [],
+      "params": {
+        "key": "Technetium"
+      },
+      "held_out": false
+    }
+  ]
+}

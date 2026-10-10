@@ -1,0 +1,27 @@
+# Stage 1 dependencies.
+#
+# Deliberately short. The one design decision that shapes this file is that the
+# blend path uses plain torch + safetensors rather than PEFT:
+#
+#   An adapter is two small matrices per target module, and applying one is
+#   W_eff = W + (alpha/r) * B @ A. A LoraHub blend is that same expression with B
+#   and A replaced by the weighted sums of B and A across adapters. So blending is
+#   tensor arithmetic, and PEFT is not needed to do it -- nor to apply the result.
+#
+# That matters because transformers is at 5.8.0 here, a new major version, and peft
+# is the dependency most likely to break against it. With PEFT out of the path,
+# transformers is only asked to do the thing it has done for years: load Qwen2.5
+# and generate. See README.md, "Why there is no PEFT here".
+#
+# torch, transformers, numpy and scipy are already present in this environment;
+# they are pinned as a floor rather than installed.
+torch>=2.0
+transformers>=4.40
+safetensors>=0.4
+numpy>=1.24
+scipy>=1.10
+
+# Optional, for probe.py only -- the contamination check that scores the base
+# model on GSM8K and MMLU. Nothing in the main run imports it, so if it proves
+# awkward to install the main run is unaffected.
+# datasets>=2.18

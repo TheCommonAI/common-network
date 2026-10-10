@@ -1,0 +1,10 @@
+# Everything this experiment downloads or builds. The Hugging Face cache is left
+# at its default (~/.cache/huggingface) so no model weights ever land in the repo.
+.venv/
+blends/
+__pycache__/
+*.pyc
+
+# Run logs. results.json and probe.json are deliberately *not* ignored: they are the
+# evidence every number in README.md traces back to, and the plan commits them.
+*.log
