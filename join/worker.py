@@ -78,14 +78,65 @@ UPSTREAM_TIMEOUT = 120
 # one that travels with the node.
 DEFAULT_KEEP_ALIVE = "30m"
 
+# The ceiling on one generation, and the value used when the caller names none.
+#
+# Nothing upstream sets one. The client sends {model, messages, stream}; the
+# gateway rewrites the model name and nothing else; this file stamped keep_alive
+# and nothing else. So every request ran on Ollama's default of num_predict = -1
+# -- "generate until the model emits EOS" -- and a model that does not emit EOS
+# had nothing stopping it but the context window.
+#
+# This fleet serves a maths specialisation, and routing hands it whatever the
+# network is asked. Asked off-distribution -- a roleplay prompt, a question in
+# mixed scripts -- it intermittently never stops. Measured on one node
+# 2026-10-13: two such prompts were still generating at 150s, against 121 and 56
+# tokens in under 31s with a cap; and that node's own Ollama log holds 4m24s,
+# 5m0s and 14m56s rows for /v1/chat/completions. The tail of a run like that is
+# repetition salad, and the client is billed the whole wait for it.
+#
+# 1024 is chosen against the timeouts rather than picked round. At the ~13 tok/s
+# that generation measured, a capped worst case is about 80s -- inside the
+# gateway's 180s read timeout, so a pathological answer still arrives as an
+# answer rather than as a client-side timeout with nothing to show. It is also
+# several times the longest legitimate answer observed here; asked ordinarily,
+# this model stops at 20-200 tokens of its own accord.
+#
+# This bounds the blast radius; it does not make the model behave. A capped run
+# can still degenerate, just sooner. What it removes is minutes of someone's
+# wait, and the case where the answer is not merely bad but late.
+#
+# Overridable per node with COMMON_MAX_TOKENS (see main()).
+DEFAULT_MAX_TOKENS = 1024
+
+
+def bounded_max_tokens(requested, ceiling: int = DEFAULT_MAX_TOKENS) -> int:
+    """The value to send as max_tokens, honouring a sane caller value.
+
+    A caller may ask for less and is taken at its word; it may not ask for more,
+    because the unbounded case is the whole bug and it arrives disguised as an
+    ordinary large number.
+
+    This sits on a public HTTP boundary, so the body is whatever a stranger's
+    client sent. A limit that is absent, zero, negative, a bool or a string has
+    to land on the ceiling rather than raise inside the request path or reach
+    Ollama as junk.
+    """
+    if isinstance(requested, bool) or not isinstance(requested, (int, float)):
+        return ceiling
+    if requested < 1:
+        return ceiling
+    return min(int(requested), ceiling)
+
 
 class WorkerConfig:
     def __init__(self, token: str, model: str, ollama_url: str = DEFAULT_OLLAMA,
-                 keep_alive: str = DEFAULT_KEEP_ALIVE):
+                 keep_alive: str = DEFAULT_KEEP_ALIVE,
+                 max_tokens: int = DEFAULT_MAX_TOKENS):
         self.token = token
         self.model = model
         self.ollama_url = ollama_url.rstrip("/")
         self.keep_alive = keep_alive
+        self.max_tokens = max_tokens
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -224,6 +275,13 @@ class Handler(BaseHTTPRequestHandler):
         # otherwise make every caller after it pay a 53s reload.
         body["keep_alive"] = self.config.keep_alive
 
+        # And the node owns its own ceiling on generation, for the same reason it
+        # owns the model and the retention above. A caller asking for less is
+        # taken at its word; one asking for more -- or for nothing at all -- gets
+        # this node's limit. See DEFAULT_MAX_TOKENS for why one has to exist.
+        body["max_tokens"] = bounded_max_tokens(body.get("max_tokens"),
+                                                self.config.max_tokens)
+
         self._proxy_chat(body)
 
     def _proxy_chat(self, body: dict) -> None:
@@ -325,6 +383,7 @@ def warm_model(model: str, ollama_url: str, keep_alive: str = DEFAULT_KEEP_ALIVE
 def serve(token: str, model: str, port: int = 11435,
           ollama_url: str = DEFAULT_OLLAMA,
           keep_alive: str = DEFAULT_KEEP_ALIVE,
+          max_tokens: int = DEFAULT_MAX_TOKENS,
           warm: bool = True) -> ThreadingHTTPServer:
     """Start the worker on a background thread and return the server.
 
@@ -339,7 +398,7 @@ def serve(token: str, model: str, port: int = 11435,
     request in the stub's hit log and turn a real assertion into a coin toss.
     """
     handler = type("BoundHandler", (Handler,), {
-        "config": WorkerConfig(token, model, ollama_url, keep_alive),
+        "config": WorkerConfig(token, model, ollama_url, keep_alive, max_tokens),
     })
     httpd = ThreadingHTTPServer(("0.0.0.0", port), handler)
     httpd.daemon_threads = True
@@ -367,12 +426,18 @@ def main() -> int:
     p.add_argument("--keep-alive", default=os.environ.get("COMMON_KEEP_ALIVE", DEFAULT_KEEP_ALIVE),
                    help="how long Ollama keeps the model resident, e.g. 30m or -1 "
                         "(default: %(default)s)")
+    p.add_argument("--max-tokens", type=int,
+                   default=os.environ.get("COMMON_MAX_TOKENS", DEFAULT_MAX_TOKENS),
+                   help="ceiling on the tokens generated for one request "
+                        "(default: %(default)s)")
     args = p.parse_args()
 
-    serve(args.token, args.model, args.port, args.ollama, args.keep_alive)
+    serve(args.token, args.model, args.port, args.ollama, args.keep_alive,
+          args.max_tokens)
     print(f"common-worker on :{args.port} → {args.ollama} (model: {args.model})")
     print(f"the model stays loaded for {args.keep_alive} after each request; "
           f"Ollama unloads it once idle for longer.")
+    print(f"one answer is capped at {args.max_tokens} tokens.")
     print("only /v1/models and /v1/chat/completions are reachable; both need the token.")
     try:
         threading.Event().wait()

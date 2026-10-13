@@ -38,6 +38,13 @@ from app.config import settings  # noqa: E402
 FAILURES = []
 REPO = HERE.parent.parent
 
+# Imported rather than read, because the number below is a constant in the
+# worker and this check is about the pair. A parse failure would be a failure
+# too, but there is no reason to invite one: the worker is stdlib-only and
+# imports with no side effects.
+sys.path.insert(0, str(REPO / "join"))
+import worker  # noqa: E402
+
 
 def check(name: str, got, want) -> None:
     if got != want:
@@ -79,6 +86,21 @@ check("a panel member may take longer than a cold start",
       settings.compose_member_timeout_seconds > MEASURED_COLD_START_S, True)
 check("but is still cut off before the single-route read timeout",
       settings.compose_member_timeout_seconds < settings.forward_read_timeout_seconds, True)
+
+print("\na bounded generation still fits inside the read timeout")
+# The worker now caps every request at DEFAULT_MAX_TOKENS, because nothing
+# upstream bounded generation at all: on 2026-10-13 a node whose model failed to
+# emit EOS ran to the context window and took 4m24s to return repetition salad.
+# The cap was chosen against this relationship rather than picked round, so if
+# either number moves the pair has to be re-checked instead of silently drifting.
+MEASURED_TOKENS_PER_SECOND = 13.0
+check("a capped worst case lands inside the read timeout",
+      worker.DEFAULT_MAX_TOKENS / MEASURED_TOKENS_PER_SECOND
+      < settings.forward_read_timeout_seconds, True)
+# And generous enough not to truncate real answers, which stop on their own at
+# 20-200 tokens. This is the check that fails if someone "tightens" the cap.
+check("the cap is well clear of an ordinary answer",
+      worker.DEFAULT_MAX_TOKENS >= 4 * 200, True)
 
 print("\nclients outwait the gateway, so the gateway's error is the one seen")
 # Read from source rather than imported: these clients are installed as
