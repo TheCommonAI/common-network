@@ -241,6 +241,70 @@ def http_json(method: str, url: str, body: dict | None = None, headers: dict | N
         return json.loads(resp.read().decode())
 
 
+# How long to wait on the gateway, and how hard to insist before giving up.
+#
+# The rule is the one `common` and `chat` already follow, for the same reason:
+# the gateway must be the one to give up first, so that what a contributor sees
+# is the gateway's own error rather than a bare socket timeout. `join` was the
+# client that did not -- its gateway calls took http_json's 10s default, which
+# is less than the gateway's database command timeout (db_command_timeout_seconds,
+# 30s), let alone its read budget. A slow answer was therefore guaranteed to
+# surface as
+#
+#     TimeoutError: The read operation timed out
+#
+# which says nothing about what happened.
+#
+# 90s, the same value as REGISTRATION_TIMEOUT, is sized against what makes the
+# first call of a join slow: a gateway container that has gone to sleep accepts
+# the connection at once and then takes seconds to answer. Measured here at 8.1s
+# to first byte cold against 0.53s warm -- comfortably inside 90s, and still
+# inside the gateway's own budget, so a gateway that is genuinely unwell still
+# fails first and still says why.
+#
+# gateway/tests/test_timeouts.py reads this name, alongside the other two clients'.
+REQUEST_TIMEOUT_SECONDS = 90
+
+# A transport failure is usually a container still waking, and the request after
+# it is served normally -- that is the pair measured above. So it is worth asking
+# again, but only for a while: this caps the total time spent retrying rather
+# than each attempt, so a gateway that is simply gone costs one bounded wait
+# instead of one full timeout per attempt.
+GATEWAY_RETRY_MAX_WAIT_SECONDS = 60.0
+GATEWAY_RETRY_BACKOFF_SECONDS = 2.0
+
+
+def gateway_json(method: str, url: str, body: dict | None = None, headers: dict | None = None):
+    """A gateway call, retried while the failure is transport-shaped.
+
+    An HTTPError is an answer -- the gateway replied, and asking again would
+    produce the same reply -- so it is raised at once. A timeout or a dropped
+    connection is the absence of an answer, which on this network usually means
+    a container that has not finished starting.
+
+    /catalogue and /assign are both reads; /assign does three SELECTs and ranks
+    what it finds. A repeat therefore cannot alter anything a first call did.
+
+    Registration deliberately does not come through here. It fails for a
+    different reason -- a tunnel hostname the gateway cannot resolve yet -- and
+    retries on its own terms, holding the tunnel open while it waits.
+    """
+    deadline = time.monotonic() + GATEWAY_RETRY_MAX_WAIT_SECONDS
+    delay = GATEWAY_RETRY_BACKOFF_SECONDS
+    while True:
+        try:
+            return http_json(method, url, body=body, headers=headers,
+                             timeout=REQUEST_TIMEOUT_SECONDS)
+        except urllib.error.HTTPError:
+            raise  # a real answer -- and an HTTPError is a URLError, so this comes first
+        except (urllib.error.URLError, socket.timeout, OSError):
+            if time.monotonic() >= deadline:
+                raise
+            print(comment(f"the gateway did not answer; trying again in {delay:.0f}s"))
+            time.sleep(delay)
+            delay = min(delay * 2, 10.0)
+
+
 UPDATE_CHECK_INTERVAL_SECONDS = 1800  # re-check every 30 min while a node sits running
 
 
@@ -471,11 +535,11 @@ def probe_hardware() -> dict:
 
 
 def fetch_catalogue(gateway: str) -> list[dict]:
-    return http_json("GET", f"{gateway}/catalogue", headers=gateway_headers())
+    return gateway_json("GET", f"{gateway}/catalogue", headers=gateway_headers())
 
 
 def call_assign(gateway: str, hardware: dict) -> dict:
-    return http_json("POST", f"{gateway}/assign", body={"hardware": hardware}, headers=gateway_headers())
+    return gateway_json("POST", f"{gateway}/assign", body={"hardware": hardware}, headers=gateway_headers())
 
 
 def source_to_ollama_tag(source: str) -> str | None:

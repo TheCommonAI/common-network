@@ -100,6 +100,47 @@ for rel in ("common/common.py", "chat/chat.py"):
     uses = len(re.findall(rf"urlopen\([^)]*timeout={CONSTANT}\)", path.read_text()))
     check(f"{rel} applies it to every long request", uses >= 1, True)
 
+# join is the third client, and the one the rule above was missing.
+#
+# Its gateway calls took http_json's 10s default, which is under the gateway's
+# own database command timeout -- so a slow catalogue read could only ever
+# surface as a client socket timeout, whatever the gateway knew and could have
+# said. The first call of a join is exactly where that lands: a Railway container
+# that has gone to sleep accepts the connection at once and answers seconds
+# later, measured at 8.1s to first byte cold against 0.53s warm. 10s clears
+# neither a slower wake nor a slower machine.
+rel = "join/join.py"
+source = (REPO / rel).read_text()
+match = re.search(rf"^{CONSTANT}\s*=\s*(\d+)", source, re.MULTILINE)
+check(f"{rel} declares {CONSTANT}", match is not None, True)
+if match is not None:
+    seconds = int(match.group(1))
+    # Held against the database budget rather than the read budget: /catalogue
+    # and /assign are served from the catalogue tables and are never forwarded
+    # to a node, so the gateway's own timeout on them is a query, not a cold
+    # model. It still has to be shorter than the read budget, so that a gateway
+    # which is genuinely unwell is the one to give up.
+    check(f"{rel} waits longer than the gateway's database",
+          seconds > settings.db_command_timeout_seconds, True)
+    check(f"{rel} still lets the gateway fail first",
+          seconds < settings.forward_read_timeout_seconds, True)
+
+# Declared is not applied. Both of the calls a join makes before it registers
+# must go through the timeout and the retry, because those two are the whole
+# fix -- leaving one on http_json's default would keep the original failure and
+# pass every check above.
+for fn in ("fetch_catalogue", "call_assign"):
+    body = re.search(rf"^def {fn}\(.*?(?=^def |\Z)", source, re.MULTILINE | re.DOTALL)
+    check(f"{rel} {fn} goes through the retrying helper",
+          body is not None and "gateway_json(" in body.group(0), True)
+    check(f"{rel} {fn} no longer takes the 10s default",
+          body is not None and "http_json(" not in body.group(0), True)
+
+# And the retrying is bounded, so a gateway that is simply gone costs a wait
+# with a ceiling rather than one full timeout per attempt.
+check(f"{rel} caps the time it spends retrying",
+      re.search(r"^GATEWAY_RETRY_MAX_WAIT_SECONDS\s*=\s*[\d.]+", source, re.MULTILINE) is not None, True)
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} FAILED\n")
