@@ -207,6 +207,64 @@ try:
     check("a caller cannot evict the model out from under the next caller",
           UPSTREAM_HITS[0]["body"]["keep_alive"], worker.DEFAULT_KEEP_ALIVE)
 
+    # Nothing upstream bounds generation. The client sends {model, messages,
+    # stream}; the gateway rewrites the model name and nothing else; this file
+    # used to add keep_alive and nothing else. So every request ran on Ollama's
+    # default of num_predict = -1 -- "until EOS" -- and a model that does not
+    # emit EOS ran to the context window instead. On 2026-10-13 one such request
+    # on a live node took 4m24s and returned repetition salad. These checks are
+    # the ceiling that stops it, at the one process every request must pass.
+    print("\ngeneration is bounded (an answer that will not stop must still end)")
+    check("the default ceiling is set", worker.DEFAULT_MAX_TOKENS, 1024)
+
+    UPSTREAM_HITS.clear()
+    request("POST", "/v1/chat/completions", TOKEN,
+            {"messages": [{"role": "user", "content": "hi"}]})
+    check("a caller naming no limit gets the node's",
+          UPSTREAM_HITS[0]["body"]["max_tokens"], worker.DEFAULT_MAX_TOKENS)
+
+    # A caller may ask for less. It may not ask for more: the unbounded case is
+    # the whole bug, and it arrives dressed as an ordinary large number.
+    UPSTREAM_HITS.clear()
+    request("POST", "/v1/chat/completions", TOKEN,
+            {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 64})
+    check("a smaller request is honoured",
+          UPSTREAM_HITS[0]["body"]["max_tokens"], 64)
+
+    UPSTREAM_HITS.clear()
+    request("POST", "/v1/chat/completions", TOKEN,
+            {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10 ** 9})
+    check("an enormous one is clamped to the ceiling",
+          UPSTREAM_HITS[0]["body"]["max_tokens"], worker.DEFAULT_MAX_TOKENS)
+
+    # This is a public HTTP boundary: the body is whatever a stranger's client
+    # sent. A limit that is not a positive number has to land on the ceiling --
+    # not raise inside the request path, and not reach Ollama as junk. A bool is
+    # listed because it is an int subclass and would otherwise sail through as
+    # 1, quietly turning every answer into a single token.
+    for label, value in (("a non-numeric", "lots"), ("a negative", -5),
+                         ("zero", 0), ("a bool", True), ("null", None)):
+        UPSTREAM_HITS.clear()
+        status, _ = request("POST", "/v1/chat/completions", TOKEN,
+                            {"messages": [{"role": "user", "content": "hi"}],
+                             "max_tokens": value})
+        check(f"{label} limit -> the ceiling, not a 500",
+              (status, UPSTREAM_HITS[0]["body"]["max_tokens"]),
+              (200, worker.DEFAULT_MAX_TOKENS))
+
+    # A real number below the ceiling is a real request, not a mistake: 12.9
+    # tokens is 12 tokens.
+    UPSTREAM_HITS.clear()
+    request("POST", "/v1/chat/completions", TOKEN,
+            {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 12.9})
+    check("a fractional limit is truncated, not rejected",
+          UPSTREAM_HITS[0]["body"]["max_tokens"], 12)
+
+    # The ceiling must not reach the warm-up, which asks for exactly one token
+    # on purpose and would be a join that appears to hang at 1024.
+    check("the warm-up's single token is not raised to the ceiling",
+          worker.bounded_max_tokens(1), 1)
+
     # warm_model is what `common join` relies on to make the *first* user
     # request fast. Called directly rather than through serve(), so this is a
     # statement about the function instead of a race with a background thread.

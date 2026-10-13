@@ -133,6 +133,40 @@ def _enable_windows_ansi() -> None:
         pass
 
 
+def _force_utf8_output() -> None:
+    """Pin stdout/stderr to UTF-8 whatever the Windows code page says.
+
+    A Windows console handles the glyph vocabulary (→ ✓ ⚠ ✗) and the banner
+    fine -- Python writes it through the UTF-16 console API. A *redirected*
+    stream does not: a pipe or a file gets the locale encoding, which is
+    cp1252 on most installs, and cp1252 cannot encode any of those characters.
+    The result is UnicodeEncodeError and a dead process.
+
+    That is not a cosmetic problem, because the two places output is redirected
+    are the two that matter most here:
+
+      - `common join --permanent` writes the scheduled task as
+        `cmd /c "... >> join.log 2>&1"`, so every run of the service sends both
+        streams to a file. The service then died printing its own banner --
+        before ensure_model, before the worker, before registering. A Windows
+        node installed this way never came up and never installed its model.
+      - `common leave` runs `--remove-permanent` with capture_output=True and
+        greps the result for "Removed". The child was killed by the same
+        UnicodeEncodeError printing the ✓, so the message was never written and
+        the check could not succeed.
+
+    errors="replace" is deliberate rather than strict: a glyph is decoration,
+    and decoration must never be able to stop a node from starting. A stream
+    that cannot be reconfigured at all (already replaced, closed, or not a
+    TextIOWrapper) is left alone -- the banner is worth less than the run.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 # COMMON. brand palette -- exactly four colours (see the CLI design doc).
 # No green, no purple, no gradients: restraint is the point. blue is the
 # only "active/positive" colour; red carries both emphasis and danger.
@@ -1031,6 +1065,7 @@ def remove_permanent() -> None:
 
 
 def main() -> None:
+    _force_utf8_output()
     sys.stdout.reconfigure(line_buffering=True)
     _enable_windows_ansi()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
