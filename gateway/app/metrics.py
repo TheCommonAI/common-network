@@ -241,6 +241,38 @@ def _block(prefix: str, row, keys: dict[str, str]) -> dict[str, Any]:
             for label, (suffix, cast) in keys.items()}
 
 
+def _phase_request(rows, which: str) -> dict[str, Any] | None:
+    """One real request's three phases, or None if the window had none.
+
+    This exists because a stacked bar must be built from a single request.
+    Stacking three independently-computed percentiles produces segments that sum
+    to a total no request ever had -- p50(a+b+c) is not p50(a)+p50(b)+p50(c),
+    and the gap widens with the spread. Picking the actual median row makes the
+    segments sum exactly, and makes the bar say something true: "this is what
+    the typical request looked like, split up."
+
+    `additive` is recomputed here rather than asserted, so the property the
+    chart depends on is visible in the payload and a test can hold it.
+    """
+    for r in rows:
+        if r["which"] != which:
+            continue
+        if r["total_ms"] is None:
+            return None
+        route = int(r["route_ms"] or 0)
+        ttft = int(r["ttft_ms"] or 0)
+        generation = int(r["generation_ms"] or 0)
+        total = int(r["total_ms"])
+        return {
+            "route_ms": route,
+            "ttft_ms": ttft,
+            "generation_ms": generation,
+            "total_ms": total,
+            "additive": route + ttft + generation == total,
+        }
+    return None
+
+
 _LATENCY_KEYS = {
     "p50": ("_p50", float),
     "p95": ("_p95", float),
@@ -287,6 +319,16 @@ async def metrics_summary(
     async with db.pool().acquire() as conn:
         row = await conn.fetchrow(
             f"""
+            -- The three clocks named once, here, rather than re-derived at each
+            -- use. `generation_ms` is a difference of two stored columns and the
+            -- temptation will be to write it inline where it is needed; naming
+            -- it in one place is what keeps it from being quietly rewritten as
+            -- "total minus the other percentiles" further down.
+            with windowed as (
+                select *, total_ms - ttft_ms - route_ms as generation_ms
+                from request_metrics
+                where {clause}
+            )
             select
               count(*)                                              as requests,
               count(*) filter (where ok)                            as succeeded,
@@ -342,9 +384,73 @@ async def metrics_summary(
                      then completion_tokens::numeric * 1000 / eval_ms end) as tps_p50,
               percentile_cont(0.95) within group (order by
                 case when eval_ms > 0
-                     then completion_tokens::numeric * 1000 / eval_ms end) as tps_p95
-            from request_metrics
-            where {clause}
+                     then completion_tokens::numeric * 1000 / eval_ms end) as tps_p95,
+
+              -- Where the time goes. The three clocks are additive --
+              -- total = route + ttft + generation -- which is what lets them be
+              -- drawn as one bar, but a row only has a decomposition if it
+              -- streamed and its clocks agree. `generation_ms >= 0` tests both
+              -- at once, and the NULL is doing real work: NULL >= 0 is NULL, not
+              -- true, so a non-streaming row (no first token, no ttft_ms) is
+              -- excluded by the very predicate that also drops a negative
+              -- generation. A negative one means the two stamps disagree, and a
+              -- row like that is dropped rather than clamped, because inventing
+              -- a duration from a disagreement is worse than omitting it.
+              --
+              -- Each phase is percentiled independently below. That is the right
+              -- statistic per phase and the wrong way to build a bar: p50 of a
+              -- sum is not the sum of the p50s, so these three must never be
+              -- stacked. The stackable rows come from the query after this one.
+              count(*) filter (where generation_ms >= 0)             as phase_count,
+              percentile_cont(0.5)  within group (order by route_ms)
+                filter (where generation_ms >= 0)                    as phase_route_p50,
+              percentile_cont(0.95) within group (order by route_ms)
+                filter (where generation_ms >= 0)                    as phase_route_p95,
+              percentile_cont(0.5)  within group (order by ttft_ms)
+                filter (where generation_ms >= 0)                    as phase_ttft_p50,
+              percentile_cont(0.95) within group (order by ttft_ms)
+                filter (where generation_ms >= 0)                    as phase_ttft_p95,
+              percentile_cont(0.5)  within group (order by generation_ms)
+                filter (where generation_ms >= 0)                    as phase_gen_p50,
+              percentile_cont(0.95) within group (order by generation_ms)
+                filter (where generation_ms >= 0)                    as phase_gen_p95
+            from windowed
+            """,
+            *args,
+        )
+
+        # The decomposable requests themselves -- the median one and the p95 one
+        # -- rather than three percentiles that would not add up.
+        #
+        # `targets` is a small values list because both rows are the same query
+        # at two quantiles, and duplicating it would let the two definitions of
+        # "median request" drift apart. The rank is computed over exactly the
+        # rows the bar may use (`generation_ms >= 0`), so the row returned is the
+        # median *of the decomposable set* -- the set the percentage beside it
+        # describes.
+        phase_rows = await conn.fetch(
+            f"""
+            with windowed as (
+                select route_ms, ttft_ms, total_ms,
+                       total_ms - ttft_ms - route_ms as generation_ms
+                from request_metrics
+                where {clause}
+            ),
+            decomposable as (
+                select route_ms, ttft_ms, total_ms, generation_ms,
+                       row_number() over (order by total_ms) as rn,
+                       count(*)     over ()                  as n
+                from windowed
+                where generation_ms >= 0
+            ),
+            targets(which, q) as (
+                values ('p50', 0.5::numeric), ('p95', 0.95::numeric)
+            )
+            select t.which, d.route_ms, d.ttft_ms, d.total_ms, d.generation_ms
+            from targets t
+            left join decomposable d
+              on d.rn = greatest(1, ceil(d.n * t.q)::int)
+            order by t.q
             """,
             *args,
         )
@@ -427,6 +533,30 @@ async def metrics_summary(
             "cold_requests": cold_count,
             "warm_requests": warm_count,
         },
+        "phases": {
+            # How many requests in the window were decomposable at all. Shown
+            # because every percentile below it is over this smaller set, and a
+            # decomposition of 3 requests out of 900 should not read as the whole
+            # window's shape.
+            "count": int(row["phase_count"] or 0),
+            # Per-phase percentiles. Each is the right number for its own phase
+            # and they are NOT stackable -- see median_request/p95_request.
+            "route_ms": {
+                "p50": _num(row["phase_route_p50"], float),
+                "p95": _num(row["phase_route_p95"], float),
+            },
+            "ttft_ms": {
+                "p50": _num(row["phase_ttft_p50"], float),
+                "p95": _num(row["phase_ttft_p95"], float),
+            },
+            "generation_ms": {
+                "p50": _num(row["phase_gen_p50"], float),
+                "p95": _num(row["phase_gen_p95"], float),
+            },
+            # Actual requests, for the stacked bar. These sum to their own total.
+            "median_request": _phase_request(phase_rows, "p50"),
+            "p95_request": _phase_request(phase_rows, "p95"),
+        },
         "by_node": [
             {
                 "node_name": r["node_name"],
@@ -453,7 +583,217 @@ async def metrics_summary(
             "node did not send it. Check node_reports.coverage before quoting any "
             "of it. ttft is the wait for the node's first byte, which for a "
             "streaming request is the first token: Ollama sends no response "
-            "headers until the model is in memory, so ttft includes model load."
+            "headers until the model is in memory, so ttft includes model load. "
+            "The phases block is those three clocks rearranged: `count` is how "
+            "many requests were decomposable at all (a request that did not "
+            "stream has no first token to split on), and the p50/p95 per phase "
+            "are computed independently, so they come from three different "
+            "requests and do NOT sum to latency_ms.total. Use median_request and "
+            "p95_request for a bar that adds up -- each is one real request. "
+            "route_ms and ttft_ms are stamped from different origins, routing "
+            "having finished before the node is called, so route_ms exceeding "
+            "ttft_ms is possible and is not a measurement error."
+        ),
+    })
+
+
+@router.get("/metrics/timeseries")
+async def metrics_timeseries(
+    window_hours: int = Query(default=24, ge=1, le=8760),
+    buckets: int = Query(default=24, ge=1, le=200,
+                         description="Number of equal time buckets spanning the window"),
+    topology: str | None = Query(default=None, description="Filter to 'single', 'panel' or 'degraded'"),
+):
+    """Latency over time, as dense buckets.
+
+    The interesting question a percentile over a rolling window cannot answer is
+    *when* it got bad. A p95 that has been at 60s for an hour is an incident; the
+    same p95 as a spike that has already passed is not, and the summary endpoint
+    renders both identically.
+
+    Buckets are produced by `generate_series` and LEFT JOINed to the data, so the
+    response always has exactly `buckets` points. Filling the gaps server-side is
+    the point: if empty buckets were omitted, the chart would silently close up
+    the quiet periods and a gap in traffic would render as a smooth line through
+    it, which is a lie about a network whose nodes come and go.
+
+    The empty-bucket count is `count(m.id)`, not `count(*)`. This is not a style
+    choice -- an empty bucket still produces one all-null joined row, so
+    `count(*)` reports **1** request where there were none. Verified against live
+    Postgres: all 23 empty buckets of a 24-bucket window reported
+    `count(*) = 1`. Percentiles are unaffected either way, since they skip nulls.
+
+    `buckets` is a parameter rather than derived from the window so the caller
+    picks the resolution: 24 buckets over an hour is 2.5 minutes each, over a
+    month it is a day and a bit.
+    """
+    async with db.pool().acquire() as conn:
+        rows = await conn.fetch(
+            """
+            with params as (
+                -- Truncated to the minute so bucket boundaries do not crawl: the
+                -- dashboard refetches every few seconds, and an untruncated
+                -- rolling start would slide the whole chart sideways on every
+                -- refresh. The cost is a window up to 59s longer than asked for.
+                select date_trunc('minute', now() - make_interval(hours => $1::int)) as window_start,
+                       ($1::int * 3600)::double precision / $2::double precision   as step_secs
+            ),
+            -- Indexed, not `generate_series(start, stop, step)`. The latter is
+            -- inclusive of its stop and would emit `buckets + 1` points here --
+            -- the truncated start pushes the span just past the end. Verified:
+            -- asking for 24 returned 25. Counting to `buckets - 1` cannot drift.
+            grid as (
+                select p.window_start + make_interval(secs => p.step_secs * i)     as bucket_start,
+                       p.window_start + make_interval(secs => p.step_secs * (i + 1)) as bucket_end
+                from params p
+                cross join generate_series(0, $2::int - 1) as g(i)
+            )
+            select g.bucket_start,
+                   count(m.id)                                    as requests,
+                   count(m.id) filter (where m.ok)                as succeeded,
+                   count(m.id) filter (where m.ttft_ms is not null) as streaming,
+                   percentile_cont(0.5)  within group (order by m.total_ms) as total_p50,
+                   percentile_cont(0.95) within group (order by m.total_ms) as total_p95,
+                   percentile_cont(0.5)  within group (order by m.ttft_ms)  as ttft_p50,
+                   percentile_cont(0.5)  within group (order by m.route_ms) as route_p50
+            from grid g
+            left join request_metrics m
+                   on m.created_at >= g.bucket_start
+                  and m.created_at <  g.bucket_end
+                  -- Bound as a parameter and tested for null rather than
+                  -- interpolated, so a topology value can never reach the SQL as
+                  -- syntax. Same shape as /metrics/recent.
+                  and ($3::text is null or m.topology = $3::text)
+            group by g.bucket_start
+            order by g.bucket_start
+            """,
+            window_hours, buckets, topology,
+        )
+
+    return JSONResponse({
+        "window_hours": window_hours,
+        "buckets": buckets,
+        "topology_filter": topology,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "points": [
+            {
+                "bucket_start": r["bucket_start"].isoformat(),
+                "requests": int(r["requests"] or 0),
+                "succeeded": int(r["succeeded"] or 0),
+                "streaming": int(r["streaming"] or 0),
+                "total_p50_ms": _num(r["total_p50"], float),
+                "total_p95_ms": _num(r["total_p95"], float),
+                "ttft_p50_ms": _num(r["ttft_p50"], float),
+                "route_p50_ms": _num(r["route_p50"], float),
+            }
+            for r in rows
+        ],
+        "caveat": (
+            "Buckets are equal slices of the window and every one is present, "
+            "including the empty ones -- `requests: 0` with null percentiles "
+            "means no traffic in that slice, not missing data. A percentile here "
+            "is over that bucket alone, so a bucket with one request has a p95 "
+            "equal to that request."
+        ),
+    })
+
+
+@router.get("/metrics/distribution")
+async def metrics_distribution(
+    window_hours: int = Query(default=24, ge=1, le=8760),
+    bins: int = Query(default=12, ge=1, le=50, description="Histogram bins spanning 0..max"),
+    topology: str | None = Query(default=None, description="Filter to 'single', 'panel' or 'degraded'"),
+):
+    """The shape of the latency distribution, not just its quantiles.
+
+    A p50 and a p95 describe two points and say nothing about the middle. This
+    network's latency is expected to be bimodal -- a warm cluster and a cold tail
+    -- and the case for keeping models resident is that the cold hump exists. A
+    histogram is the only form that shows whether it does, and whether it is
+    shrinking.
+
+    Bins span `0 .. max(total_ms)` in the window, so they are absolute
+    milliseconds and comparable between calls. Edges are returned as `edge_ms`
+    so the caller labels from the response rather than recomputing the same
+    arithmetic and risking a different answer.
+
+    `sparse` is returned rather than left to the caller to infer. A histogram of
+    four requests draws a confident-looking shape out of nothing, and the honest
+    rendering of that is a different one -- so the threshold lives here, with the
+    data, instead of in every consumer.
+    """
+    async with db.pool().acquire() as conn:
+        rows = await conn.fetch(
+            """
+            with w as (
+                select total_ms
+                from request_metrics
+                where created_at > now() - make_interval(hours => $1::int)
+                  and ($3::text is null or topology = $3::text)
+                  and total_ms is not null
+            ),
+            bounds as (
+                -- greatest(..., 1) so width_bucket never sees a zero-width
+                -- range, which would be a division by zero for every row at
+                -- once. An empty window therefore yields hi_ms 0 rather than an
+                -- error, and the caller sees zero requests and no shape.
+                select greatest(coalesce(max(total_ms), 0), 1) as hi, count(*) as n
+                from w
+            ),
+            binned as (
+                select width_bucket(w.total_ms, 0, (select hi from bounds), $2::int) as bin,
+                       w.total_ms
+                from w
+            )
+            select g.bin,
+                   coalesce(c.requests, 0) as requests,
+                   c.min_ms, c.max_ms,
+                   (select hi from bounds) as hi,
+                   (select n  from bounds) as total
+            from generate_series(1, $2::int) as g(bin)
+            left join (
+                select bin, count(*) as requests, min(total_ms) as min_ms, max(total_ms) as max_ms
+                from binned group by bin
+            ) c on c.bin = g.bin
+            order by g.bin
+            """,
+            window_hours, bins, topology,
+        )
+
+    points = list(rows)
+    hi = int(points[0]["hi"]) if points else 1
+    total = int(points[0]["total"] or 0) if points else 0
+    # Below this, a histogram is a shape drawn from too little to mean anything.
+    # Chosen rather than derived: it is a rendering decision, not a statistic.
+    min_for_shape = 20
+
+    return JSONResponse({
+        "window_hours": window_hours,
+        "bins": bins,
+        "topology_filter": topology,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "total": total,
+        "hi_ms": hi,
+        # Where each bin starts, in ms. Bin i (1-based) spans edge_ms[i-1]..edge_ms[i],
+        # the last ending at hi_ms.
+        "edge_ms": [round(hi * (i - 1) / bins) for i in range(1, bins + 2)],
+        "sparse": total < min_for_shape,
+        "min_for_shape": min_for_shape,
+        "points": [
+            {
+                "bin": int(r["bin"]),
+                "requests": int(r["requests"] or 0),
+                "min_ms": _num(r["min_ms"], int),
+                "max_ms": _num(r["max_ms"], int),
+            }
+            for r in points
+        ],
+        "caveat": (
+            "Every bin is present, so a bin with `requests: 0` is an empty range "
+            "of the distribution, not missing data. Bins span 0..hi_ms, which is "
+            "this window's slowest request, so bin widths are comparable between "
+            "calls but not between different windows. When `sparse` is true there "
+            "are too few requests for the shape to mean anything."
         ),
     })
 
