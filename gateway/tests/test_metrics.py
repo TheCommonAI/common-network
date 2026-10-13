@@ -27,6 +27,7 @@ import io
 import sys
 import types
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -74,15 +75,41 @@ _SUMMARY_KEYS = [
     'total_stream_p50', 'total_nonstream_p50',
     'load_p50', 'load_p95', 'cold_load_p50', 'cold_load_p95', 'warm_load_p50',
     'prompt_eval_p50', 'eval_p50', 'tps_p50', 'tps_p95',
+    # The phase columns. The endpoint indexes the row for each of these by
+    # name, so one missing here raises KeyError and 500s every test in
+    # SummaryTests at once -- which is exactly what happened when they were
+    # added to the SQL and not to this list.
+    'phase_count',
+    'phase_route_p50', 'phase_route_p95',
+    'phase_ttft_p50', 'phase_ttft_p95',
+    'phase_gen_p50', 'phase_gen_p95',
 ]
 
 
 def summary_row(**overrides):
     row = {k: None for k in _SUMMARY_KEYS}
     row.update(requests=0, succeeded=0, failed=0, streaming=0, non_streaming=0,
-               reported=0, cold_count=0, warm_count=0)
+               reported=0, cold_count=0, warm_count=0, phase_count=0)
     row.update(overrides)
     return row
+
+
+def decomposed(which, route_ms, ttft_ms, total_ms):
+    """One row of the median/p95-request query, with the sum already checked.
+
+    `generation_ms` is derived here the same way the SQL derives it, so a test
+    staging a row that does not add up is staging a row the query could not
+    have produced.
+    """
+    return {'which': which, 'route_ms': route_ms, 'ttft_ms': ttft_ms,
+            'total_ms': total_ms,
+            'generation_ms': total_ms - ttft_ms - route_ms}
+
+
+def no_decomposition(which):
+    """What the query returns for a quantile when nothing was decomposable."""
+    return {'which': which, 'route_ms': None, 'ttft_ms': None,
+            'total_ms': None, 'generation_ms': None}
 
 
 _NODE_KEYS = ['node_name', 'model_name', 'requests', 'succeeded', 'reported',
@@ -104,6 +131,9 @@ class Conn:
         self.row = summary_row()
         self.rows = []
         self.recent = []
+        self.phases = []
+        self.timeseries = []
+        self.distribution = []
         self.queries = []
 
     async def fetchrow(self, sql, *args):
@@ -112,6 +142,16 @@ class Conn:
 
     async def fetch(self, sql, *args):
         self.queries.append((sql, list(args)))
+        # Dispatched on a marker unique to each statement rather than on
+        # `'group by' in sql`. That shortcut was fine while there were two
+        # queries; with five it silently hands the timeseries result to the
+        # by-node reader and back, and the test passes for the wrong reason.
+        if 'targets(which' in sql:
+            return self.phases
+        if 'width_bucket' in sql:
+            return self.distribution
+        if 'bucket_start' in sql:
+            return self.timeseries
         return self.rows if 'group by' in sql else self.recent
 
 
@@ -335,6 +375,84 @@ class SummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('unverified', body['caveat'])
         self.assertIn('strangers', body['caveat'])
 
+    async def test_a_phase_bar_is_one_request_not_three_percentiles(self):
+        """The regression guard for the whole decomposition.
+
+        The wrong way to build the stacked bar is to stack the three per-phase
+        percentiles. p50 of a sum is not the sum of the p50s, so those segments
+        would add up to a duration no request ever had -- and on live data the
+        gap was 12 seconds on a 50-second request. Staged so the two answers
+        differ, and asserted on both: the independent sum is NOT the bar, and
+        the row that is the bar really does add up.
+        """
+        self.conn.row = summary_row(
+            requests=9, phase_count=9,
+            phase_route_p50=1000.0, phase_ttft_p50=2000.0, phase_gen_p50=3000.0,
+            total_p50=12000.0)
+        self.conn.phases = [decomposed('p50', 100, 900, 12000),
+                            decomposed('p95', 400, 5000, 40000)]
+
+        phases = (await self.client.get('/metrics/summary')).json()['phases']
+
+        independent = (phases['route_ms']['p50'] + phases['ttft_ms']['p50']
+                       + phases['generation_ms']['p50'])
+        self.assertEqual(independent, 6000.0)
+
+        median = phases['median_request']
+        self.assertEqual(median['total_ms'], 12000)          # the real median row
+        self.assertNotEqual(independent, median['total_ms'])  # and NOT the sum
+        self.assertTrue(median['additive'])
+        self.assertEqual(median['route_ms'] + median['ttft_ms'] + median['generation_ms'],
+                         median['total_ms'])
+        self.assertEqual(median['generation_ms'], 11000)
+
+        # Both quantiles come back, each an actual request.
+        self.assertEqual(phases['p95_request']['total_ms'], 40000)
+        self.assertEqual(phases['p95_request']['route_ms'], 400)
+        self.assertTrue(phases['p95_request']['additive'])
+
+    async def test_a_phase_count_is_reported_beside_the_phases(self):
+        # Every per-phase percentile is over the decomposable subset only, so
+        # the size of that subset has to travel with them or a decomposition of
+        # 2 requests out of 900 reads as the whole window.
+        self.conn.row = summary_row(requests=900, phase_count=2,
+                                    phase_route_p50=50.0)
+        body = (await self.client.get('/metrics/summary')).json()
+        self.assertEqual(body['phases']['count'], 2)
+        self.assertEqual(body['totals']['requests'], 900)
+
+    async def test_a_window_with_nothing_streaming_has_no_decomposition(self):
+        # No request streamed, so there is no first token to split on and the
+        # phase query returns two all-null rows. Null, not zero: a zero-length
+        # routing phase is a claim that routing was instant.
+        self.conn.row = summary_row(requests=5, phase_count=0)
+        self.conn.phases = [no_decomposition('p50'), no_decomposition('p95')]
+
+        phases = (await self.client.get('/metrics/summary')).json()['phases']
+
+        self.assertEqual(phases['count'], 0)
+        self.assertIsNone(phases['median_request'])
+        self.assertIsNone(phases['p95_request'])
+        for name in ('route_ms', 'ttft_ms', 'generation_ms'):
+            self.assertIsNone(phases[name]['p50'], f'{name}.p50 must be absent, not 0')
+
+    async def test_a_window_with_no_rows_at_all_reports_no_phases(self):
+        # The default canned row plus an empty phase result: the case a fresh
+        # database and a narrow window both produce.
+        body = (await self.client.get('/metrics/summary')).json()
+        self.assertEqual(body['phases']['count'], 0)
+        self.assertIsNone(body['phases']['median_request'])
+
+    async def test_the_caveat_warns_that_the_phase_percentiles_do_not_stack(self):
+        # The dashboard reads this text; a future reader of the JSON needs to be
+        # told not to add the three numbers up.
+        body = (await self.client.get('/metrics/summary')).json()
+        self.assertIn('do NOT sum', body['caveat'])
+        self.assertIn('median_request', body['caveat'])
+        # And the ordering surprise between the two clocks is stated rather than
+        # left to look like a bug.
+        self.assertIn('different origins', body['caveat'])
+
 
 class RecentTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -389,6 +507,157 @@ class RecentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body[0]['node_reported'])
         self.assertEqual(body[0]['ttft_ms'], 847)
         self.assertEqual(body[0]['total_ms'], 900)
+
+
+def ts_row(**overrides):
+    row = {'bucket_start': datetime.now(timezone.utc), 'requests': 0, 'succeeded': 0,
+           'streaming': 0, 'total_p50': None, 'total_p95': None,
+           'ttft_p50': None, 'route_p50': None}
+    row.update(overrides)
+    return row
+
+
+class _ReadPathTests(unittest.IsolatedAsyncioTestCase):
+    """Shared setup: the router over a canned pool, no database."""
+
+    async def asyncSetUp(self):
+        self.conn = Conn()
+        self.pool = patch.object(metrics.db, 'pool', return_value=_Pool(self.conn))
+        self.pool.start()
+        app = FastAPI()
+        app.include_router(metrics.router)
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+            base_url='http://test')
+
+    async def asyncTearDown(self):
+        await self.client.aclose()
+        self.pool.stop()
+
+
+class TimeseriesTests(_ReadPathTests):
+
+    async def test_the_grid_is_counted_so_the_point_count_is_exact(self):
+        """`generate_series(start, stop, step)` would emit buckets + 1.
+
+        It is inclusive of its stop, and the window start is truncated to the
+        minute, so the span reaches just past the end and one extra step fits.
+        Verified against live Postgres: asking for 24 returned 25. Counting to
+        `buckets - 1` cannot drift, so the statement is asserted to do that --
+        the row count itself is a property of the SQL, not of this fake.
+        """
+        await self.client.get('/metrics/timeseries?window_hours=1&buckets=24')
+        sql, _ = next(q for q in self.conn.queries if 'bucket_start' in q[0])
+        self.assertIn('generate_series(0, $2::int - 1)', sql)
+        self.assertIn('bucket_end', sql)
+
+    async def test_an_empty_bucket_reports_zero_requests_not_one(self):
+        """The count(*) trap, pinned.
+
+        A bucket with no traffic still produces one all-null joined row, so
+        `count(*)` reports 1 request where there were none -- on live data it
+        reported 30 for a window holding 6. The statement must count a column of
+        the joined table, and an empty bucket must read as zero with null
+        percentiles rather than a percentile of nothing.
+        """
+        await self.client.get('/metrics/timeseries')
+        sql, _ = next(q for q in self.conn.queries if 'bucket_start' in q[0])
+        self.assertIn('count(m.id)', sql)
+        self.assertNotIn('count(*)', sql)
+
+        self.conn.timeseries = [ts_row(requests=0), ts_row(requests=4, total_p50=910.0)]
+        body = (await self.client.get('/metrics/timeseries')).json()
+        self.assertEqual(body['points'][0]['requests'], 0)
+        self.assertIsNone(body['points'][0]['total_p50_ms'])
+        self.assertEqual(body['points'][1]['requests'], 4)
+        self.assertEqual(body['points'][1]['total_p50_ms'], 910.0)
+
+    async def test_window_buckets_and_topology_are_all_bound(self):
+        await self.client.get('/metrics/timeseries?window_hours=6&buckets=12&topology=panel')
+        sql, args = next(q for q in self.conn.queries if 'bucket_start' in q[0])
+        self.assertEqual(args, [6, 12, 'panel'])
+        self.assertNotIn('panel', sql)
+        self.assertIn('$3::text is null or m.topology = $3::text', sql)
+
+    async def test_a_topology_value_can_never_reach_the_statement_as_syntax(self):
+        # Bound and null-tested rather than interpolated, exactly as
+        # /metrics/recent does it.
+        nasty = "single'; drop table request_metrics; --"
+        r = await self.client.get('/metrics/timeseries', params={'topology': nasty})
+        self.assertEqual(r.status_code, 200)
+        sql, args = next(q for q in self.conn.queries if 'bucket_start' in q[0])
+        self.assertNotIn('drop table', sql)
+        self.assertEqual(args[2], nasty)
+
+    async def test_the_window_and_the_bucket_count_are_validated(self):
+        for query in ('window_hours=0', 'window_hours=8761', 'buckets=0',
+                      'buckets=201', 'window_hours=soon', 'buckets='):
+            with self.subTest(query=query):
+                r = await self.client.get(f'/metrics/timeseries?{query}')
+                self.assertEqual(r.status_code, 422)
+
+    async def test_an_empty_window_still_returns_every_bucket(self):
+        self.conn.timeseries = [ts_row() for _ in range(24)]
+        body = (await self.client.get('/metrics/timeseries?buckets=24')).json()
+        self.assertEqual(len(body['points']), 24)
+        self.assertTrue(all(p['requests'] == 0 for p in body['points']))
+        self.assertTrue(all(p['total_p50_ms'] is None for p in body['points']))
+
+
+class DistributionTests(_ReadPathTests):
+
+    @staticmethod
+    def _rows(bins, counts, hi=1000, total=None):
+        if total is None:
+            total = sum(counts)
+        return [{'bin': i + 1, 'requests': c, 'min_ms': None, 'max_ms': None,
+                 'hi': hi, 'total': total} for i, c in enumerate(counts)]
+
+    async def test_one_point_per_bin_and_one_more_edge_than_bins(self):
+        await self.client.get('/metrics/distribution?bins=6')
+        sql, _ = next(q for q in self.conn.queries if 'width_bucket' in q[0])
+        self.assertIn('generate_series(1, $2::int)', sql)
+
+        self.conn.distribution = self._rows(6, [0, 1, 2, 0, 0, 3])
+        body = (await self.client.get('/metrics/distribution?bins=6')).json()
+        self.assertEqual(len(body['points']), 6)
+        self.assertEqual(len(body['edge_ms']), 7)
+        self.assertEqual(body['edge_ms'][0], 0)
+        self.assertEqual(body['edge_ms'][-1], body['hi_ms'])
+        self.assertEqual(body['total'], 6)
+
+    async def test_bins_ascend_and_span_the_range(self):
+        self.conn.distribution = self._rows(4, [1, 1, 1, 1], hi=1000)
+        body = (await self.client.get('/metrics/distribution?bins=4')).json()
+        edges = body['edge_ms']
+        self.assertEqual(edges, sorted(edges))
+        self.assertEqual(edges, [0, 250, 500, 750, 1000])
+
+    async def test_a_handful_of_requests_is_flagged_sparse(self):
+        # A histogram drawn from three requests looks identical to one drawn
+        # from three thousand. The flag is what stops the dashboard presenting
+        # the first as though it were the second.
+        self.conn.distribution = self._rows(6, [0, 1, 1, 0, 1, 1])
+        body = (await self.client.get('/metrics/distribution?bins=6')).json()
+        self.assertTrue(body['sparse'])
+        self.assertEqual(body['min_for_shape'], 20)
+
+        self.conn.distribution = self._rows(6, [10, 10, 10, 10, 10, 10])
+        body = (await self.client.get('/metrics/distribution?bins=6')).json()
+        self.assertFalse(body['sparse'])
+
+    async def test_an_empty_window_has_no_shape_to_draw(self):
+        self.conn.distribution = self._rows(6, [0, 0, 0, 0, 0, 0], hi=1, total=0)
+        body = (await self.client.get('/metrics/distribution?bins=6')).json()
+        self.assertEqual(body['total'], 0)
+        self.assertTrue(body['sparse'])
+        self.assertTrue(all(p['requests'] == 0 for p in body['points']))
+
+    async def test_the_bin_count_is_validated(self):
+        for query in ('bins=0', 'bins=51', 'bins=soon', 'bins='):
+            with self.subTest(query=query):
+                r = await self.client.get(f'/metrics/distribution?{query}')
+                self.assertEqual(r.status_code, 422)
 
 
 if __name__ == '__main__':

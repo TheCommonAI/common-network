@@ -175,6 +175,61 @@
   .gap-fill-coverage { height: 16px; background: var(--good); border-radius: 4px 0 0 4px; }
   .gap-fill-demand { height: 16px; background: var(--critical); opacity: 0.55; }
   .gap-label { font-size: 12px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* Sub-headings, not new sections. Every chart below is scoped by the one
+     window switcher above them, and a reader must never have to work out
+     whether "7d" applies to the chart they are looking at. */
+  h3.chart-h { font-size: 13px; font-weight: 600; margin: 28px 0 8px; color: var(--text-primary); }
+  h3.chart-h .hint { font-weight: 400; color: var(--muted); }
+
+  /* A stacked bar for one request's three phases, so the segments must sum to
+     the bar's own length. Sized with flex-grow off the millisecond values
+     rather than percentage widths: the 2px gap between fills is then absorbed
+     by the layout instead of being hand-subtracted from each segment, which is
+     the arithmetic that makes stacked bars not add up. */
+  .phase-row { display: grid; grid-template-columns: 132px 1fr 84px; align-items: center; gap: 10px; padding: 5px 0; }
+  .phase-row .name { font-size: 13px; color: var(--text-secondary); }
+  .phase-track { display: flex; gap: 2px; height: 20px; background: var(--gridline); border-radius: 4px; }
+  .phase-seg { height: 20px; }
+  .phase-seg:first-child { border-radius: 4px 0 0 4px; }
+  .phase-seg:last-child { border-radius: 0 4px 4px 0; }
+  .phase-row .total { font-size: 12px; color: var(--text-secondary); text-align: right; font-variant-numeric: tabular-nums; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 2px 0 12px; font-size: 12px; color: var(--text-secondary); }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+
+  /* Columns, for magnitude at discrete intervals. No SVG and no canvas: this
+     file's whole visual vocabulary is divs with inline sizes, and columns are
+     the same thing rotated, which also degrades on a phone in a way a fixed
+     viewBox does not. */
+  /* The 2px gap is the same surface gap the phase track uses: two adjacent
+     populated buckets must read as two bars, not one bar of double width. At
+     84 columns it costs 168px of a ~1150px row, leaving ~11px per column. */
+  .col-chart { display: flex; align-items: flex-end; gap: 2px; height: 96px; }
+  .col { flex: 1 1 0; min-width: 1px; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; }
+  .col-fill { background: var(--s1); border-radius: 3px 3px 0 0; }
+  /* An empty interval is drawn as a 2px stub on the baseline rather than as
+     nothing. Silently omitting it closes a gap in traffic up into a smooth run
+     of bars, which is the one thing a network of donated machines must not do. */
+  .col-fill.stub { height: 2px; background: var(--gridline); border-radius: 0; }
+  /* The extreme value gets one direct label rather than a number on every
+     column -- and it is anchored over the column it describes. A centred label
+     on a 48-column chart points at column 24, which is not where the peak is;
+     on the real data that put "was slowest" in the middle of an axis whose only
+     populated column was the last one. */
+  .col-marker { position: relative; height: 15px; }
+  .col-marker span { position: absolute; white-space: nowrap; font-size: 11px;
+    color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .col-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 7px; font-variant-numeric: tabular-nums; }
+
+  /* The table view for a chart with more bars than anyone wants open at once.
+     `details` is keyboard-operable natively, which matters here because this
+     file carries no aria attributes and its tables are its accessibility story. */
+  details.twin { margin-top: 14px; }
+  details.twin > summary { font-size: 12px; color: var(--text-secondary); cursor: pointer; }
+  details.twin > summary:hover { color: var(--text-primary); }
+  details.twin .twin-body { margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -187,7 +242,7 @@
   <div class="stats" id="stats"></div>
 
   <section>
-    <h2>Latency <span style="color:var(--muted); font-weight:400;">(last <span id="latency-window-label">24h</span>, percentiles over requests, not over nodes)</span></h2>
+    <h2>Latency <span style="color:var(--muted); font-weight:400;">(last <span class="js-window-label">24h</span>, percentiles over requests, not over nodes)</span></h2>
     <div class="window-switch" id="window-switch">
       <button type="button" data-hours="1">1h</button>
       <button type="button" data-hours="24" class="active">24h</button>
@@ -208,7 +263,22 @@
 
     <div class="latency-note" id="latency-note"></div>
 
-    <div class="card" style="margin-top:16px;"><div id="latency-by-node"></div></div>
+    <h3 class="chart-h">Where the time goes
+      <span class="hint">(last <span class="js-window-label">24h</span>; total = routing + to first token + generation, so the segments add up)</span></h3>
+    <div class="card"><div id="latency-phases"></div></div>
+
+    <h3 class="chart-h">Latency over time
+      <span class="hint">(last <span class="js-window-label">24h</span>, median total per bucket)</span></h3>
+    <div class="card"><div id="latency-timeseries"></div></div>
+
+    <h3 class="chart-h">Distribution of total latency
+      <span class="hint">(last <span class="js-window-label">24h</span>; how many requests, not how long)</span></h3>
+    <div class="card"><div id="latency-distribution"></div></div>
+
+    <h3 class="chart-h">By node
+      <span class="hint">(last <span class="js-window-label">24h</span>)</span></h3>
+    <div class="card"><div id="latency-by-node-bars"></div></div>
+    <div class="card" style="margin-top:12px;"><div id="latency-by-node"></div></div>
   </section>
 
   <section>
@@ -466,7 +536,21 @@ function renderDecisions(decisions) {
 // without saying so.
 
 const WINDOW_LABELS = { 1: '1h', 24: '24h', 168: '7d' };
+// Resolution per window, chosen so a bucket is a readable span at each scale
+// rather than a fixed count that turns 7 days into 24 three-hour slabs.
+const WINDOW_BUCKETS = { 1: 24, 24: 48, 168: 84 };
+const WINDOW_BINS = { 1: 8, 24: 12, 168: 16 };
 let windowHours = 24;
+
+// Fixed slot per phase, not colorFor(). colorFor assigns a hue by first-seen
+// order and is shared with the routing chart, so a phase would change colour
+// when a new node appeared, and two charts would fight over a new node's slot.
+// These three are the same three every render.
+const PHASE_SERIES = [
+  { key: 'route_ms', label: 'Routing (this gateway)', slot: '--s1' },
+  { key: 'ttft_ms', label: 'To first token (node)', slot: '--s2' },
+  { key: 'generation_ms', label: 'Generation (node)', slot: '--s3' },
+];
 
 function statTile(label, value, sub) {
   return `
@@ -497,15 +581,22 @@ function fmtRate(v) {
   return v == null ? '—' : v.toFixed(1);
 }
 
-function renderLatency(summary) {
+function renderLatency(summary, hours) {
   const measuredEl = document.getElementById('latency-tiles-measured');
   const reportedEl = document.getElementById('latency-tiles-reported');
   const noteEl = document.getElementById('latency-note');
   const nodeEl = document.getElementById('latency-by-node');
 
+  const phasesEl = document.getElementById('latency-phases');
+  const nodeBarsEl = document.getElementById('latency-by-node-bars');
+
+  // The two chart containers that read from the summary are blanked here too.
+  // The other two are fed by their own endpoints and clear themselves, so a
+  // window with no traffic loses nothing by this.
   const clear = () => {
     measuredEl.innerHTML = ''; reportedEl.innerHTML = '';
     noteEl.innerHTML = ''; nodeEl.innerHTML = '';
+    phasesEl.innerHTML = ''; nodeBarsEl.innerHTML = '';
   };
 
   // A dashboard that dies because one endpoint is missing is worse than one
@@ -517,15 +608,20 @@ function renderLatency(summary) {
       Latency metrics are unavailable — /metrics/summary did not answer.
       If this deployment predates the metrics table, apply migration 012.
     </div>`;
+    // The heading still says "Where the time goes", so the space below it has
+    // to say why it is empty rather than be a blank card.
+    phasesEl.innerHTML = '<div class="empty">Unavailable without /metrics/summary.</div>';
+    nodeBarsEl.innerHTML = '<div class="empty">Unavailable without /metrics/summary.</div>';
     return;
   }
 
   const T = summary.totals;
   if (!T.requests) {
     clear();
-    measuredEl.innerHTML = `<div class="empty">
-      No requests in the last ${WINDOW_LABELS[windowHours] || windowHours + 'h'}.
-    </div>`;
+    const none = `No requests in the last ${WINDOW_LABELS[hours] || hours + 'h'}.`;
+    measuredEl.innerHTML = `<div class="empty">${none}</div>`;
+    phasesEl.innerHTML = `<div class="empty">${none}</div>`;
+    nodeBarsEl.innerHTML = `<div class="empty">${none}</div>`;
     return;
   }
 
@@ -587,6 +683,285 @@ function renderLatency(summary) {
   }
 
   renderLatencyByNode(summary);
+  renderPhases(summary);
+  renderLatencyByNodeBars(summary);
+}
+
+// --- The four charts ------------------------------------------------------
+//
+// Each gets a table view as well as a picture. That is not decoration on this
+// page: the file carries no aria attributes at all, so a table is the only way
+// one of these numbers is reachable without a mouse.
+
+function legendHtml(series) {
+  return `<div class="legend">${series.map(s => `
+    <span class="legend-item">
+      <span class="legend-swatch" style="background:var(${s.slot});"></span>${s.label}
+    </span>`).join('')}</div>`;
+}
+
+// One bar per phase, sized by flex-grow off the millisecond value. The label
+// wears a text token, never the series colour -- a coloured mark beside it
+// carries the identity.
+function phaseBarHtml(name, req) {
+  const total = req.total_ms || 0;
+  const segs = PHASE_SERIES.map(s => {
+    const ms = req[s.key] || 0;
+    // A zero-length phase gets flex-grow 0 and vanishes. That is the honest
+    // rendering: routing that took no measurable time should not be given a
+    // visible sliver just so the bar looks complete.
+    return `<div class="phase-seg" style="flex:${ms}; background:var(${s.slot});"></div>`;
+  }).join('');
+  const parts = PHASE_SERIES
+    .map(s => `${s.label.split(' (')[0]} ${fmtMs(req[s.key])}`).join(' · ');
+  return `
+    <div class="phase-row">
+      <div class="name">${name}</div>
+      <div class="phase-track">${segs}</div>
+      <div class="total">${fmtMs(total)}</div>
+    </div>
+    <div class="empty" style="text-align:left; padding:0 0 6px 142px; font-size:11px;">${parts}</div>
+  `;
+}
+
+function renderPhases(summary) {
+  const el = document.getElementById('latency-phases');
+  const P = summary.phases;
+
+  if (!P || !P.median_request) {
+    // Two ways to have nothing to draw, and they are different facts. Say which.
+    el.innerHTML = `<div class="empty">
+      ${P && P.count ? 'No decomposition available.' :
+        'Nothing to decompose yet. A request can only be split into phases if it '
+        + 'streamed — a non-streaming request has no first token to measure from — '
+        + 'and no request in this window did.'}
+    </div>`;
+    return;
+  }
+
+  const rows = [
+    ['Typical request (median)', P.median_request],
+    ['Slow request (p95)', P.p95_request],
+  ].filter(([, r]) => r);
+
+  el.innerHTML = `
+    ${legendHtml(PHASE_SERIES)}
+    ${rows.map(([name, r]) => phaseBarHtml(name, r)).join('')}
+    <div class="empty" style="text-align:left; padding-top:14px;">
+      Each bar is <strong>one real request</strong> — the median and the p95th of the
+      ${P.count} request${P.count === 1 ? '' : 's'} in this window that streamed — so its
+      three segments sum exactly to its own total. <span class="mut">The per-phase
+      figures in the table below are percentiled separately, so they come from
+      different requests and do not add up to the total beside them; that is why the
+      bars are built this way.</span>
+    </div>
+    <details class="twin">
+      <summary>Table view — per-phase percentiles (ms)</summary>
+      <div class="twin-body">
+        <table>
+          <thead><tr>
+            <th>Phase</th><th class="num">p50</th><th class="num">p95</th>
+          </tr></thead>
+          <tbody>
+            ${PHASE_SERIES.map(s => `
+              <tr>
+                <td>${s.label}</td>
+                <td class="num">${fmtMs(P[s.key].p50)}</td>
+                <td class="num">${fmtMs(P[s.key].p95)}</td>
+              </tr>`).join('')}
+            <tr>
+              <td class="mut">Total (all three clocks, measured separately)</td>
+              <td class="num">${fmtMs(summary.latency_ms.total.p50)}</td>
+              <td class="num">${fmtMs(summary.latency_ms.total.p95)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+  `;
+}
+
+// Bars for the per-node comparison. Single hue on purpose: the row label
+// already carries identity, so a categorical colour per node would encode the
+// same thing twice.
+function renderLatencyByNodeBars(summary) {
+  const el = document.getElementById('latency-by-node-bars');
+  const rows = (summary.by_node || []).filter(r => r.total_p50_ms != null);
+  if (rows.length === 0) {
+    el.innerHTML = '<div class="empty">No per-node timings in this window.</div>';
+    return;
+  }
+  const max = Math.max(...rows.map(r => r.total_p50_ms));
+  el.innerHTML = rows.map(r => `
+    <div class="bar-row">
+      <div class="name">${escapeHtml(r.node_name)}</div>
+      <div class="bar-track">
+        <div class="bar-fill" style="width:${(r.total_p50_ms / max * 100).toFixed(1)}%; background:var(--s1);"></div>
+      </div>
+      <div class="count">${fmtMs(r.total_p50_ms)}</div>
+    </div>
+  `).join('') + `
+    <div class="empty" style="text-align:left; padding-top:12px;">
+      Median total latency per node, scaled to the slowest. The full table below
+      has the percentiles and the reported columns.
+    </div>
+  `;
+}
+
+// A missing value and a genuine zero both render as the gray stub. The
+// difference matters: a zero that falls through to the fill path becomes a
+// *blue* 2px bar flush against its neighbours, and twelve of those fuse into
+// one continuous blue stripe across the histogram that reads as data.
+function colChartHtml(values, max) {
+  return values.map(v => {
+    if (v == null || !(max > 0) || !(v > 0)) {
+      return '<div class="col"><div class="col-fill stub"></div></div>';
+    }
+    const pct = Math.max(2, Math.round(v / max * 100));
+    return `<div class="col"><div class="col-fill" style="height:${pct}%;"></div></div>`;
+  }).join('');
+}
+
+// A single direct label for a chart's extreme value, placed over the column it
+// names. Anchored at that column's centre, flipping to sit inside the chart
+// near either end so it never overflows its card. Returns the span only; the
+// caller supplies the .col-marker row it sits in.
+function peakLabelHtml(idx, n, text) {
+  const pct = (idx + 0.5) / n * 100;
+  const anchor = pct < 14 ? 0 : pct > 86 ? 100 : 50;
+  return `<span style="left:${pct}%; transform:translateX(-${anchor}%)">` +
+    `${escapeHtml(text)}</span>`;
+}
+
+function renderTimeseries(ts, hours) {
+  const el = document.getElementById('latency-timeseries');
+  if (!ts) {
+    el.innerHTML = '<div class="empty">Latency over time is unavailable — /metrics/timeseries did not answer.</div>';
+    return;
+  }
+  const pts = ts.points || [];
+  const values = pts.map(p => p.total_p50_ms);
+  const max = values.reduce((a, v) => (v != null && v > a ? v : a), 0);
+
+  if (!(max > 0)) {
+    el.innerHTML = `<div class="empty">No requests in the last
+      ${WINDOW_LABELS[hours] || hours + 'h'}.</div>`;
+    return;
+  }
+
+  const withData = pts.filter(p => p.requests > 0);
+  const busiest = withData.reduce((a, p) => (p.total_p50_ms > a.total_p50_ms ? p : a), withData[0]);
+  const busiestIdx = pts.indexOf(busiest);
+
+  el.innerHTML = `
+    <div class="col-marker">${peakLabelHtml(busiestIdx, pts.length,
+      `${fmtBucket(busiest.bucket_start)} was slowest · ${fmtMs(busiest.total_p50_ms)}`)}</div>
+    <div class="col-chart">${colChartHtml(values, max)}</div>
+    <div class="col-axis">
+      <span>−${WINDOW_LABELS[hours] || hours + 'h'}</span>
+      <span>now</span>
+    </div>
+    <div class="empty" style="text-align:left; padding-top:12px;">
+      One column per bucket of ${Math.round(windowHours * 3600 / ts.buckets / 60)} minutes,
+      height is that bucket's median total latency, scaled to ${fmtMs(max)} across the window.
+      ${pts.length - withData.length} of ${pts.length} buckets had no requests at all and are
+      drawn as a flat mark on the baseline — a gap in traffic is a fact about this
+      network, not missing data. A bucket holding one request has a median equal to
+      that request, so read a lone tall column as one slow request rather than as an
+      hour that got worse.
+    </div>
+    <details class="twin">
+      <summary>Table view — ${pts.length} buckets</summary>
+      <div class="twin-body">
+        <table>
+          <thead><tr>
+            <th>Bucket</th><th class="num">Requests</th><th class="num">Total p50</th>
+            <th class="num">Total p95</th><th class="num">TTFT p50</th><th class="num">Routing p50</th>
+          </tr></thead>
+          <tbody>
+            ${pts.map(p => `
+              <tr>
+                <td>${escapeHtml(fmtBucket(p.bucket_start))}</td>
+                <td class="num">${p.requests}</td>
+                <td class="num">${fmtMs(p.total_p50_ms)}</td>
+                <td class="num">${fmtMs(p.total_p95_ms)}</td>
+                <td class="num">${fmtMs(p.ttft_p50_ms)}</td>
+                <td class="num">${fmtMs(p.route_p50_ms)}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  `;
+}
+
+function fmtBucket(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return '—';
+  return d.toLocaleString(undefined,
+    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function renderDistribution(dist, hours) {
+  const el = document.getElementById('latency-distribution');
+  if (!dist) {
+    el.innerHTML = '<div class="empty">The distribution is unavailable — /metrics/distribution did not answer.</div>';
+    return;
+  }
+  const pts = dist.points || [];
+  const counts = pts.map(p => p.requests);
+  const max = counts.reduce((a, v) => (v > a ? v : a), 0);
+
+  if (!dist.total) {
+    el.innerHTML = `<div class="empty">No requests in the last
+      ${WINDOW_LABELS[hours] || hours + 'h'}, so there is no shape to draw.</div>`;
+    return;
+  }
+
+  const peak = pts.reduce((a, p) => (p.requests > a.requests ? p : a), pts[0]);
+  const edges = dist.edge_ms || [];
+
+  el.innerHTML = `
+    <div class="col-chart">${colChartHtml(counts, max)}</div>
+    <div class="col-marker">${peakLabelHtml(peak.bin - 1, pts.length,
+      `most requests: ${fmtMs(edges[peak.bin - 1])}–${fmtMs(edges[peak.bin])} ` +
+      `(${peak.requests} of ${dist.total})`)}</div>
+    <div class="col-axis">
+      <span>0</span>
+      <span>${fmtMs(dist.hi_ms)}</span>
+    </div>
+    ${dist.sparse ? `
+      <div class="empty" style="text-align:left; padding-top:12px;">
+        <strong>${dist.total} request${dist.total === 1 ? '' : 's'} is too few to read a shape from.</strong>
+        Bars drawn from a handful of requests look exactly like bars drawn from
+        thousands. Treat this as a placeholder that will fill in as traffic arrives —
+        the percentiles above are the figures to quote at this sample size.
+      </div>` : `
+      <div class="empty" style="text-align:left; padding-top:12px;">
+        ${dist.bins} bins spanning 0 to ${fmtMs(dist.hi_ms)}, the slowest request in the
+        window, across ${dist.total} requests. Height is how many requests landed in
+        each range, not how long they took.
+      </div>`}
+    <details class="twin">
+      <summary>Table view — ${dist.bins} bins (ms)</summary>
+      <div class="twin-body">
+        <table>
+          <thead><tr>
+            <th>Range</th><th class="num">Requests</th><th class="num">Range observed</th>
+          </tr></thead>
+          <tbody>
+            ${pts.map(p => `
+              <tr>
+                <td>${fmtMs(edges[p.bin - 1])} – ${fmtMs(edges[p.bin])}</td>
+                <td class="num">${p.requests}</td>
+                <td class="num mut">${p.requests
+                  ? fmtMs(p.min_ms) + ' – ' + fmtMs(p.max_ms) : '—'}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  `;
 }
 
 function renderLatencyByNode(summary) {
@@ -629,29 +1004,101 @@ function renderLatencyByNode(summary) {
   `;
 }
 
+// Refreshes never overlap, and a window change during one is coalesced into a
+// single follow-up. Two reasons this is a guard and not a "newest wins" ticket:
+// with a ticket, a tick that started before a click can resolve after it and
+// repaint the abandoned window; and if a fetch ever takes longer than the 5s
+// interval, every refresh is superseded before it can paint and the dashboard
+// stops updating entirely -- on a dashboard whose subject is 50-second
+// requests, a slow fetch is the normal case, not the edge case.
+let refreshing = false;
+let pending = false;
+
+// A per-request budget. The gateway's own pool gives up at 30s (db.py), so
+// stopping first at 25s means a stuck request fails *this* refresh and the next
+// tick retries, instead of holding `refreshing` true and freezing the page
+// forever. Every request on this deployment has been observed under 3s, so this
+// never fires in normal operation -- it is the backstop for the abnormal one.
+const FETCH_MS = 25000;
+const budget = () => AbortSignal.timeout(FETCH_MS);
+
 async function refresh() {
+  if (refreshing) { pending = true; return; }
+  refreshing = true;
+  // The window this refresh is fetching, captured once. Captions are written
+  // from this and not from the global, so a click that lands mid-flight cannot
+  // relabel data that is already on its way.
+  const hours = windowHours;
   try {
-    const [nodes, decisions, catalogue, summary] = await Promise.all([
-      fetch('/nodes').then(r => r.json()),
-      fetch('/decisions/recent?limit=50').then(r => r.json()),
-      fetch('/catalogue').then(r => r.json()),
-      // Resolves to null instead of rejecting, so a deployment without the
+    // Two independent groups, settled separately. Previously all six requests
+    // shared one Promise.all and three of them had no catch, so a single slow
+    // node list blanked the latency charts too and kept the page on its last
+    // render permanently. The legacy three stay all-or-nothing *with each
+    // other* -- they are one view of one topology -- but they no longer share a
+    // fate with the charts.
+    const legacy = Promise.all([
+      fetch('/nodes', { signal: budget() }).then(r => r.json()),
+      fetch('/decisions/recent?limit=50', { signal: budget() }).then(r => r.json()),
+      fetch('/catalogue', { signal: budget() }).then(r => r.json()),
+    ]).then(([nodes, decisions, catalogue]) => {
+      renderStats(nodes, decisions);
+      renderNodes(nodes);
+      renderCoverage(nodes, decisions);
+      renderCatalogue(catalogue);
+      renderRoutingChart(nodes, decisions);
+      renderDecisions(decisions);
+    });
+
+    const charts = Promise.all([
+      // Each resolves to null instead of rejecting, so a deployment without the
       // metrics table loses one section rather than the whole dashboard.
-      fetch('/metrics/summary?window_hours=' + windowHours)
+      fetch('/metrics/summary?window_hours=' + hours, { signal: budget() })
         .then(r => r.ok ? r.json() : null)
         .catch(() => null),
-    ]);
-    renderStats(nodes, decisions);
-    renderNodes(nodes);
-    renderCoverage(nodes, decisions);
-    renderCatalogue(catalogue);
-    renderRoutingChart(nodes, decisions);
-    renderDecisions(decisions);
-    renderLatency(summary);
-    document.getElementById('last-updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+      // Bucket counts vary by window on purpose: 24 columns for an hour of
+      // traffic is a readable column chart, 24 for a week collapses the week
+      // into two-hour blocks that hide the shape it is meant to show.
+      fetch(`/metrics/timeseries?window_hours=${hours}&buckets=${WINDOW_BUCKETS[hours] || 24}`,
+            { signal: budget() })
+        .then(r => r.ok ? r.json() : null)
+        .catch(() => null),
+      fetch(`/metrics/distribution?window_hours=${hours}&bins=${WINDOW_BINS[hours] || 12}`,
+            { signal: budget() })
+        .then(r => r.ok ? r.json() : null)
+        .catch(() => null),
+    ]).then(([summary, timeseries, distribution]) => {
+      renderLatency(summary, hours);
+      renderTimeseries(timeseries, hours);
+      renderDistribution(distribution, hours);
+      // Only now, with the matching numbers in the DOM. The labels name the
+      // window the reader is actually looking at.
+      setWindowLabels(hours);
+    });
+
+    const [legacyResult, chartsResult] = await Promise.allSettled([legacy, charts]);
+    // Say so rather than showing the previous topology as if it were current.
+    const stale = legacyResult.status === 'rejected' || chartsResult.status === 'rejected';
+    document.getElementById('last-updated').textContent = stale
+      ? 'partly stale — retrying…'
+      : 'updated ' + new Date().toLocaleTimeString();
   } catch (e) {
     document.getElementById('last-updated').textContent = 'update failed — retrying…';
+  } finally {
+    refreshing = false;
   }
+  // A click that landed while we were fetching gets its own pass, with the
+  // window it asked for.
+  if (pending) { pending = false; refresh(); }
+}
+
+// The labels name the window the numbers below them belong to, so they are set
+// when the data lands and not when the button is clicked. Setting them on click
+// printed "24h" over charts that were still the 1h render for as long as the
+// fetch took -- and if that fetch then failed, the page kept naming a window it
+// was not showing, which is the one thing a metrics page must not do.
+function setWindowLabels(hours) {
+  const text = WINDOW_LABELS[hours] || hours + 'h';
+  document.querySelectorAll('.js-window-label').forEach(el => { el.textContent = text; });
 }
 
 document.getElementById('window-switch').addEventListener('click', (e) => {
@@ -660,8 +1107,6 @@ document.getElementById('window-switch').addEventListener('click', (e) => {
   windowHours = Number(btn.dataset.hours);
   document.querySelectorAll('#window-switch button')
     .forEach(b => b.classList.toggle('active', b === btn));
-  document.getElementById('latency-window-label').textContent =
-    WINDOW_LABELS[windowHours] || windowHours + 'h';
   refresh();
 });
 
