@@ -7,7 +7,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app import compose, db, embedder, ratelimit, upstream
+from app import compose, db, embedder, metrics, ratelimit, upstream
 from app.compose import PanelPlan
 from app.config import settings
 from app.router import ScoredNode, best_matched_domain, score_nodes
@@ -235,7 +235,17 @@ def _sse_from_text(content: str, model: str):
     return gen()
 
 
-def _proxy_response(resp: httpx.Response, headers: dict[str, str], stream: bool):
+def _proxy_response(resp: httpx.Response, headers: dict[str, str], stream: bool,
+                    on_done=None):
+    """Relay the node's response, and tell the caller when the last byte went out.
+
+    `on_done` fires in the generator's `finally`, once the body has been fully
+    relayed or the client has hung up -- which is the only place the end of a
+    streamed response is observable. It is called synchronously and must not
+    block: the metrics write it triggers is queued on its own task (see
+    `metrics.spawn`), because a client that hung up mid-answer is the case most
+    worth recording and an `await` here would be cancelled before it ran.
+    """
     if stream:
         async def body_iter():
             client = resp.extensions["_client"]
@@ -245,6 +255,8 @@ def _proxy_response(resp: httpx.Response, headers: dict[str, str], stream: bool)
             finally:
                 await resp.aclose()
                 await client.aclose()
+                if on_done is not None:
+                    on_done()
 
         return StreamingResponse(
             body_iter(),
@@ -266,6 +278,7 @@ async def _handle_composed(
     scored: list[ScoredNode],
     start: float,
     route_ms: int,
+    t0: float,
 ):
     """Fan out to the panel, verify, aggregate.
 
@@ -276,6 +289,21 @@ async def _handle_composed(
     """
     answers = await compose.run_panel(plan, body)
     panel_ids = [m.node["id"] for m in plan.members]
+
+    def _record(node: dict, topology: str, *, ttft_ms, total_ms, ok=True, error=None):
+        """One metrics row for a composed request.
+
+        No `node_report` here, deliberately. On the single-route path the
+        gateway read one node's response headers, so there was one machine whose
+        claim to attach. A panel has N members plus an aggregator and no one of
+        them owns the timing, so there is nothing honest to report and
+        `node_reported` stays false.
+        """
+        metrics.record_request(
+            node_id=node["id"], node_name=node["name"], model_name=node["model_name"],
+            topology=topology, stream=stream, route_ms=route_ms,
+            ttft_ms=ttft_ms, total_ms=total_ms, ok=ok, error=error,
+        )
 
     if not answers:
         return None
@@ -309,6 +337,15 @@ async def _handle_composed(
             "X-Common-Score": f"{member.scored.score:.4f}",
         }
         model_name = member.node["model_name"]
+        # The answer is already complete, so there is no further waiting left to
+        # record: for a stream, the single chunk carrying it goes out now. ttft
+        # and total are therefore the same moment, and that is the truth about a
+        # synthesised response -- the user waited the whole time, then it arrived
+        # at once. The alternative, leaving ttft null as for a non-streaming
+        # request, would hide the wait rather than report it.
+        elapsed = int((time.monotonic() - t0) * 1000)
+        _record(member.node, "degraded",
+                ttft_ms=elapsed if stream else None, total_ms=elapsed)
         if stream:
             return StreamingResponse(_sse_from_text(content, model_name),
                                      media_type="text/event-stream", headers=headers)
@@ -346,6 +383,12 @@ async def _handle_composed(
             }, report=report,
         )
         headers = {**base_headers, "X-Common-Node": best.name, "X-Common-Topology": "degraded"}
+        # Credited to the member whose answer is being returned, not to the
+        # aggregator that failed -- the machine that did the work is the one
+        # whose latency this measures.
+        elapsed = int((time.monotonic() - t0) * 1000)
+        _record(best.node, "degraded",
+                ttft_ms=elapsed if stream else None, total_ms=elapsed)
         if stream:
             return StreamingResponse(_sse_from_text(content, best.node["model_name"]),
                                      media_type="text/event-stream", headers=headers)
@@ -371,13 +414,35 @@ async def _handle_composed(
         "X-Common-Disagreements": f"{len(report.disagreements)}",
     }
 
-    streamed = _proxy_response(resp, headers, stream)
+    panel_metrics = {
+        "node_id": plan.aggregator["id"],
+        "node_name": plan.aggregator["name"],
+        "model_name": plan.aggregator["model_name"],
+        "topology": "panel",
+        "stream": stream,
+        "route_ms": route_ms,
+        # The wait until the aggregator's first byte, which is what the user
+        # experienced as nothing happening: the panel fan-out, the slowest
+        # specialist, the verification, and then the aggregator's own model load
+        # and prompt. Every one of those is somebody else's fault, which is
+        # exactly why a composed request needs to be separable from a single one
+        # when the p95 moves.
+        "ttft_ms": latency_ms if stream else None,
+    }
+
+    streamed = _proxy_response(
+        resp, headers, stream,
+        on_done=lambda base=panel_metrics: metrics.record_request(
+            **base, total_ms=int((time.monotonic() - t0) * 1000)),
+    )
     if streamed is not None:
         return streamed
 
     content = await resp.aread()
     await resp.aclose()
     await resp.extensions["_client"].aclose()
+    metrics.record_request(
+        **panel_metrics, total_ms=int((time.monotonic() - t0) * 1000))
     return Response(
         content=content,
         status_code=resp.status_code,
@@ -514,7 +579,7 @@ async def chat_completions(request: Request):
             start = time.monotonic()
             composed = await _handle_composed(
                 plan, body, stream, request_embed, matched_domain, scored, start,
-                route_ms=route_ms(),
+                route_ms=route_ms(), t0=t0,
             )
             if composed is not None:
                 return composed
@@ -557,6 +622,27 @@ async def chat_completions(request: Request):
                 topology="single", compose_reason={"compose": False, "reason": plan.reason},
             )
 
+            # Everything known about this request's cost at the moment its first
+            # byte lands. `total_ms` is deliberately absent: it is not knowable
+            # until the last byte has gone out, which for a stream is after the
+            # loop below has finished.
+            metrics_base = {
+                "node_id": candidate.node["id"],
+                "node_name": candidate.node["name"],
+                "model_name": candidate.node["model_name"],
+                "topology": "single",
+                "stream": stream,
+                "route_ms": route_ms_at_decision,
+                # Null unless streaming, and that is a real distinction rather
+                # than a gap. For a non-streaming request Ollama buffers and
+                # sends its headers together with the complete body, so there is
+                # no first token anyone could have timed; filling this in with
+                # the time to headers would put a whole generation into a
+                # distribution of first tokens. See migrations/012.
+                "ttft_ms": latency_ms if stream else None,
+                **metrics.node_report(resp.headers),
+            }
+
             headers = {
                 "X-Common-Node": candidate.node["name"],
                 "X-Common-Score": "forced" if forced_node_name else f"{candidate.score:.4f}",
@@ -595,13 +681,25 @@ async def chat_completions(request: Request):
                 "X-Common-Compose-Reason": _header_safe(plan.reason),
             }
 
-            streamed = _proxy_response(resp, headers, stream)
+            streamed = _proxy_response(
+                resp, headers, stream,
+                # Bound as a default argument rather than closed over: this
+                # callback runs after the function has returned, and a closure
+                # over the loop's variables would read whatever the last
+                # iteration left there.
+                on_done=lambda base=metrics_base: metrics.record_request(
+                    **base, total_ms=int((time.monotonic() - t0) * 1000)),
+            )
             if streamed is not None:
                 return streamed
 
             content = await resp.aread()
             await resp.aclose()
             await resp.extensions["_client"].aclose()
+            # Non-streaming: headers and body arrive together, so this is also
+            # the end of the response. There is no earlier moment to have timed.
+            metrics.record_request(
+                **metrics_base, total_ms=int((time.monotonic() - t0) * 1000))
             return Response(
                 content=content,
                 status_code=resp.status_code,
@@ -613,6 +711,23 @@ async def chat_completions(request: Request):
             latency_ms = int((time.monotonic() - start) * 1000)
             if attempt == len(candidates) - 1:
                 await _record_decision(request_embed, None, None, latency_ms, False, matched_domain)
+                # Failures are recorded, and recorded as failures. A latency
+                # distribution built only from requests that worked describes a
+                # network nobody is using: the requests that timed out on a cold
+                # node are the tail, and dropping them is the one way to make the
+                # p95 look good while the network gets worse.
+                metrics.record_request(
+                    node_id=candidate.node["id"],
+                    node_name=candidate.node["name"],
+                    model_name=candidate.node["model_name"],
+                    topology="single",
+                    stream=stream,
+                    route_ms=route_ms_at_decision,
+                    ttft_ms=None,
+                    total_ms=int((time.monotonic() - t0) * 1000),
+                    ok=False,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
 
     raise HTTPException(status_code=502, detail=f"all candidate nodes failed: {last_error}")
 

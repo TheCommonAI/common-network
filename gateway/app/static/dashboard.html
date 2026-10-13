@@ -74,6 +74,50 @@
   }
   .stat-tile .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
   .stat-tile .value { font-size: 28px; font-weight: 600; font-variant-numeric: proportional-nums; }
+  /* One line of context under a figure: what it covers, how many requests are
+     behind it, whether it is a claim or a measurement. A number with no
+     population attached is a number nobody can act on. */
+  .stat-tile .sub { font-size: 11px; color: var(--muted); margin-top: 5px; }
+
+  /* The window switcher sits in one row directly above the tiles it scopes.
+     A filter that changes the numbers has to be adjacent to them -- the reader
+     should never have to hunt for the thing that would explain a figure. */
+  .window-switch { display: flex; gap: 6px; margin-bottom: 14px; }
+  .window-switch button {
+    font: inherit; font-size: 12px; padding: 4px 13px; cursor: pointer;
+    background: var(--surface-1); color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: 100px;
+  }
+  .window-switch button:hover { color: var(--text-primary); }
+  .window-switch button.active {
+    background: var(--text-primary); color: var(--page); border-color: var(--text-primary);
+  }
+
+  /* Two groups, because these numbers do not have the same owner. The top
+     group is measured here; the bottom group is asserted by a stranger's
+     machine. Stacking them in one undifferentiated grid would launder the
+     second kind into the first. */
+  .tile-group { margin-bottom: 22px; }
+  .tile-group:last-of-type { margin-bottom: 0; }
+  .tile-group-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+  .tile-group .stats { margin-bottom: 0; }
+
+  /* Provenance, not status. An unverified figure is not a bad one, it is an
+     unknown one, so this is a muted outline rather than the amber the
+     dashboard reserves for degraded panels -- nothing here is a warning about
+     the network's health. */
+  .unverified-chip {
+    display: inline-flex; align-items: center; font-size: 11px; font-weight: 500;
+    padding: 1px 7px; border-radius: 100px; margin-left: 6px;
+    border: 1px solid var(--baseline); color: var(--muted);
+  }
+  .latency-note { color: var(--muted); font-size: 12px; line-height: 1.6; margin-top: 16px; }
+  .mut { color: var(--muted); }
+  /* Equal-width digits, but only here. A column of latencies is read by
+     scanning down it, so the decimal points have to line up -- the opposite of
+     the stat tile above, where proportional figures stop a large number
+     looking loose. */
+  .num { font-variant-numeric: tabular-nums; text-align: right; }
 
   section { margin-bottom: 36px; }
   section h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; color: var(--text-primary); }
@@ -141,6 +185,31 @@
   </header>
 
   <div class="stats" id="stats"></div>
+
+  <section>
+    <h2>Latency <span style="color:var(--muted); font-weight:400;">(last <span id="latency-window-label">24h</span>, percentiles over requests, not over nodes)</span></h2>
+    <div class="window-switch" id="window-switch">
+      <button type="button" data-hours="1">1h</button>
+      <button type="button" data-hours="24" class="active">24h</button>
+      <button type="button" data-hours="168">7d</button>
+    </div>
+
+    <div class="tile-group">
+      <div class="tile-group-label">Measured by this gateway</div>
+      <div class="stats" id="latency-tiles-measured"></div>
+    </div>
+
+    <div class="tile-group">
+      <div class="tile-group-label">
+        Reported by the nodes<span class="unverified-chip">unverified</span>
+      </div>
+      <div class="stats" id="latency-tiles-reported"></div>
+    </div>
+
+    <div class="latency-note" id="latency-note"></div>
+
+    <div class="card" style="margin-top:16px;"><div id="latency-by-node"></div></div>
+  </section>
 
   <section>
     <h2>Nodes</h2>
@@ -391,12 +460,186 @@ function renderDecisions(decisions) {
   `;
 }
 
+// --- Latency ---------------------------------------------------------------
+// Everything below reads /metrics/summary. The two rules it exists to keep:
+// a null is never rendered as a zero, and a node-reported number never appears
+// without saying so.
+
+const WINDOW_LABELS = { 1: '1h', 24: '24h', 168: '7d' };
+let windowHours = 24;
+
+function statTile(label, value, sub) {
+  return `
+    <div class="stat-tile">
+      <div class="label">${label}</div>
+      <div class="value">${value}</div>
+      ${sub ? `<div class="sub">${sub}</div>` : ''}
+    </div>
+  `;
+}
+
+// Milliseconds are the wrong unit at both ends of this distribution. Routing
+// is tens of ms and a cold model load is thousands, and printing "3192 ms" for
+// a figure a reader wants to compare against "1.98 s" elsewhere on the page is
+// how a dashboard makes someone do arithmetic it should have done.
+function fmtMs(v) {
+  if (v == null) return '—';
+  if (v < 1000) return Math.round(v) + ' ms';
+  const s = v / 1000;
+  return (s < 10 ? s.toFixed(2) : s.toFixed(1)) + ' s';
+}
+
+function fmtPct(v) {
+  return v == null ? '—' : Math.round(v * 100) + '%';
+}
+
+function fmtRate(v) {
+  return v == null ? '—' : v.toFixed(1);
+}
+
+function renderLatency(summary) {
+  const measuredEl = document.getElementById('latency-tiles-measured');
+  const reportedEl = document.getElementById('latency-tiles-reported');
+  const noteEl = document.getElementById('latency-note');
+  const nodeEl = document.getElementById('latency-by-node');
+
+  const clear = () => {
+    measuredEl.innerHTML = ''; reportedEl.innerHTML = '';
+    noteEl.innerHTML = ''; nodeEl.innerHTML = '';
+  };
+
+  // A dashboard that dies because one endpoint is missing is worse than one
+  // section that says it is missing. This is caught in refresh() and arrives
+  // here as null.
+  if (!summary) {
+    clear();
+    measuredEl.innerHTML = `<div class="empty">
+      Latency metrics are unavailable — /metrics/summary did not answer.
+      If this deployment predates the metrics table, apply migration 012.
+    </div>`;
+    return;
+  }
+
+  const T = summary.totals;
+  if (!T.requests) {
+    clear();
+    measuredEl.innerHTML = `<div class="empty">
+      No requests in the last ${WINDOW_LABELS[windowHours] || windowHours + 'h'}.
+    </div>`;
+    return;
+  }
+
+  const L = summary.latency_ms;
+
+  measuredEl.innerHTML = [
+    statTile('TTFT p50', fmtMs(L.ttft.p50),
+      T.streaming ? `typical · of ${T.streaming} streaming` : 'no streaming requests yet'),
+    statTile('TTFT p95', fmtMs(L.ttft.p95), '1 in 20 slower'),
+    statTile('Total p50', fmtMs(L.total.p50), `typical · all ${T.requests} req`),
+    statTile('Total p95', fmtMs(L.total.p95), '1 in 20 slower'),
+    statTile('Routing p50', fmtMs(L.routing.p50), "this gateway's own share"),
+  ].join('');
+
+  const bits = [];
+  if (T.failed) {
+    bits.push(`${T.failed} of ${T.requests} requests failed in this window.`);
+  }
+  const mode = L.total_by_mode;
+  if (mode.streaming_p50 != null && mode.non_streaming_p50 != null) {
+    bits.push(`Typical total by mode — streaming ${fmtMs(mode.streaming_p50)}, ` +
+              `non-streaming ${fmtMs(mode.non_streaming_p50)}.`);
+  }
+  bits.push('TTFT is the wait for the node\'s first byte, which for a streaming ' +
+            'request is the first token: Ollama sends no response headers until the ' +
+            'model is resident, so a cold node\'s TTFT is mostly a model load, not ' +
+            'routing. Routing above is what this gateway is actually responsible for.');
+  bits.push('A non-streaming request has no observable first token — Ollama ' +
+            'buffers the whole answer and sends headers with it — so its TTFT is ' +
+            'null rather than estimated, and TTFT covers streaming requests only.');
+  noteEl.innerHTML = bits.join(' ');
+
+  const NR = summary.node_reports;
+  // Today every node sends nothing, so this branch is the live one. It must
+  // read as "not measurable yet", not as "instant".
+  if (!NR.reported) {
+    reportedEl.innerHTML = `<div class="empty">
+      Nothing reported, by design. Model load and generation throughput are only
+      knowable at the node itself, and the worker does not ask for them — it
+      proxies Ollama's OpenAI-compatible endpoint, which returns no durations.
+      They are shown as absent rather than as zero, so that a gap never reads as
+      a fast node. Everything this gateway can measure on its own is in the
+      group above.
+    </div>`;
+  } else {
+    reportedEl.innerHTML = [
+      statTile('Cold model load p50', fmtMs(NR.model_load_ms.cold_p50),
+        `${NR.cold_requests} cold of ${NR.reported} reported`),
+      statTile('Tokens/sec p50', fmtRate(NR.tokens_per_second.p50),
+        'generation throughput'),
+      statTile('Cold share', fmtPct(NR.cold_fraction),
+        'of requests a node reported on'),
+    ].join('');
+    noteEl.innerHTML += ` Node-reported figures cover ${NR.reported} of ${T.requests} ` +
+      `requests (${fmtPct(NR.coverage)}). Warm model load p50 is ` +
+      `${fmtMs(NR.model_load_ms.warm_p50)} — near zero is correct, since Ollama ` +
+      `keeps the model resident; a warm figure that is not near zero means the ` +
+      `node is timing its keep-alive window rather than a load.`;
+  }
+
+  renderLatencyByNode(summary);
+}
+
+function renderLatencyByNode(summary) {
+  const el = document.getElementById('latency-by-node');
+  const rows = summary.by_node || [];
+  if (rows.length === 0) {
+    el.innerHTML = '<div class="empty">No per-node timings in this window.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Node</th><th>Model</th><th class="num">Requests</th>
+        <th class="num">TTFT p50</th><th class="num">TTFT p95</th>
+        <th class="num">Total p50</th><th class="num">Routing p50</th>
+        <th class="num">Cold load p50 †</th><th class="num">Tokens/sec †</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr>
+            <td>${escapeHtml(r.node_name)}</td>
+            <td>${escapeHtml(r.model_name || '—')}</td>
+            <td class="num">${r.requests}${r.reported ? ` <span class="mut">(${r.reported} rep)</span>` : ''}</td>
+            <td class="num">${fmtMs(r.ttft_p50_ms)}</td>
+            <td class="num">${fmtMs(r.ttft_p95_ms)}</td>
+            <td class="num">${fmtMs(r.total_p50_ms)}</td>
+            <td class="num">${fmtMs(r.route_p50_ms)}</td>
+            <td class="num">${fmtMs(r.load_p50_ms)}</td>
+            <td class="num">${fmtRate(r.tokens_per_second_p50)}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+    <div class="empty" style="text-align:left; padding-top:12px;">
+      † Reported by the node itself, and unverified. Nodes are strangers' machines
+      on a permissionless registry, and a node that wanted to look fast could send
+      whatever it liked. A "—" means the node sent nothing for that column, which is
+      not the same as a fast one. The other columns are measured here.
+    </div>
+  `;
+}
+
 async function refresh() {
   try {
-    const [nodes, decisions, catalogue] = await Promise.all([
+    const [nodes, decisions, catalogue, summary] = await Promise.all([
       fetch('/nodes').then(r => r.json()),
       fetch('/decisions/recent?limit=50').then(r => r.json()),
       fetch('/catalogue').then(r => r.json()),
+      // Resolves to null instead of rejecting, so a deployment without the
+      // metrics table loses one section rather than the whole dashboard.
+      fetch('/metrics/summary?window_hours=' + windowHours)
+        .then(r => r.ok ? r.json() : null)
+        .catch(() => null),
     ]);
     renderStats(nodes, decisions);
     renderNodes(nodes);
@@ -404,11 +647,23 @@ async function refresh() {
     renderCatalogue(catalogue);
     renderRoutingChart(nodes, decisions);
     renderDecisions(decisions);
+    renderLatency(summary);
     document.getElementById('last-updated').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch (e) {
     document.getElementById('last-updated').textContent = 'update failed — retrying…';
   }
 }
+
+document.getElementById('window-switch').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-hours]');
+  if (!btn) return;
+  windowHours = Number(btn.dataset.hours);
+  document.querySelectorAll('#window-switch button')
+    .forEach(b => b.classList.toggle('active', b === btn));
+  document.getElementById('latency-window-label').textContent =
+    WINDOW_LABELS[windowHours] || windowHours + 'h';
+  refresh();
+});
 
 refresh();
 setInterval(refresh, 5000);

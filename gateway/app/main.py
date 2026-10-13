@@ -14,6 +14,7 @@ from app.decisions import router as decisions_router
 from app.demand import router as demand_router
 from app.gateway import router as gateway_router
 from app.health import health_check_loop
+from app.metrics import router as metrics_router
 from app.registry import router as registry_router
 from app.seed import seed_from_file
 
@@ -79,6 +80,7 @@ app = FastAPI(
 app.include_router(registry_router)
 app.include_router(gateway_router)
 app.include_router(decisions_router)
+app.include_router(metrics_router)
 app.include_router(catalogue_router)
 app.include_router(demand_router)
 app.include_router(admin_router)
