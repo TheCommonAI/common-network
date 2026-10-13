@@ -417,6 +417,17 @@ def main() -> int:
     """
     import argparse
 
+    # The banner line below prints an arrow. On Windows a redirected stream --
+    # a pipe, or the file a supervisor sends output to -- gets the locale
+    # encoding, which is cp1252 on most installs and cannot encode it, so the
+    # worker would die on its own first line. `common join` calls serve() in
+    # process and has already done this, but standing alone it has not.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
     p = argparse.ArgumentParser(prog="common-worker", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--token", required=True, help="worker token issued by the gateway")

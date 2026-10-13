@@ -86,6 +86,30 @@ def _enable_windows_ansi() -> None:
         pass
 
 
+def _force_utf8_output() -> None:
+    """Pin stdout/stderr to UTF-8 whatever the Windows code page says.
+
+    A Windows console renders the glyph vocabulary (← → ⚠) and the banner
+    fine -- Python reaches it through the UTF-16 console API. A *redirected*
+    stream does not: a pipe or a file gets the locale encoding, which is cp1252
+    on most installs, and cp1252 cannot encode any of those characters. The
+    result is UnicodeEncodeError and a dead client.
+
+    Logging a session to a file, or piping it through anything, should not be
+    fatal -- and on Windows it was.
+
+    errors="replace" is deliberate rather than strict: a glyph is decoration,
+    and decoration must never be able to stop the client from running. A stream
+    that cannot be reconfigured at all (already replaced, closed, or not a
+    TextIOWrapper) is left alone -- the banner is worth less than the session.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 # --- Palette / style ---------------------------------------------------------
 # Exactly the four brand colours from the COMMON. design doc. No green, no
 # purple, no gradients -- restraint is the point.
@@ -383,6 +407,7 @@ def list_nodes(gateway: str) -> None:
 
 
 def main() -> None:
+    _force_utf8_output()
     sys.stdout.reconfigure(line_buffering=True)
     _enable_windows_ansi()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

@@ -184,6 +184,38 @@ def _enable_windows_ansi() -> None:
         pass
 
 
+def _force_utf8_output() -> None:
+    """Pin stdout/stderr to UTF-8 whatever the Windows code page says.
+
+    A Windows console renders the glyph vocabulary (← → ─ │ └) and the banner
+    fine -- Python reaches it through the UTF-16 console API. A *redirected*
+    stream does not: a pipe or a file gets the locale encoding, which is cp1252
+    on most installs, and cp1252 cannot encode any of those characters. The
+    result is UnicodeEncodeError and a dead process.
+
+    This file is where that hurt most, because two of the things it runs on
+    Windows read a subprocess's redirected output:
+
+      - `common leave` runs join.py with capture_output=True and greps the
+        result for "Removed". The child was killed by the UnicodeEncodeError
+        printing the ✓, so the message was never written and the check could
+        never pass.
+      - `common join --permanent` installs a scheduled task that sends both
+        streams to join.log, so the node died printing its own banner -- before
+        it ever reached the model install.
+
+    errors="replace" is deliberate rather than strict: a glyph is decoration,
+    and decoration must never be able to stop the CLI from running. A stream
+    that cannot be reconfigured at all (already replaced, closed, or not a
+    TextIOWrapper) is left alone -- the banner is worth less than the command.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def _color_enabled() -> bool:
     return sys.stdout.isatty() and not os.environ.get("NO_COLOR") and not _ARGS_NO_COLOR[0]
 
@@ -2923,6 +2955,7 @@ def interactive_session(gateway: str, args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    _force_utf8_output()
     sys.stdout.reconfigure(line_buffering=True)
     _enable_windows_ansi()
 
