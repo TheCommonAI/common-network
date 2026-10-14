@@ -72,22 +72,25 @@ BANNER = r"""
                                                                                                      
 """
 
-OLLAMA_URL = "http://localhost:11434"
+# 127.0.0.1 instead of localhost: on Windows, localhost may resolve to ::1 (IPv6)
+# while the service binds only to IPv4, causing cloudflared and self-checks to
+# fail silently. Using the explicit IPv4 address works on all platforms.
+OLLAMA_URL = "http://127.0.0.1:11434"
 
-# What actually faces the network. Ollama itself stays on localhost: the worker
+# What actually faces the network. Ollama itself stays on 127.0.0.1: the worker
 # is the only thing the tunnel (or the LAN) can reach, and it requires the
 # gateway's token, serves two routes, and pins this node to one model. See
 # worker.py for why that matters -- an exposed Ollama has no authentication at
 # all, including on its model-management endpoints.
 WORKER_PORT = 11435
-WORKER_URL = f"http://localhost:{WORKER_PORT}"
+WORKER_URL = f"http://127.0.0.1:{WORKER_PORT}"
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
 
 # The default, shared Common Network gateway. Override with --gateway to
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
@@ -824,6 +827,38 @@ def tunnel_is_healthy(tunnel_url: str, worker_token: str) -> bool:
         return False
 
 
+# How long to wait for a quick tunnel to become reachable before registering.
+# Quick tunnels take a moment to propagate; without this check, registration
+# can succeed while the tunnel is still unreachable, causing the gateway to
+# mark the node unhealthy immediately.
+TUNNEL_WARMUP_TIMEOUT_SECONDS = 30
+
+
+def wait_for_tunnel(tunnel_url: str, worker_token: str) -> bool:
+    """Wait until the tunnel is reachable from outside, up to ~30 seconds.
+
+    Quick tunnels take a moment after cloudflared reports the URL before they
+    are actually routable. Registering before this window passes causes the
+    gateway to mark the node unhealthy immediately -- it can't reach us.
+
+    Returns True if the tunnel became reachable, False if it timed out.
+    """
+    deadline = time.monotonic() + TUNNEL_WARMUP_TIMEOUT_SECONDS
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
+        if tunnel_is_healthy(tunnel_url, worker_token):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        wait = min(2.0, remaining)
+        if attempt == 1:
+            working(f"waiting for tunnel to become reachable (up to {TUNNEL_WARMUP_TIMEOUT_SECONDS}s)...")
+        time.sleep(wait)
+    return False
+
+
 def lan_ip() -> str | None:
     """This machine's address on the local network.
 
@@ -872,11 +907,12 @@ def start_tunnel() -> tuple[subprocess.Popen, str]:
     # gateway's token and refuses everything but the two inference routes.
     #
     # Cloudflare's quick tunnel forwards the public tunnel hostname as the
-    # Host header by default. Kept pinned to localhost for the same reason it
+    # Host header by default. Kept pinned to 127.0.0.1 for the same reason it
     # was before -- an origin that checks Host against localhost (Ollama's
     # anti-DNS-rebinding behaviour) then passes regardless of version.
+    # Using 127.0.0.1 instead of localhost avoids IPv4/IPv6 mismatches on Windows.
     proc = subprocess.Popen(
-        ["cloudflared", "tunnel", "--url", WORKER_URL, "--http-host-header", f"localhost:{WORKER_PORT}"],
+        ["cloudflared", "tunnel", "--url", WORKER_URL, "--http-host-header", f"127.0.0.1:{WORKER_PORT}"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
 
@@ -1078,7 +1114,9 @@ def main() -> None:
     # the old pattern of hostname-username, which put a donor's OS username
     # in a public registry. The random suffix keeps imaged lab machines (which
     # often share a hostname) from colliding.
-    parser.add_argument("--name", default=f"{socket.gethostname()}-{os.urandom(2).hex()}", help="Node name, published to the network (default: hostname + short random suffix)")
+    # Default is None here; resolved below to either the persisted identity's
+    # name (for stable node IDs across restarts) or a fresh hostname + suffix.
+    parser.add_argument("--name", default=None, help="Node name, published to the network (default: reuse previous name, or hostname + short random suffix)")
     parser.add_argument("--operator", default="friend", help="Name shown publicly as this node's operator (default: 'friend')")
     parser.add_argument("--region", default=None, help="Optional region hint, e.g. au-adelaide")
     parser.add_argument("--cost", type=float, default=0, help="Declared cost per 1k tokens (default: 0, it's free)")
@@ -1102,6 +1140,16 @@ def main() -> None:
         return
 
     gateway = args.gateway.rstrip("/")
+
+    # Resolve the node name: reuse the persisted identity's name for this
+    # gateway if the user didn't explicitly provide one. This keeps the node ID
+    # stable across restarts and retries, instead of creating dead duplicates.
+    if args.name is None:
+        identity = read_identity()
+        if identity and identity.get("gateway") == gateway and identity.get("name"):
+            args.name = identity["name"]
+        else:
+            args.name = f"{socket.gethostname()}-{os.urandom(2).hex()}"
 
     if args.list_catalogue:
         hw = probe_hardware()
@@ -1165,7 +1213,12 @@ def main() -> None:
     else:
         working("opening a Cloudflare quick tunnel to this machine's Common worker...")
         tunnel_proc, tunnel_url = start_tunnel()
-        print(f"{GLYPH_DONE} tunnel live at {blue(tunnel_url)}")
+        print(f"{GLYPH_DONE} Cloudflare quick tunnel live at {blue(tunnel_url)}")
+
+        if not wait_for_tunnel(tunnel_url, worker_token):
+            print(f"{GLYPH_FORMING} {red('tunnel is not reachable after 30s')} — the gateway will likely mark this node unhealthy.")
+            print(comment("quick tunnels can take longer to propagate on some networks. "
+                          "the registration will proceed, but expect health check failures."))
 
     capability_text = args.capability or capability_text_default or (
         f"{ollama_tag} running locally via Ollama, contributed by {args.operator}. Free, community-hosted."

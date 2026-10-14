@@ -285,6 +285,13 @@ try:
     # existed. A raise here would turn a slow start into no node at all.
     worker.warm_model(MODEL, "http://127.0.0.1:1", "7m")
     check("an unreachable Ollama is not fatal", True, True)
+
+    # On Windows, "localhost" may resolve to ::1 (IPv6) while services bind to
+    # IPv4 only, causing silent failures. The default Ollama URL must use the
+    # explicit IPv4 address 127.0.0.1 instead.
+    print("\nIPv4 address (Windows localhost resolves to IPv6, breaking tunnels)")
+    check("DEFAULT_OLLAMA uses 127.0.0.1, not localhost",
+          "127.0.0.1" in worker.DEFAULT_OLLAMA and "localhost" not in worker.DEFAULT_OLLAMA, True)
 finally:
     httpd.shutdown()
     stub.shutdown()

@@ -44,7 +44,9 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-DEFAULT_OLLAMA = "http://localhost:11434"
+# 127.0.0.1 instead of localhost: on Windows, localhost may resolve to ::1 (IPv6)
+# while Ollama binds only to IPv4, causing requests to fail silently.
+DEFAULT_OLLAMA = "http://127.0.0.1:11434"
 
 # The complete set of routes reachable from outside. Ollama's own management
 # API is not on it and must never be: this list is the security boundary.

@@ -94,7 +94,7 @@ except ImportError:  # pragma: no cover - Windows
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
