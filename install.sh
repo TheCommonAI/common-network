@@ -25,12 +25,40 @@ OS="$(uname -s)"
 ARCH="$(uname -m)"
 
 # --- python3 ---
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "Python 3 is required but wasn't found."
+#
+# Resolved to an interpreter that can actually run these scripts, rather than to
+# whatever `python3` happens to be. The CLI annotates with `dict | None`, which
+# needs 3.10; on macOS `python3` on PATH is Xcode's 3.9 unless Homebrew's is in
+# front of it, and an app launched from Finder gets PATH=/usr/bin:/bin:/usr/sbin:/sbin,
+# where 3.9 is all there is. Installing on top of that wrote wrappers that died on
+# import -- and the desktop app, which reads only their stdout, saw an empty string
+# and showed the network as not seen. Finding *a* python3 was never the
+# requirement; finding one that can run this was.
+#
+# The same probe appears twice: here, to fail early with something to act on, and
+# baked into each wrapper below, where it can also recover if PATH changes later.
+find_python() {
+  for candidate in \
+    /opt/homebrew/bin/python3 \
+    /usr/local/bin/python3 \
+    "$(command -v python3 2>/dev/null || true)" \
+    /usr/bin/python3
+  do
+    if [ -n "$candidate" ] && [ -x "$candidate" ] &&
+      "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! find_python >/dev/null; then
+  echo "Common needs Python 3.10 or newer, and none was found."
   if [ "$OS" = "Darwin" ]; then
-    echo "  Install it with: xcode-select --install"
+    echo "  Install it with: brew install python"
   else
-    echo "  Install it with your package manager, e.g.: sudo apt install python3"
+    echo "  Install it with your package manager, e.g.: sudo apt install python3.12"
   fi
   exit 1
 fi
@@ -42,7 +70,20 @@ chmod +x "$INSTALL_DIR/chat.py"
 
 cat > "$BIN_DIR/common-chat" <<WRAPPER
 #!/usr/bin/env bash
-exec python3 "$INSTALL_DIR/chat.py" "\$@"
+# An interpreter that can run this, not just one named python3 -- see install.sh.
+for py in \
+  /opt/homebrew/bin/python3 \
+  /usr/local/bin/python3 \
+  "\$(command -v python3 2>/dev/null || true)" \
+  /usr/bin/python3
+do
+  if [ -n "\$py" ] && [ -x "\$py" ] &&
+    "\$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+    exec "\$py" "$INSTALL_DIR/chat.py" "\$@"
+  fi
+done
+echo "Common needs Python 3.10 or newer. Install one, then try again." >&2
+exit 1
 WRAPPER
 chmod +x "$BIN_DIR/common-chat"
 
@@ -54,7 +95,20 @@ chmod +x "$INSTALL_DIR/common.py"
 cat > "$BIN_DIR/common" <<WRAPPER
 #!/usr/bin/env bash
 export PATH="$BIN_DIR:\$PATH"
-exec python3 "$INSTALL_DIR/common.py" "\$@"
+# An interpreter that can run this, not just one named python3 -- see install.sh.
+for py in \
+  /opt/homebrew/bin/python3 \
+  /usr/local/bin/python3 \
+  "\$(command -v python3 2>/dev/null || true)" \
+  /usr/bin/python3
+do
+  if [ -n "\$py" ] && [ -x "\$py" ] &&
+    "\$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+    exec "\$py" "$INSTALL_DIR/common.py" "\$@"
+  fi
+done
+echo "Common needs Python 3.10 or newer. Install one, then try again." >&2
+exit 1
 WRAPPER
 chmod +x "$BIN_DIR/common"
 ln -sf "$BIN_DIR/common" "$BIN_DIR/cmn"
@@ -101,7 +155,20 @@ if command -v ollama >/dev/null 2>&1; then
     cat > "$BIN_DIR/common-join" <<WRAPPER
 #!/usr/bin/env bash
 export PATH="$BIN_DIR:\$PATH"
-exec python3 "$INSTALL_DIR/join.py" "\$@"
+# An interpreter that can run this, not just one named python3 -- see install.sh.
+for py in \
+  /opt/homebrew/bin/python3 \
+  /usr/local/bin/python3 \
+  "\$(command -v python3 2>/dev/null || true)" \
+  /usr/bin/python3
+do
+  if [ -n "\$py" ] && [ -x "\$py" ] &&
+    "\$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+    exec "\$py" "$INSTALL_DIR/join.py" "\$@"
+  fi
+done
+echo "Common needs Python 3.10 or newer. Install one, then try again." >&2
+exit 1
 WRAPPER
     chmod +x "$BIN_DIR/common-join"
     JOIN_INSTALLED=1
