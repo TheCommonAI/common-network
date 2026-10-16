@@ -63,10 +63,20 @@ common peers          # who else is on the network right now
 common peers --all    # ...including machines that have since left
 common status         # your node: health, position, requests served
 common recommend      # what specialist the network is short of
+common report         # an answer you got was bad — say so, and send the evidence
+common reports        # what you've reported, and anything still waiting to send
 common privacy        # what the network keeps, and what it doesn't
 common leave          # take your machine off the network
 common help           # everything else
 ```
+
+**If an answer is wrong**, `common report "it said Sydney" --reason wrong` sends
+it back with the question and answer attached. Nothing leaves your machine until
+you've read exactly what would go and said yes — decline, and nothing is kept at
+all. The node that answered you could already read the question; a report also
+shows it to the gateway operator, which is the point, since that's who can look
+at why the answer was bad. `--reason` takes one of `made-up`, `wrong`,
+`off-topic`, `truncated`, `refused`, `format`, `slow`, `other`.
 
 Using an OpenAI SDK instead? Point it at the gateway and pass your node token
 (printed by `common join`, stored in `~/.common-network/identity.json`) as the
@@ -222,12 +232,22 @@ Or open **`/dashboard`**.
 
 ### Tests
 
+Three suites, all stdlib-only, all run from their own directory:
+
 ```bash
-cd gateway && python tests/run_all.py
+cd gateway && python tests/run_all.py    # the gateway: 14 suites
+cd join    && python test_join.py        # the worker and the runtime: 66 checks
+cd common  && python test_common.py      # the CLI: 128 checks
 ```
 
 No pytest, no database, no network beyond localhost, no embedding model — the
-suites stub what they need, so there is no reason not to run them.
+suites stub what they need, so there is no reason not to run them. There is no
+CI yet, which is exactly why they are listed here: a test nobody runs is
+decoration.
+
+All three are safe to run on a working machine. `test_common.py` points the CLI
+at a temporary install directory and a gateway that does not exist; it never
+reads or writes `~/.common-network`.
 
 ## Contributing a node: the other options
 

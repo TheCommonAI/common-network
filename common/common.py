@@ -1956,9 +1956,10 @@ def cmd_privacy(as_json: bool) -> None:
     """What the network keeps. Said once, on request, instead of after
     every answer -- a notice repeated forever stops being read."""
     facts = {
-        "request_text": "not stored",
+        "request_text": "not stored, unless you report that answer (common report)",
         "request_embedding": "stored, for demand analytics (which domains are underserved)",
         "recorded_per_request": ["which node answered", "score", "latency", "success"],
+        "reported_answer": "the question, the answer and the routing you chose to attach, kept for 90 days",
         "visible_publicly": ["node names", "operators", "endpoint URLs", "models"],
         "node_operators_see": "the text of requests routed to their machine",
         "licence": "AGPL-3.0",
@@ -1974,6 +1975,8 @@ def cmd_privacy(as_json: bool) -> None:
     print("  " + " " * 21 + "domains the network is short of")
     print("  " + dim("per request") + "          which node answered, score,")
     print("  " + " " * 21 + "latency, whether it worked")
+    print("  " + dim("a reported answer") + "    the question, the answer and the routing")
+    print("  " + " " * 21 + "you chose to attach — see " + paper("common report"))
     print()
     print(dim("  The registry is public by design: node names, operators,"))
     print(dim("  endpoint URLs and models are visible to anyone. That is the"))
@@ -1985,6 +1988,12 @@ def cmd_privacy(as_json: bool) -> None:
     print(dim("  operator can read it. Donated machines are run by strangers."))
     print(dim("  Treat the network like a public place: don't send anything"))
     print(dim("  you wouldn't want a stranger to read."))
+    print()
+    print(dim("  Reporting an answer shows it to a second reader: whoever"))
+    print(dim("  runs the gateway. That is the point of a report — somebody"))
+    print(dim("  has to be able to look at why the answer was bad — but it is"))
+    print(dim("  a second reader, so " + paper("common report") + " always shows you the"))
+    print(dim("  exact question and answer first and asks before sending."))
     print()
     print(dim("  Full detail: SECURITY.md in the repository."))
     print()
@@ -2049,7 +2058,10 @@ def cmd_config(as_json: bool, args: argparse.Namespace) -> None:
     print(comment("every request's embedding + which node answered + latency, for"))
     print(comment("demand analytics (see `common demand`). no raw question text,"))
     print(comment("no account, no telemetry beyond that. nothing sent home beyond"))
-    print(comment("what's needed to route your request and log that decision."))
+    print(comment("what's needed to route your request and log that decision —"))
+    print(comment("with one exception you control: `common report` sends the"))
+    print(comment("question and answer of an answer you call bad, and only after"))
+    print(comment("showing you exactly what would go."))
 
 
 def cmd_leave(gateway: str) -> None:

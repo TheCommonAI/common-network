@@ -99,6 +99,12 @@ class Args:
     yes = save_only = json = unsent = retry = False
 
 
+class Cfg:
+    """The two fields `cmd_config` reads, and nothing else."""
+    gateway = "https://gw.example"
+    region = None
+
+
 def build(**overrides) -> dict:
     stash = dict(STASH)
     stash.update(overrides.pop("stash", {}))
@@ -476,6 +482,42 @@ with contextlib.redirect_stdout(_out), contextlib.redirect_stderr(io.StringIO())
         _code = exit_code.code
 check("an unknown reason is refused before anything is written", _code, 1)
 check("and nothing was written", list(common.REPORTS_DIR.glob("*.json")), [])
+
+# --- what `common privacy` and `common config` now claim ---------------------
+#
+# Both used to say, in different words, that a question is never stored and
+# that nothing beyond routing is sent home. That stopped being true the moment
+# `common report` existed, and it is the kind of sentence nobody re-reads --
+# it was written when it was correct and it stayed on screen afterwards. These
+# do not pin the wording; they pin that the qualification is still there.
+section("the privacy claims account for a report")
+
+_out = io.StringIO()
+with contextlib.redirect_stdout(_out):
+    common.cmd_privacy(True)
+facts = json.loads(_out.getvalue())
+check("the question is no longer flatly 'not stored'",
+      facts["request_text"] == "not stored", False)
+check("and the exception names the command that makes it",
+      "common report" in facts["request_text"], True)
+check("a reported answer is its own listed fact",
+      "reported_answer" in facts, True)
+
+_out = io.StringIO()
+with contextlib.redirect_stdout(_out):
+    common.cmd_privacy(False)
+_printed = _out.getvalue()
+check("the screen version says a report is read by a second reader",
+      "gateway" in _printed and "second reader" in _printed, True)
+check("and tells the reader what a report contains",
+      "common report" in _printed, True)
+
+_out = io.StringIO()
+with contextlib.redirect_stdout(_out):
+    common.cmd_config(False, Cfg())
+_config = _out.getvalue()
+check("config no longer claims nothing is sent home, unqualified",
+      "nothing sent home beyond" in _config and "common report" in _config, True)
 
 
 print()
