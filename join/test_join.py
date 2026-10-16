@@ -25,7 +25,10 @@ sequences observed in the real catalogue's registry entries rather than whole
 templates. `import runtime` must therefore stay free of import-time side
 effects, which is why the module does all of its work inside functions.
 """
+import importlib
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -311,6 +314,69 @@ check("whitespace counts as nothing too",
       join.tunnel_failure_message(["", "   "])[0], _silent_headline)
 check("the kept tail is bounded, and small enough to read",
       2 <= join.TUNNEL_TAIL_LINES <= 20, True)
+
+
+# --- a directory must not stand in for the module ---------------------------
+# This is not a hypothetical. An install was found with `runtime/` (the
+# unpacked llama.cpp build) and no runtime.py beside it, and because Python
+# imports a directory with no __init__.py as a namespace package, `import
+# runtime` succeeded and every call into it died with
+#
+#     AttributeError: module 'runtime' has no attribute 'is_installable'
+#
+# A message naming neither the missing file nor the directory standing in for
+# it. Worse, it made join.py's own repair unreachable: _require_runtime()
+# catches ImportError to decide whether to fetch the file, and no ImportError
+# ever came. Both directions are checked below, because "refuse the impostor"
+# is only half a fix -- the other half is accepting the real file afterwards.
+
+section("a runtime/ directory must not pass as a missing runtime.py")
+
+_saved_path = list(sys.path)
+_saved_runtime = sys.modules.pop("runtime", None)
+_here = Path(__file__).resolve().parent
+_scratch = tempfile.mkdtemp(prefix="common-runtime-impostor-")
+try:
+    # The shape the llama.cpp build unpacks into: a versioned directory, no
+    # __init__.py anywhere, sitting where runtime.py should be.
+    (Path(_scratch) / "runtime" / "b11700").mkdir(parents=True)
+    # This file's own directory comes off the path for the duration, and that is
+    # not tidiness -- it is the condition being reproduced. A namespace package
+    # is a *fallback*: PathFinder notes the namespace portion and keeps
+    # searching, and a real runtime.py on any later path entry wins outright. So
+    # a `runtime/` directory only ever answers for runtime.py when there is no
+    # runtime.py anywhere on the path at all, which is precisely the state the
+    # affected install was in. Leaving this directory on the path would test the
+    # opposite claim -- that a directory wins -- and it does not, so the test
+    # would fail while the bug stayed unfixed.
+    sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != _here]
+    sys.path.insert(0, _scratch)
+    importlib.invalidate_caches()
+    check("a bare directory named runtime/ is refused",
+          join._import_runtime(), None)
+
+    # The other direction, and the one that makes the fetch in
+    # _require_runtime() a repair rather than a second way to fail: write the
+    # file beside the directory and it is the file that is imported.
+    shutil.copyfile(Path(__file__).resolve().parent / "runtime.py",
+                    Path(_scratch) / "runtime.py")
+    sys.modules.pop("runtime", None)
+    importlib.invalidate_caches()
+    _real = join._import_runtime()
+    check("the file is accepted once it is written beside the directory",
+          _real is not None and Path(_real.__file__).name == "runtime.py", True)
+    check("and it is the real module, with the attribute the call sites want",
+          hasattr(_real, "is_installable"), True)
+finally:
+    sys.path[:] = _saved_path
+    sys.modules.pop("runtime", None)
+    if _saved_runtime is not None:
+        sys.modules["runtime"] = _saved_runtime
+    importlib.invalidate_caches()
+    shutil.rmtree(_scratch, ignore_errors=True)
+
+check("the module the rest of this file uses is still the real one",
+      join._import_runtime() is runtime, True)
 
 
 print()

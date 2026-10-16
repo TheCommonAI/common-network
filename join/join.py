@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join the Common Network as a node operator.
 
-The Common Network Alpha (v0.1.7).
+The Common Network Alpha (v0.1.8).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import importlib
 import json
 import os
 import platform
@@ -128,7 +129,7 @@ TUNNEL_RATE_LIMITED_PATTERN = re.compile(r"\b1015\b|\b429\b|too many requests", 
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
@@ -202,24 +203,70 @@ def gateway_headers(extra: dict | None = None) -> dict:
 runtime = None
 
 
+def _import_runtime():
+    """`runtime.py` itself, or None — never something that merely answers to the name.
+
+    A bare `import runtime` cannot answer "is runtime.py here?". `runtime/` is a
+    real directory in this install — the one the llama.cpp build unpacks into —
+    and Python imports a directory with no `__init__.py` as a *namespace
+    package*. So on a machine where runtime.py was never written the import
+    succeeds and hands back the directory instead, and the failure lands at the
+    first call into it:
+
+        AttributeError: module 'runtime' has no attribute 'is_installable'
+
+    which names neither the missing file nor the directory standing in for it,
+    and reads like a bug in the runtime rather than an install missing a file. A
+    genuinely absent module would have said ModuleNotFoundError.
+
+    It is a fallback, not an override, and that is worth knowing: the finder
+    records the namespace portion and keeps looking, so a real runtime.py on any
+    path entry wins. Which means the directory only ever answers for runtime.py
+    when there is no runtime.py anywhere at all — the exact state of the install
+    this was found on, and the reason "just add the file" is the whole fix.
+
+    That is also what made the recovery in _require_runtime() unreachable: the
+    ImportError it caught never arrived, so refresh_siblings() was never asked
+    for runtime.py on the machines that had lost it. Absence has to be tested
+    for, not inferred from whether an import raised.
+    """
+    try:
+        mod = importlib.import_module("runtime")
+    except ImportError:
+        return None
+    # A namespace package has no `__file__` at all, and the sibling we want is
+    # the file sitting beside join.py. Both tests are needed: the path alone can
+    # be satisfied by some unrelated runtime.py earlier on sys.path, and the
+    # attribute alone by a directory that happens to define it.
+    path = getattr(mod, "__file__", None)
+    if not path or os.path.basename(path) != "runtime.py":
+        return None
+    return mod if hasattr(mod, "is_installable") else None
+
+
 def _require_runtime():
     """The model-runtime module, fetching it first if this install predates it."""
     global runtime
     if runtime is None:
-        try:
-            import runtime as mod
-        except ImportError:
+        mod = _import_runtime()
+        if mod is None:
             refresh_siblings()  # fetches runtime.py; see SIBLING_MODULES
-            try:
-                import importlib
-                mod = importlib.import_module("runtime")
-            except ImportError:
-                die_with_fix(
-                    "the model runtime module is missing.",
-                    f"join.py needs runtime.py beside it, and could not fetch it.\n"
-                    f"  Check your connection, then run this again — or install both by hand\n"
-                    f"  from https://github.com/{REPO}/tree/main/join",
-                )
+            # Both lines are load-bearing, and neither is decoration. The
+            # namespace package that stood in for runtime.py is in sys.modules
+            # by now, so a second import would return that same impostor; and
+            # the import machinery has cached the directory listing it built
+            # before runtime.py was written, so it would not see the new file
+            # even if it did re-import.
+            sys.modules.pop("runtime", None)
+            importlib.invalidate_caches()
+            mod = _import_runtime()
+        if mod is None:
+            die_with_fix(
+                "the model runtime module is missing.",
+                f"join.py needs runtime.py beside it, and could not fetch it.\n"
+                f"  Check your connection, then run this again — or install both by hand\n"
+                f"  from https://github.com/{REPO}/tree/main/join",
+            )
         runtime = mod
     return runtime
 
