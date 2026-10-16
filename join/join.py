@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """Join the Common Network as a node operator.
 
-The Common Network Alpha (v0.1.3).
+The Common Network Alpha (v0.1.5).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
 ABSOLUTELY NO WARRANTY.
 
-Runs your local Ollama as a contributing node: opens a Cloudflare quick
-tunnel to your local Ollama, registers it with the shared gateway, and
-keeps running until you press Ctrl+C (at which point it deregisters
-cleanly). No account or signup needed for the tunnel.
+Runs a local model as a contributing node: fetches llama.cpp, fetches the
+weights, opens a Cloudflare quick tunnel to it, registers the node with the
+shared gateway, and keeps running until you press Ctrl+C (at which point it
+deregisters cleanly). No account or signup needed for the tunnel.
 
-Requires: Python 3.8+, Ollama (https://ollama.com/download), cloudflared
+Requires: Python 3.8+, cloudflared
 (https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
+Nothing else -- this script fetches its own model runtime (see runtime.py) and
+its own weights. It used to require Ollama to be installed and running first,
+which made donating a machine into installing a second product: a ~1GB
+installer, a daemon with its own updater, and a private model store.
 
 Usage:
     python3 join.py
@@ -37,7 +41,10 @@ at login and restarts automatically if it crashes — for servers or
 computers you don't want to babysit with an open terminal. Everything
 else has a sensible default — see --help.
 """
+from __future__ import annotations
+
 import argparse
+import atexit
 import json
 import os
 import platform
@@ -75,13 +82,20 @@ BANNER = r"""
 # 127.0.0.1 instead of localhost: on Windows, localhost may resolve to ::1 (IPv6)
 # while the service binds only to IPv4, causing cloudflared and self-checks to
 # fail silently. Using the explicit IPv4 address works on all platforms.
-OLLAMA_URL = "http://127.0.0.1:11434"
+#
+# The model backend, which is llama-server now rather than Ollama. It keeps the
+# old Ollama port on purpose, and one above it for the worker: a machine that
+# already had Ollama running on 11434 does not conflict with either, and anyone
+# who learned these two numbers from the old README finds them where they were.
+LLAMA_PORT = 11436
+LLAMA_URL = f"http://127.0.0.1:{LLAMA_PORT}"
 
-# What actually faces the network. Ollama itself stays on 127.0.0.1: the worker
-# is the only thing the tunnel (or the LAN) can reach, and it requires the
+# What actually faces the network. llama-server itself stays on 127.0.0.1: the
+# worker is the only thing the tunnel (or the LAN) can reach, and it requires the
 # gateway's token, serves two routes, and pins this node to one model. See
-# worker.py for why that matters -- an exposed Ollama has no authentication at
-# all, including on its model-management endpoints.
+# worker.py for why that matters -- a bare llama-server has no authentication
+# worth relying on, and its web UI is a file browser over the same directory the
+# weights are in.
 WORKER_PORT = 11435
 WORKER_URL = f"http://127.0.0.1:{WORKER_PORT}"
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
@@ -90,11 +104,32 @@ TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
-WORKER_UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/worker.py"
+
+# Everything join.py drives that lives beside it, and has to be refreshed when
+# join.py refreshes itself. See refresh_siblings().
+SIBLING_MODULES = ("worker.py", "runtime.py")
+SIBLING_UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/{{}}"
+
+# The schemes a `--model` value may name explicitly. Anything else is read as a
+# bare Ollama registry tag, which is what `--model mathstral:7b` has always
+# meant. Membership here rather than a look at whether a colon is present: a raw
+# tag has one too, so a colon test would misread the commonest input there is.
+KNOWN_SOURCE_SCHEMES = frozenset({"ollama", "gguf"})
+
+# How long to give llama-server to load its weights and answer /health. It only
+# has to cover the very first load, because the process keeps the weights
+# resident afterwards; a restart finds the file on disk and skips most of it.
+# Measured on this codebase's own machine: ~1s for a 1GB model and ~21s for a
+# 1.6GB one, with llama-server answering 503 "Loading model" while it works. A
+# 9GB model on a cold laptop is the case this number is actually for, and the
+# old backend's 53-77s first token is the only figure anyone has measured there.
+# Too short and a slow machine looks broken; there is no cost to being generous,
+# since it is one wait at startup.
+LLAMA_STARTUP_TIMEOUT_SECONDS = 180
 
 # Which program registered this node.
 #
@@ -119,10 +154,50 @@ def gateway_headers(extra: dict | None = None) -> dict:
     """Headers every gateway request carries.
 
     Mirror of common-desktop's gatewayHeaders(). Deliberately not applied to
-    local requests -- Ollama, or this node's own worker health checks -- which
-    have no business carrying the network's client string.
+    local requests -- llama-server, or this node's own worker health checks --
+    which have no business carrying the network's client string.
     """
     return {"X-Common-Client": CLIENT, **(extra or {})}
+
+
+# The model-runtime module, imported on first use rather than at module scope.
+# Worker is imported above because every release has shipped it; runtime.py
+# cannot be, and the reason is worth spelling out because it is the one place
+# where the upgrade path is not simply "replace the file".
+#
+# A machine running the release before this one updates itself with an updater
+# that knows only about join.py and worker.py -- it has never heard of runtime.py,
+# because runtime.py did not exist when it was written. So the first time that
+# machine lands *this* file, the new join.py is on disk and runtime.py is not,
+# and a bare `import runtime` at the top of the file would kill the process on
+# its own self-update. Every node in the network would update itself to death,
+# once, silently, on the same afternoon.
+#
+# Importing it where it is used, after a sibling refresh, is what makes that
+# upgrade land in one step. See _require_runtime().
+runtime = None
+
+
+def _require_runtime():
+    """The model-runtime module, fetching it first if this install predates it."""
+    global runtime
+    if runtime is None:
+        try:
+            import runtime as mod
+        except ImportError:
+            refresh_siblings()  # fetches runtime.py; see SIBLING_MODULES
+            try:
+                import importlib
+                mod = importlib.import_module("runtime")
+            except ImportError:
+                die_with_fix(
+                    "the model runtime module is missing.",
+                    f"join.py needs runtime.py beside it, and could not fetch it.\n"
+                    f"  Check your connection, then run this again — or install both by hand\n"
+                    f"  from https://github.com/{REPO}/tree/main/join",
+                )
+        runtime = mod
+    return runtime
 
 
 def _enable_windows_ansi() -> None:
@@ -375,36 +450,49 @@ def fetch_update() -> bytes | None:
     return remote if remote != local else None
 
 
-def update_worker_alongside() -> None:
-    """Refresh worker.py when join.py updates itself.
+def refresh_siblings() -> None:
+    """Bring every sibling module join.py drives up to date with this script.
 
-    join.py imports the worker as a sibling, so a self-update that replaced
-    only join.py would leave a new joiner driving an old worker -- exactly the
-    kind of version skew that shows up as a security fix silently not applying.
-    Best effort: a failure here must not block the join, because a working old
-    worker beats no node at all.
+    join.py imports the worker and the runtime as siblings, so a self-update
+    that replaced only join.py would leave a new joiner driving an old worker or
+    an old runtime -- exactly the kind of version skew that shows up as a
+    security fix silently not applying. Best effort throughout: a failure here
+    must not block the join, because a working old sibling beats no node at all.
+
+    Writes only what differs, so the common case is two small GETs per run. Note
+    that this compares contents and nothing else -- there is no checksum or
+    signature on this path, which is pre-existing behaviour rather than an
+    oversight introduced here, and is worth knowing when reasoning about what a
+    compromised raw.githubusercontent.com would be able to do.
+
+    Called from two places, deliberately: before join.py overwrites itself, so
+    the next process starts with siblings that match it, and from
+    _require_runtime() when runtime.py turns out not to be here at all. The second
+    is what makes a version that predates runtime.py able to upgrade onto it.
     """
-    worker_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
-    try:
-        with urllib.request.urlopen(WORKER_UPDATE_URL, timeout=5) as resp:
-            remote = resp.read()
-        if not remote.strip():
-            return
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in SIBLING_MODULES:
         try:
-            with open(worker_path, "rb") as f:
-                if f.read() == remote:
-                    return
-        except OSError:
-            pass  # missing locally -- writing it below is the fix
-        with open(worker_path, "wb") as f:
-            f.write(remote)
-    except (urllib.error.URLError, socket.timeout, OSError):
-        return
+            with urllib.request.urlopen(SIBLING_UPDATE_URL.format(name), timeout=5) as resp:
+                remote = resp.read()
+            if not remote.strip():
+                continue
+            path = os.path.join(here, name)
+            try:
+                with open(path, "rb") as f:
+                    if f.read() == remote:
+                        continue
+            except OSError:
+                pass  # missing locally -- writing it below is the fix
+            with open(path, "wb") as f:
+                f.write(remote)
+        except (urllib.error.URLError, socket.timeout, OSError):
+            continue
 
 
 def apply_update_and_restart(remote: bytes) -> None:
     """Overwrite this script with `remote` and re-exec. Never returns on success."""
-    update_worker_alongside()
+    refresh_siblings()
     local_path = os.path.abspath(__file__)
     try:
         with open(local_path, "wb") as f:
@@ -422,11 +510,16 @@ def die_with_fix(msg: str, fix: str) -> None:
 
 
 def check_binaries(need_tunnel: bool = True) -> None:
-    if shutil.which("ollama") is None:
-        die_with_fix("ollama not found.", "install it from https://ollama.com/download, then run this again.")
-    # --lan needs no tunnel, which is most of the point of it: cloudflared is
-    # both an extra install and the thing a school network is most likely to
-    # block outright.
+    """The one external program this needs. Everything else it fetches itself.
+
+    There is no longer a check for the model runtime here: llama.cpp is not
+    something a contributor installs, it is something this script downloads, so
+    a missing runtime is a job for ensure_model_runtime() rather than a reason to
+    refuse to start. What is left is cloudflared, which is a real thing the user
+    must have and the one a school network is most likely to block outright.
+
+    --lan needs no tunnel, which is most of the point of it.
+    """
     if not need_tunnel:
         return
     if shutil.which("cloudflared") is None:
@@ -439,38 +532,154 @@ def check_binaries(need_tunnel: bool = True) -> None:
         die_with_fix("cloudflared not found.", f"install it with: {hint}")
 
 
-def ensure_ollama_running() -> None:
+def fetch_model(spec) -> Path:
+    """Get this node's weights onto disk, and say so while it happens.
+
+    Two ways in, and the quiet one matters most. A machine that has already run
+    `ollama pull` for this model does not download anything -- runtime.py finds
+    the same content-addressed blob in Ollama's own store and hardlinks it, which
+    is why swapping runtimes costs an existing contributor nothing. The 3-9GB
+    download only happens on a machine that has never had this model, and there
+    the disk-space guard runs first, because finding out 6GB in that there was
+    never room for it is a worse experience than being told up front.
+    """
+    mod = _require_runtime()
     try:
-        http_json("GET", f"{OLLAMA_URL}/api/tags", timeout=3)
-        return
-    except (urllib.error.URLError, socket.timeout):
-        pass
+        return mod.ensure_gguf(spec)
+    except mod.FetchFailed as e:
+        die_with_fix(f"could not prepare the model {spec.wire_name}: {e}",
+                     "Check your connection and run this again — a partly-finished\n"
+                     "  download resumes where it stopped rather than starting over.")
 
-    working("ollama doesn't seem to be running — trying `ollama serve`...")
-    subprocess.Popen(
-        ["ollama", "serve"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    for _ in range(20):
-        time.sleep(0.5)
+
+def stop_process(proc: subprocess.Popen | None, timeout: float = 5.0) -> None:
+    """Stop a child process we started, and don't leave it behind.
+
+    Both children here -- llama-server and cloudflared -- are things this
+    process is responsible for; neither is useful once this one is gone, and
+    llama-server in particular *keeps the port*. An orphaned one is worse than
+    untidy: the next `common join` would start a second llama-server that cannot
+    bind 11436, and whichever of the two is answering /health is then a coin toss
+    the new node loses silently, serving a model it did not intend to.
+
+    escalate after a grace period rather than blocking on a process that has
+    decided not to die.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
         try:
-            http_json("GET", f"{OLLAMA_URL}/api/tags", timeout=3)
-            return
-        except (urllib.error.URLError, socket.timeout):
-            continue
-    die_with_fix("can't reach ollama at localhost:11434.", "start it manually and try again.")
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
 
 
-def ensure_model(model: str) -> None:
-    tags = http_json("GET", f"{OLLAMA_URL}/api/tags")
-    names = {m["name"] for m in tags.get("models", [])}
-    if model in names:
-        return
-    working(f"model '{model}' not found locally — pulling it now (this may take a while)...")
-    result = subprocess.run(["ollama", "pull", model])
-    if result.returncode != 0:
-        die(f"failed to pull model '{model}'")
+def start_llama_server(gguf: Path, wire_name: str) -> subprocess.Popen:
+    """Start llama-server on `gguf`, and block until it is actually serving.
+
+    Returns the process, which the main loop watches and cleanup() stops.
+
+    `wire_name` is passed as llama-server's `--alias`, so that the `model` field
+    of a completion comes back as the name this node registered under rather than
+    as the absolute path of the weights on this machine. See llama_server_argv.
+
+    The wait is not a formality. Loading several gigabytes of weights and
+    building the KV cache takes the better part of a minute on a laptop the first
+    time, and llama-server refuses a connection until it is done. Starting the
+    worker and the tunnel only once `/health` answers is what keeps the gateway
+    from being handed an endpoint that 502s for the first minute of its life -- a
+    window in which every health check the network runs marks this node broken,
+    and a node marked broken at registration is slow to be routed to again.
+    """
+    mod = _require_runtime()
+    try:
+        binary = mod.ensure_llama_server()
+    except mod.FetchFailed as e:
+        die_with_fix(f"could not set up the model runtime: {e}",
+                     f"Nothing was changed on this machine. Run this again to retry,\n"
+                     f"  or fetch a build by hand from https://github.com/{mod.LLAMA_REPO}/releases")
+
+    sleep_idle = os.environ.get("COMMON_SLEEP_IDLE_SECONDS")
+    try:
+        sleep_idle = int(sleep_idle) if sleep_idle else mod.DEFAULT_SLEEP_IDLE_SECONDS
+    except ValueError:
+        sleep_idle = mod.DEFAULT_SLEEP_IDLE_SECONDS
+
+    argv = mod.llama_server_argv(binary, gguf, LLAMA_PORT, alias=wire_name,
+                                 sleep_idle_seconds=sleep_idle)
+    print(f"{GLYPH_ROUTE} {dim('starting the model runtime...')}")
+    try:
+        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        die_with_fix(f"couldn't start llama-server: {e}", "Run `common join` again to retry the fetch.")
+
+    # Registered here, the moment the child exists, because the exits that leak
+    # it are not the orderly ones. `die()` covers registration failures, a
+    # traceback covers the rest, and neither unwinds through cleanup() -- and on
+    # Windows a killed parent does not take its child with it at all. This is the
+    # only hook that runs on every one of those paths.
+    atexit.register(stop_process, proc)
+    return proc
+
+
+def wait_for_llama(proc: subprocess.Popen, gguf: Path) -> bool:
+    """Wait for llama-server to answer its health endpoint. True if it did.
+
+    `/health` is deliberately public and needs no API key, so this is a plain
+    local request with none of the worker's ceremony. It answers 503 with a
+    "loading model" body while the weights are still coming off disk, which is
+    the difference between "not ready yet" and "dead" -- so it is a 503 to keep
+    waiting on, not an error.
+
+    A 200 is not on its own proof that *our* server is the one that answered.
+    Nothing stops a llama-server left over from an earlier run from holding
+    11436, in which case the health check passes immediately, the node registers,
+    and every request is answered by a different model than the one this node
+    claims to serve -- the one failure here that is both silent and wrong. So the
+    200 is confirmed against /props' model_path, and a mismatch is fatal and
+    says why.
+    """
+    deadline = time.monotonic() + LLAMA_STARTUP_TIMEOUT_SECONDS
+    last_detail = "no response"
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            die_with_fix(f"the model runtime exited with code {proc.returncode}.",
+                         "It usually prints the reason to stderr, which this hides while\n"
+                         "  joining. Run it by hand to see it:\n"
+                         f"  {LLAMA_URL}")
+        try:
+            http_json("GET", f"{LLAMA_URL}/health", timeout=5)
+        except urllib.error.HTTPError as e:
+            last_detail = f"{e.code} {e.read().decode(errors='ignore').strip()}"
+        except (urllib.error.URLError, socket.timeout, OSError) as e:
+            last_detail = str(e)
+        else:
+            try:
+                props = http_json("GET", f"{LLAMA_URL}/props", timeout=5)
+            except (urllib.error.HTTPError, urllib.error.URLError, socket.timeout, OSError):
+                # /props went away between the two calls; ask again next tick.
+                last_detail = "health answered but /props did not"
+            else:
+                serving = str(props.get("model_path") or "")
+                if serving and Path(serving).resolve() != Path(gguf).resolve():
+                    die_with_fix(
+                        f"another model server is already using port {LLAMA_PORT}.",
+                        f"It is serving:\n"
+                        f"    {serving}\n"
+                        f"  but this node is set up for:\n"
+                        f"    {gguf}\n"
+                        f"  Stop that server and run this again — otherwise this node\n"
+                        f"  would register as one model while answering as another.",
+                    )
+                return True
+        time.sleep(0.5)
+    print(f"{GLYPH_FAILED} {red('the model runtime did not come up within ')}"
+          f"{LLAMA_STARTUP_TIMEOUT_SECONDS}s — {dim(last_detail)}")
+    return False
 
 
 def probe_hardware() -> dict:
@@ -579,8 +788,26 @@ def call_assign(gateway: str, hardware: dict) -> dict:
     return gateway_json("POST", f"{gateway}/assign", body={"hardware": hardware}, headers=gateway_headers())
 
 
-def source_to_ollama_tag(source: str) -> str | None:
-    return source[len("ollama:"):] if source.startswith("ollama:") else None
+def resolve_source(source: str):
+    """Turn a catalogue `source` into something installable, or None.
+
+    The single interpreter of the source scheme, in runtime.py beside the code
+    that acts on it. Used to be a one-liner here that stripped "ollama:" and
+    nothing else; the name it produced was then handed straight to Ollama. Now
+    the same string is the node's public model name as well, so it is worth
+    having one place that decides what a source means. See runtime.ModelSpec.
+    """
+    return _require_runtime().resolve_source(source)
+
+
+def is_installable(source: str) -> bool:
+    """Whether common-join can provision this catalogue entry itself.
+
+    Asked far more often than the spec is needed -- for listing, for ranking,
+    for the "is there a local alternative" question -- and asking it should not
+    drag the spec's construction along for the ride.
+    """
+    return _require_runtime().is_installable(source)
 
 
 def prompt_yes_no(question: str, default_yes: bool = True) -> bool:
@@ -633,7 +860,7 @@ def print_catalogue(gateway: str, hw: dict) -> None:
         # old api:cgla-legal entry declared 0GB, so it showed as the ONE
         # runnable option on a machine where nothing else fit. Advertising a
         # model and then refusing to install it is worse than not listing it.
-        provisionable = source_to_ollama_tag(m["source"]) is not None
+        provisionable = is_installable(m["source"])
         fits = m["min_ram_gb"] <= headroom_ram and (not m["needs_gpu"] or hw["gpu_present"])
 
         if not provisionable:
@@ -696,7 +923,7 @@ def _stronger_if_freed(catalogue: list[dict], hw: dict, chosen_id: str | None) -
 
     candidates = [
         m for m in catalogue
-        if source_to_ollama_tag(m["source"])                      # installable
+        if is_installable(m["source"])                            # installable
         and m["min_ram_gb"] > now                                 # doesn't fit now
         and m["min_ram_gb"] <= potential                          # would fit freed
         and (not m["needs_gpu"] or hw["gpu_present"])
@@ -726,17 +953,33 @@ def _warn_if_underpowered(gateway: str, hw: dict, chosen_id: str | None, chosen_
 
 
 def resolve_model(gateway: str, args: argparse.Namespace) -> tuple[str, list[str] | None, str | None, str | None]:
-    """Returns (ollama_tag, domain_tags, catalogue_id, capability_text_default)."""
+    """Returns (model_source, domain_tags, catalogue_id, capability_text_default).
+
+    The first element is the catalogue `source` string, not a tag: what to run is
+    now a question with more than one kind of answer, and the thing that should
+    be handed to ensure_model/start_llama_server is the spec it resolves to.
+    """
     if args.model:
         catalogue = fetch_catalogue(gateway)
         match = next((m for m in catalogue if m["id"] == args.model), None)
         if match:
-            ollama_tag = source_to_ollama_tag(match["source"])
-            if not ollama_tag:
+            if not is_installable(match["source"]):
                 die(f"'{args.model}' is an API-based catalogue entry ({match['source']}) — not something common-join can run locally.")
-            return ollama_tag, match["domain_tags"], match["id"], match["capability_text"]
-        # Not a catalogue id -- treat as a raw Ollama model tag, same as pre-v0.3.
-        return args.model, None, None, None
+            return match["source"], match["domain_tags"], match["id"], match["capability_text"]
+        # Not a catalogue id -- treat it as a raw source string, which for a bare
+        # `mathstral:7b` means "that tag in Ollama's registry", same as before.
+        # Deliberately checked against the known schemes rather than for a colon:
+        # a raw tag contains one too, and reading `mathstral:7b` as `scheme:path`
+        # would reject the most ordinary way to name a model.
+        scheme = args.model.split(":", 1)[0]
+        if scheme in KNOWN_SOURCE_SCHEMES:
+            source = args.model
+        else:
+            source = f"ollama:{args.model}"
+        if not is_installable(source):
+            die(f"'{args.model}' is not something common-join can install "
+                f"(unrecognised source '{source}').")
+        return source, None, None, None
 
     working("probing your machine's hardware...")
     hw = probe_hardware()
@@ -754,8 +997,7 @@ def resolve_model(gateway: str, args: argparse.Namespace) -> tuple[str, list[str
     _warn_if_underpowered(gateway, hw, assignment.get("catalogue_id"),
                           assignment["display_name"])
 
-    ollama_tag = source_to_ollama_tag(assignment["source"])
-    if not ollama_tag:
+    if not is_installable(assignment["source"]):
         print(f"{GLYPH_FORMING} {red('the network needs this most, but it can only run as a hosted API:')}")
         print(comment(f"{', '.join(assignment['domain_tags'])} is served by {assignment['source']}, not something common-join can pull and run locally."))
         fallback = _best_local_fallback(gateway, hw, exclude_id=assignment["catalogue_id"])
@@ -770,7 +1012,7 @@ def resolve_model(gateway: str, args: argparse.Namespace) -> tuple[str, list[str
                 print(dim("  → pick manually:   common-join --model <id>"))
                 print(dim("  → see options:     common-join --list-catalogue"))
                 sys.exit(0)
-        return source_to_ollama_tag(fallback["source"]), fallback["domain_tags"], fallback["id"], fallback["capability_text"]
+        return fallback["source"], fallback["domain_tags"], fallback["id"], fallback["capability_text"]
 
     if not args.auto:
         if not prompt_yes_no(f"provision {assignment['display_name']} on this machine?"):
@@ -779,11 +1021,11 @@ def resolve_model(gateway: str, args: argparse.Namespace) -> tuple[str, list[str
             print(dim("  → see options:     common-join --list-catalogue"))
             sys.exit(0)
 
-    return ollama_tag, assignment["domain_tags"], assignment["catalogue_id"], assignment["capability_text"]
+    return assignment["source"], assignment["domain_tags"], assignment["catalogue_id"], assignment["capability_text"]
 
 
 def _best_local_fallback(gateway: str, hw: dict, exclude_id: str | None) -> dict | None:
-    """Best Ollama-runnable catalogue entry this hardware can fit, for when
+    """Best locally-runnable catalogue entry this hardware can fit, for when
     /assign's top pick is an API-hosted specialist common-join can't
     provision. Prefers verified-in-lane, then the smallest model (safest
     fit under headroom)."""
@@ -792,7 +1034,7 @@ def _best_local_fallback(gateway: str, hw: dict, exclude_id: str | None) -> dict
     candidates = [
         m for m in catalogue
         if m["id"] != exclude_id
-        and source_to_ollama_tag(m["source"])
+        and is_installable(m["source"])
         and m["min_ram_gb"] <= headroom_ram
         and (not m["needs_gpu"] or hw["gpu_present"])
     ]
@@ -903,14 +1145,18 @@ def worker_reachable_on_lan(ip: str) -> bool:
 
 
 def start_tunnel() -> tuple[subprocess.Popen, str]:
-    # Points at the worker, never at Ollama: the worker is what requires the
-    # gateway's token and refuses everything but the two inference routes.
+    # Points at the worker, never at the model backend: the worker is what
+    # requires the gateway's token and refuses everything but the two inference
+    # routes.
     #
-    # Cloudflare's quick tunnel forwards the public tunnel hostname as the
-    # Host header by default. Kept pinned to 127.0.0.1 for the same reason it
-    # was before -- an origin that checks Host against localhost (Ollama's
-    # anti-DNS-rebinding behaviour) then passes regardless of version.
-    # Using 127.0.0.1 instead of localhost avoids IPv4/IPv6 mismatches on Windows.
+    # Cloudflare's quick tunnel forwards the public tunnel hostname as the Host
+    # header by default, and this pins it to 127.0.0.1 instead. That used to be
+    # load-bearing -- Ollama refuses requests whose Host is not localhost, as
+    # anti-DNS-rebinding. llama-server has no such check, so the flag is now
+    # hygiene rather than a requirement: it keeps a hostname the outside world
+    # chose out of the requests this machine's backend sees, and it costs
+    # nothing. Using 127.0.0.1 instead of localhost avoids IPv4/IPv6 mismatches
+    # on Windows.
     proc = subprocess.Popen(
         ["cloudflared", "tunnel", "--url", WORKER_URL, "--http-host-header", f"127.0.0.1:{WORKER_PORT}"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
@@ -935,7 +1181,7 @@ def start_tunnel() -> tuple[subprocess.Popen, str]:
             die("cloudflared exited before a tunnel URL appeared")
         time.sleep(0.5)
 
-    proc.terminate()
+    stop_process(proc)
     die("timed out waiting for cloudflared to open a tunnel")
 
 
@@ -979,8 +1225,10 @@ def install_macos_service(argv: list[str]) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     # launchd's default PATH doesn't include /usr/local/bin or /opt/homebrew/bin,
-    # so ollama/cloudflared (installed there) won't resolve unless we carry over
-    # the PATH from the shell that ran --permanent.
+    # so cloudflared (installed there) won't resolve unless we carry over the
+    # PATH from the shell that ran --permanent. The model runtime does not depend
+    # on this: it is fetched into ~/.common-network/runtime and spawned by
+    # absolute path, which is one of the reasons it moved there.
     with open(plist_path, "wb") as f:
         plistlib.dump({
             "Label": LAUNCHD_LABEL,
@@ -1106,7 +1354,7 @@ def main() -> None:
     _enable_windows_ansi()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--gateway", default=os.environ.get("COMMON_GATEWAY_URL", DEFAULT_GATEWAY), help="Gateway base URL (default: the shared Common Network gateway)")
-    parser.add_argument("--model", default=None, help="Catalogue id (e.g. qwen2.5-coder-14b) or raw Ollama model tag. Default: probe hardware and ask the network what it needs most (see --auto, --list-catalogue)")
+    parser.add_argument("--model", default=None, help="Catalogue id (e.g. qwen2.5-coder-14b) or a raw model tag (e.g. mathstral:7b). Default: probe hardware and ask the network what it needs most (see --auto, --list-catalogue)")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
     # The name and operator are published to the whole network (`GET /nodes`
@@ -1156,12 +1404,12 @@ def main() -> None:
         print_catalogue(gateway, hw)
         return
 
-    ollama_tag, domain_tags, catalogue_id, capability_text_default = resolve_model(gateway, args)
+    model_source, domain_tags, catalogue_id, capability_text_default = resolve_model(gateway, args)
     # Bake the resolution into args.model so --permanent's saved service
     # invocation re-resolves the same way on every restart -- the catalogue
-    # id round-trips back through resolve_model()'s lookup branch; a raw tag
-    # (no catalogue match) just flows through unchanged.
-    args.model = catalogue_id or ollama_tag
+    # id round-trips back through resolve_model()'s lookup branch, and a source
+    # string re-resolves through its own branch without being rewritten.
+    args.model = catalogue_id or model_source
 
     if args.permanent:
         install_permanent(args)
@@ -1169,17 +1417,35 @@ def main() -> None:
 
     # LAN mode skips cloudflared entirely, so don't demand it be installed.
     check_binaries(need_tunnel=not args.lan)
-    ensure_ollama_running()
-    ensure_model(ollama_tag)
+
+    spec = resolve_source(model_source)
+    if spec is None:
+        die(f"can't run '{model_source}' locally (unrecognised source).")
+
+    # The single string that is both this node's public model name and the id the
+    # worker answers with. gateway/app/health.py matches `GET /v1/models`'s id
+    # against the `model_name` registered below, so these two uses must stay the
+    # same string -- for an `ollama:` source it is the tag with the scheme
+    # stripped, which is exactly what every existing node already registers.
+    wire_name = spec.wire_name
+
+    gguf = fetch_model(spec)
+    llama_proc = start_llama_server(gguf, wire_name)
+    if not wait_for_llama(llama_proc, gguf):
+        stop_process(llama_proc)
+        die_with_fix("the model runtime never started serving.",
+                     "Run `common join` again — the weights are already on disk, so a\n"
+                     "  second attempt starts much faster and usually clears it.")
 
     # Start the worker before anything can reach this machine. It holds the
     # only credential the gateway will be given for this node, serves exactly
-    # two routes, and pins the node to the model resolved above -- so Ollama
+    # two routes, and pins the node to the model resolved above -- so llama-server
     # itself never has to be reachable from outside, on either path.
     worker_token = secrets.token_urlsafe(24)
     try:
-        worker.serve(worker_token, ollama_tag, port=WORKER_PORT)
+        worker.serve(worker_token, wire_name, port=WORKER_PORT, upstream_url=LLAMA_URL)
     except OSError as e:
+        stop_process(llama_proc)
         die_with_fix(
             f"couldn't start the Common worker on port {WORKER_PORT}: {e}",
             f"Something else is using port {WORKER_PORT}. Stop it, or if an older\n"
@@ -1193,9 +1459,10 @@ def main() -> None:
         ip = lan_ip()
         if not ip:
             die("couldn't work out this machine's LAN address — pass a tunnel join instead (drop --lan)")
-        # What must be reachable is the worker, not Ollama -- Ollama can stay
-        # on localhost now, which is both safer and one less thing for a
-        # contributor to configure.
+        # What must be reachable is the worker, not the model backend -- which
+        # binds 127.0.0.1 and stays there. That is both safer and one less thing
+        # for a contributor to configure than the old arrangement, where the
+        # LAN instructions told them to put Ollama on every interface.
         if not worker_reachable_on_lan(ip):
             die_with_fix(
                 f"the Common worker is running, but not reachable from the rest of "
@@ -1220,15 +1487,26 @@ def main() -> None:
             print(comment("quick tunnels can take longer to propagate on some networks. "
                           "the registration will proceed, but expect health check failures."))
 
+    def stop_children() -> None:
+        """Stop the two processes this run started: the tunnel and the model.
+
+        Separate from deregistering, because it is also what the failure paths
+        below need -- a registration that never succeeded has nothing to
+        deregister, but it has still left a llama-server holding port 11436 and
+        a tunnel holding a public hostname, and both of those must go with it.
+        """
+        stop_process(tunnel_proc)
+        stop_process(llama_proc)
+
     capability_text = args.capability or capability_text_default or (
-        f"{ollama_tag} running locally via Ollama, contributed by {args.operator}. Free, community-hosted."
+        f"{wire_name} running locally via llama.cpp, contributed by {args.operator}. Free, community-hosted."
     )
 
     payload = {
         "name": args.name,
         "operator": args.operator,
         "endpoint_url": f"{tunnel_url}/v1",
-        "model_name": ollama_tag,
+        "model_name": wire_name,
         "capability_text": capability_text,
         "region": args.region,
         "cost_per_1k": args.cost,
@@ -1294,8 +1572,7 @@ def main() -> None:
             # the gateway gave up before our DNS propagated.
             if e.code == 400 and "does not resolve" in detail:
                 if retry_elapsed >= RETRY_MAX_WAIT:
-                    if tunnel_proc is not None:
-                        tunnel_proc.terminate()
+                    stop_children()
                     die(f"registration failed: the gateway still cannot resolve our tunnel "
                         f"hostname after {RETRY_MAX_WAIT}s. This can happen when DNS "
                         f"propagation is unusually slow.\n"
@@ -1308,8 +1585,7 @@ def main() -> None:
                 continue
 
             # Non-DNS failure: terminate immediately.
-            if tunnel_proc is not None:
-                tunnel_proc.terminate()
+            stop_children()
             if e.code == 409:
                 die(f"registration failed: a node named '{args.name}' is already registered and "
                     f"this machine has no token proving it's ours. Pick a different name "
@@ -1321,8 +1597,7 @@ def main() -> None:
             # mid-DNS-retry (blocking), or there may be transient network issues.
             # Treat like a soft failure and retry with the same tunnel URL.
             if retry_elapsed >= RETRY_MAX_WAIT:
-                if tunnel_proc is not None:
-                    tunnel_proc.terminate()
+                stop_children()
                 die(f"registration failed: request timed out or network error after "
                     f"{RETRY_MAX_WAIT}s of retries. The gateway may be slow to respond "
                     f"(DNS propagation) or unreachable.\n"
@@ -1342,7 +1617,7 @@ def main() -> None:
 
     write_identity(gateway, args.name, node_id, catalogue_id, domain_tags, node_token)
 
-    def deregister_and_stop_tunnel():
+    def deregister_and_stop():
         try:
             req = urllib.request.Request(
                 f"{gateway}/nodes/{node_id}", method="DELETE",
@@ -1352,12 +1627,11 @@ def main() -> None:
         except urllib.error.URLError:
             pass
         clear_identity()
-        if tunnel_proc is not None:
-            tunnel_proc.terminate()
+        stop_children()
 
     def cleanup(signum=None, frame=None):
         print(f"\n{GLYPH_WORK} {dim('leaving the network...')}")
-        deregister_and_stop_tunnel()
+        deregister_and_stop()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, cleanup)
@@ -1368,6 +1642,16 @@ def main() -> None:
     while True:
         if tunnel_proc is not None and tunnel_proc.poll() is not None:
             print(f"{GLYPH_FORMING} {red('tunnel dropped unexpectedly.')}")
+            cleanup()
+
+        # The model backend dying is quieter than the tunnel dying and worse:
+        # the worker keeps answering, the gateway keeps routing here, and every
+        # request comes back a 502 from a node that still looks healthy. Say so
+        # and leave, rather than sit there collecting failures -- the LaunchAgent
+        # or systemd unit restarts us, and a fresh start reloads the weights.
+        if llama_proc.poll() is not None:
+            print(f"{GLYPH_FORMING} {red('the model runtime exited unexpectedly')} "
+                  f"— code {llama_proc.returncode}. Leaving the network; restart to rejoin.")
             cleanup()
 
         # A LAN node has no tunnel to rotate or restart, but its address can
@@ -1394,7 +1678,7 @@ def main() -> None:
             last_tunnel_check = time.monotonic()
             if not tunnel_is_healthy(tunnel_url, worker_token):
                 print(f"{GLYPH_FORMING} {red('tunnel is no longer reachable')} (quick tunnels can silently rotate hostnames) — restarting it...")
-                tunnel_proc.terminate()
+                stop_process(tunnel_proc)
                 tunnel_proc, tunnel_url = start_tunnel()
                 print(f"{GLYPH_DONE} tunnel live at {blue(tunnel_url)}")
                 payload["endpoint_url"] = f"{tunnel_url}/v1"
@@ -1416,7 +1700,7 @@ def main() -> None:
             remote = fetch_update()
             if remote:
                 print(f"\n{GLYPH_WORK} {dim('a new version is available — restarting to update...')}")
-                deregister_and_stop_tunnel()
+                deregister_and_stop()
                 apply_update_and_restart(remote)
 
         time.sleep(2)
