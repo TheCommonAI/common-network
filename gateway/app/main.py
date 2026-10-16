@@ -14,7 +14,7 @@ from app.decisions import router as decisions_router
 from app.demand import router as demand_router
 from app.gateway import router as gateway_router
 from app.health import health_check_loop
-from app.metrics import router as metrics_router
+from app.metrics import router as metrics_router, refresh_current_epoch
 from app.registry import router as registry_router
 from app.seed import seed_from_file
 
@@ -37,6 +37,9 @@ async def lifespan(app: FastAPI):
     embedder.load()
     print("startup: connecting to database...", flush=True)
     await db.connect()
+
+    print("startup: loading current epoch...", flush=True)
+    await refresh_current_epoch()
 
     # Seeding is best-effort. It refreshes rows that are already in the
     # database from the last deploy, so failing it is not a reason to refuse

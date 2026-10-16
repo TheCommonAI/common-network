@@ -40,6 +40,30 @@ from app import db
 
 router = APIRouter()
 
+# --- Epoch tracking --------------------------------------------------------
+# The current epoch label, cached in-process. Refreshed on startup and when a
+# new epoch is started via the admin endpoint. This avoids a DB query per
+# request while still allowing epoch changes without a redeploy.
+_current_epoch: str = "baseline"
+
+
+async def refresh_current_epoch() -> str:
+    """Fetch the current epoch from the database and cache it."""
+    global _current_epoch
+    try:
+        async with db.pool().acquire() as conn:
+            row = await conn.fetchrow("select current_epoch() as epoch")
+            if row and row["epoch"]:
+                _current_epoch = row["epoch"]
+    except Exception:
+        pass
+    return _current_epoch
+
+
+def get_current_epoch() -> str:
+    """Return the cached current epoch label."""
+    return _current_epoch
+
 
 # --- Recording -------------------------------------------------------------
 
@@ -187,9 +211,9 @@ async def _record(row: dict[str, Any]) -> None:
                      route_ms, ttft_ms, total_ms,
                      node_reported, load_ms, prompt_eval_ms, eval_ms,
                      prompt_tokens, prompt_cached_tokens, completion_tokens, cold,
-                     ok, error)
+                     ok, error, epoch)
                 values ($1, $2, $3, $4, $5, $6, $7, $8,
-                        $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                        $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                 """,
                 row.get("node_id"),
                 row.get("node_name"),
@@ -209,6 +233,7 @@ async def _record(row: dict[str, Any]) -> None:
                 row.get("cold"),
                 bool(row.get("ok", True)),
                 (row.get("error") or None) and str(row["error"])[:200],
+                _current_epoch,
             )
     except Exception as exc:  # noqa: BLE001 -- see docstring
         print(f"metrics: could not record request metrics "
