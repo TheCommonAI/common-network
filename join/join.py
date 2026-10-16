@@ -100,6 +100,30 @@ WORKER_PORT = 11435
 WORKER_URL = f"http://127.0.0.1:{WORKER_PORT}"
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
 
+# cloudflared's own errors arrive on the same stream the tunnel URL does --
+# stderr is merged into stdout in start_tunnel() -- and that stream was read for
+# the URL and nothing else. So a refusal Cloudflare states in as many words
+# ("429 Too Many Requests", "error code: 1015") reached the contributor as
+# "cloudflared exited before a tunnel URL appeared": the symptom, with the cause
+# deleted. Collapsing those two is not merely unhelpful, it is misleading, because
+# they want opposite responses -- one says stop asking for a while, the other says
+# the program is broken -- and the first is made worse by the retry the second
+# invites.
+#
+# Bounded, because this accumulates somebody else's output while the process is
+# alive and only the last few lines explain an exit.
+TUNNEL_TAIL_LINES = 6
+
+# Cloudflare answers quick-tunnel *creation* with 429 / error 1015 when the caller
+# is rate limited, and its published guidance is to wait rather than to ask again:
+# repeated attempts extend the block. cloudflared cannot be relied on to say so --
+# it parses the response body as JSON whatever the status code, so the 429 arrives
+# as `invalid character 'e' looking for beginning of value`
+# (cloudflare/cloudflared#1302). The status code in the text is the part worth
+# matching on, and it is why this reads the output rather than the exit status:
+# cloudflared exits 1 for a rate limit, a bad flag and a dead DNS alike.
+TUNNEL_RATE_LIMITED_PATTERN = re.compile(r"\b1015\b|\b429\b|too many requests", re.IGNORECASE)
+
 # The default, shared Common Network gateway. Override with --gateway to
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
@@ -1144,6 +1168,52 @@ def worker_reachable_on_lan(ip: str) -> bool:
         return False
 
 
+def print_cloudflared_tail(tail: list[str]) -> None:
+    """What cloudflared last said, as commentary. Nothing, when it said nothing."""
+    for line in tail:
+        if line.strip():
+            print(comment(line.strip()), file=sys.stderr)
+
+
+def tunnel_failure_message(tail: list[str]) -> tuple[str, list[str]]:
+    """The headline and the advice for a tunnel that never came up.
+
+    Split out from the reporting below so the decision it encodes -- rate limited,
+    or something else -- can be tested without a cloudflared to fail. `tail` is
+    what cloudflared last said, oldest first.
+    """
+    if any(TUNNEL_RATE_LIMITED_PATTERN.search(line) for line in tail):
+        return (
+            "Cloudflare refused to create a quick tunnel: rate limited (429, error 1015).",
+            [
+                "wait before trying again — Cloudflare's guidance is that retrying extends the block",
+                "a named tunnel on a free Cloudflare account has no such limit",
+            ],
+        )
+    if not any(line.strip() for line in tail):
+        return (
+            "cloudflared exited before a tunnel URL appeared, and printed nothing.",
+            [f"run it by hand to see what it does: cloudflared tunnel --url {WORKER_URL}"],
+        )
+    return ("cloudflared exited before a tunnel URL appeared.", [])
+
+
+def report_tunnel_failure(tail: list[str]) -> None:
+    """Say why the tunnel did not come up, then exit.
+
+    The tail is printed whatever the classification, because cloudflared's own
+    words are the evidence for the sentence printed above them. This is also the
+    only place they can be printed: the reader thread in start_tunnel() is the one
+    thing reading that pipe, and it keeps a bounded tail of it and nothing else.
+    """
+    headline, advice = tunnel_failure_message(tail)
+    print(f"{GLYPH_FAILED} {red(headline)}", file=sys.stderr)
+    for line in advice:
+        print(comment(line), file=sys.stderr)
+    print_cloudflared_tail(tail)
+    sys.exit(1)
+
+
 def start_tunnel() -> tuple[subprocess.Popen, str]:
     # Points at the worker, never at the model backend: the worker is what
     # requires the gateway's token and refuses everything but the two inference
@@ -1163,9 +1233,14 @@ def start_tunnel() -> tuple[subprocess.Popen, str]:
     )
 
     found_url: list[str] = []
+    tail: list[str] = []
 
     def read_output():
         for line in proc.stdout:
+            line = line.rstrip("\n")
+            tail.append(line)
+            if len(tail) > TUNNEL_TAIL_LINES:
+                del tail[0]
             match = TUNNEL_URL_PATTERN.search(line)
             if match and not found_url:
                 found_url.append(match.group(0))
@@ -1178,11 +1253,23 @@ def start_tunnel() -> tuple[subprocess.Popen, str]:
         if found_url:
             return proc, found_url[0]
         if proc.poll() is not None:
-            die("cloudflared exited before a tunnel URL appeared")
+            # The pipe closes when the process exits, but this thread may not have
+            # read the last of it yet -- and an exit's explanation is always in its
+            # last lines. Joining is what makes the report below worth carrying at
+            # all; the timeout keeps a pipe something else is holding open from
+            # hanging a join that has already failed.
+            reader.join(timeout=2)
+            report_tunnel_failure(tail)
         time.sleep(0.5)
 
     stop_process(proc)
-    die("timed out waiting for cloudflared to open a tunnel")
+    # Stopped first, so the pipe closes and the reader can finish, then joined for
+    # the same reason as above. A tunnel that never arrives is the case where
+    # cloudflared's own output is most likely to be the whole story.
+    reader.join(timeout=2)
+    print(f"{GLYPH_FAILED} {red('cloudflared did not open a tunnel within 30s.')}", file=sys.stderr)
+    print_cloudflared_tail(tail)
+    sys.exit(1)
 
 
 LAUNCHD_LABEL = "network.common.join"

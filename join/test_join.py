@@ -254,6 +254,65 @@ check("runtime.py is in the self-update list",
 check("worker.py still is", "worker.py" in join.SIBLING_MODULES, True)
 
 
+# --- what a failed tunnel is allowed to say ---------------------------------
+
+section("a rate-limited quick tunnel is named as one")
+
+# The real lines, copied from cloudflared 2026.7.1 rather than invented. The
+# second is where the status code is, and the third is the JSON-parse failure
+# that hides it -- cloudflared parses the error body as JSON whatever the status
+# code is (cloudflare/cloudflared#1302), so "429 Too Many Requests" arrives as
+# "invalid character 'e' looking for beginning of value" and the honest part is
+# buried in the middle of somebody else's log line. A test written against a
+# paraphrase of this would pass while the live text went unmatched.
+_RATE_LIMITED = [
+    "2026-10-16T23:07:55Z INF Requesting new quick Tunnel on trycloudflare.com...",
+    "2026-10-16T23:07:55Z ERR Error unmarshaling QuickTunnel response: error code: 1015",
+    ' error="invalid character \'e\' looking for beginning of value" status_code="429 Too Many Requests"',
+    "failed to unmarshal quick Tunnel: invalid character 'e' looking for beginning of value",
+]
+_headline, _advice = join.tunnel_failure_message(_RATE_LIMITED)
+check("the headline says rate limited, and not that cloudflared simply died",
+      "rate limited" in _headline and "exited" not in _headline, True)
+check("the status code is in it", "429" in _headline, True)
+check("the advice is to wait", any("wait" in a for a in _advice), True)
+# The one wrong reading to guard against: a rate limit is Cloudflare declining
+# this machine, not the Common Network being down, and the difference decides
+# whether the contributor waits or goes looking for a fault that is not there.
+check("it does not blame the network", "network" not in _headline.lower(), True)
+
+
+section("a bare status code is enough, in either spelling")
+for _line in ("error code: 1015", "status_code=429", "429 Too Many Requests"):
+    check(f"{_line!r} reads as rate limited",
+          "rate limited" in join.tunnel_failure_message([_line])[0], True)
+
+
+section("a tunnel that died of something else is not called a rate limit")
+_OTHER = [
+    "ERR Failed to dial edge: dial tcp 198.41.200.13:7844: connect: connection refused",
+]
+_other_headline, _other_advice = join.tunnel_failure_message(_OTHER)
+check("the headline is the plain one",
+      _other_headline, "cloudflared exited before a tunnel URL appeared.")
+check("and nothing is claimed about rate limits",
+      "rate limited" not in _other_headline, True)
+check("a tail that said something gets no run-it-by-hand hint",
+      _other_advice, [])
+
+
+section("cloudflared printing nothing says so, and says what to run")
+_silent_headline, _silent_advice = join.tunnel_failure_message([])
+check("the headline admits it said nothing",
+      _silent_headline, "cloudflared exited before a tunnel URL appeared, and printed nothing.")
+check("the advice names the command to run by hand",
+      any("cloudflared tunnel --url" in a for a in _silent_advice), True)
+check("whitespace counts as nothing too",
+      join.tunnel_failure_message(["", "   "])[0], _silent_headline)
+check("the kept tail is bounded, and small enough to read",
+      2 <= join.TUNNEL_TAIL_LINES <= 20, True)
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} of {CHECKS[0]} FAILED\n")
