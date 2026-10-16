@@ -36,6 +36,126 @@ ENUMS = {
 CONTAINERS = set('application computer ollama models gateway node tunnel worker contribution recentEvents performance update health preferences events statistics session today allTime activity diagnostics error benchmark'.split())
 MODEL = re.compile(r'^(?:llama[0-9.]*|qwen[0-9.]*|gemma[0-9.]*|phi[0-9.]*|mistral|deepseek-r1)(?::[0-9]+(?:\.[0-9]+)?[bm])?$')
 
+# Why an answer was reported. A closed list, deliberately: the point of the
+# field is to be countable, and free text is already available in `text`.
+# `category` is a different axis and stays 'chat' for these.
+REASONS = set('made-up wrong off-topic truncated refused format slow other'.split())
+
+# An exchange is the question and the answer the user chose to attach. Caps are
+# generous enough for a real 7B response (a long one is ~8k characters, well
+# under 32KiB) and small enough that a report stays a report rather than a
+# transcript dump. `read_body` already refuses a body over 128KiB, so these
+# bounds exist to keep one exchange from crowding out the other fields.
+EXCHANGE_MAX_BYTES = 65536
+QUESTION_MAX_CHARS = 4000
+ANSWER_MAX_BYTES = 32768
+ROUTING_STR_MAX = 200
+# The numeric half of `routing`. Finite and bounded, like NUMBERS above.
+ROUTING_NUMBERS = set('score candidates margin_over_runner_up checks_run checks_failed '
+                      'disagreements routing_ms ttft_ms total_ms'.split())
+# The string half. `panel` and `compose_reason` are handled separately below.
+ROUTING_STRINGS = set('node topology aggregator'.split())
+
+
+def _valid_routing(value):
+    """Keep the routing metadata the CLI read off the response headers.
+
+    This is metadata the network already recorded on the `decisions` row — it is
+    not new text, and it is what lets an operator tell "the router picked the
+    wrong node" apart from "the right node answered badly" *before* opening the
+    decision. Unknown sub-keys are dropped rather than stored, so a client
+    cannot use this to smuggle arbitrary content into the column.
+    """
+    if not isinstance(value, dict):
+        raise HTTPException(400, 'Invalid routing')
+    out = {}
+    for k, v in value.items():
+        if k in ROUTING_NUMBERS:
+            if v is not None and (type(v) in (int, float) and math.isfinite(v) and abs(v) <= 1e15):
+                out[k] = v
+        elif k in ROUTING_STRINGS:
+            if v is not None:
+                if not isinstance(v, str) or len(v) > ROUTING_STR_MAX:
+                    raise HTTPException(400, 'Invalid routing')
+                out[k] = v
+        elif k == 'panel':
+            if v is None:
+                continue
+            if not isinstance(v, list) or len(v) > 32:
+                raise HTTPException(400, 'Invalid routing')
+            if any(not isinstance(p, str) or len(p) > ROUTING_STR_MAX for p in v):
+                raise HTTPException(400, 'Invalid routing')
+            out[k] = v
+        elif k == 'compose_reason':
+            # One level deep and scalars only. The CLI sends the gateway's own
+            # reason dict here; it is small and read-only, and flattening it any
+            # further would lose the thing it is for.
+            if v is None:
+                continue
+            if not isinstance(v, dict) or len(v) > 32:
+                raise HTTPException(400, 'Invalid routing')
+            flat = {}
+            for rk, rv in v.items():
+                if not isinstance(rk, str) or len(rk) > ROUTING_STR_MAX:
+                    raise HTTPException(400, 'Invalid routing')
+                if isinstance(rv, (dict, list)):
+                    continue
+                if isinstance(rv, str) and len(rv) > ROUTING_STR_MAX:
+                    raise HTTPException(400, 'Invalid routing')
+                if rv is not None and not isinstance(rv, (str, int, float, bool)):
+                    continue
+                flat[rk] = rv
+            out[k] = flat
+        elif k == 'decision_id':
+            if v is None:
+                continue
+            try:
+                out[k] = str(UUID(v))
+            except (ValueError, TypeError, AttributeError):
+                raise HTTPException(400, 'Invalid routing')
+    return out
+
+
+def _valid_exchange(value):
+    """An exchange is stored VERBATIM and must not go through `sanitise()`.
+
+    `sanitise()` is a strict allowlist over NUMBERS/BOOLS/ENUMS/CONTAINERS. Not
+    one of 'question', 'answer' or 'exchange' appears in any of them, so
+    `sanitise(exchange)` returns `{}` — it would delete this entire feature while
+    looking like it had worked. Text the user deliberately attached, previewed
+    and confirmed is not the same kind of value as an automatically-gathered
+    diagnostic, and the allowlist is there to stop the second kind. Validate
+    structurally instead, and bound the size.
+
+    `tests/test_client_observability.py` pins this: it asserts attached text
+    comes back out of the row unchanged, which is the inverse of the
+    `assertNotIn('SECRET', ...)` guards that must keep protecting `diagnostics`.
+
+    No migration accompanies this. `client_reports.payload` is jsonb and this
+    route builds it as a Python dict, so a new key needs no DDL.
+    """
+    if not isinstance(value, dict):
+        raise HTTPException(400, 'Invalid exchange')
+    question = value.get('question')
+    if not isinstance(question, str) or not 1 <= len(question) <= QUESTION_MAX_CHARS:
+        raise HTTPException(400, 'Invalid exchange question')
+    answer = value.get('answer')
+    # Empty is allowed on purpose: a node that returned nothing at all is a
+    # reportable failure, and it is one of the cases this feature exists for.
+    if not isinstance(answer, str) or len(answer.encode('utf-8')) > ANSWER_MAX_BYTES:
+        raise HTTPException(400, 'Invalid exchange answer')
+    out = {'question': question, 'answer': answer}
+    if 'answer_truncated' in value:
+        if type(value['answer_truncated']) is not bool:
+            raise HTTPException(400, 'Invalid exchange')
+        out['answer_truncated'] = value['answer_truncated']
+    if value.get('routing') is not None:
+        out['routing'] = _valid_routing(value['routing'])
+    if len(json.dumps(out)) > EXCHANGE_MAX_BYTES:
+        raise HTTPException(400, 'Exchange too large')
+    return out
+
+
 
 def sanitise(value, depth=0):
     if depth > 8:
@@ -140,8 +260,29 @@ async def report(request: Request):
         raise HTTPException(400, 'Invalid contact')
     if b.get('rating') is not None and (type(b['rating']) is not int or b['rating'] not in range(1, 6)):
         raise HTTPException(400, 'Invalid rating')
+    # isinstance before the membership test, deliberately. REASONS is a set, and
+    # `x not in set` on an unhashable x -- a list, a dict -- raises TypeError and
+    # becomes a 500. `mode` and `category` above get away with a bare `in`
+    # because they test against a tuple, which compares rather than hashes. On a
+    # public boundary junk has to be a 400, never a 500.
+    if b.get('reason') is not None and (not isinstance(b['reason'], str) or b['reason'] not in REASONS):
+        raise HTTPException(400, 'Invalid reason')
     payload = {k: b.get(k) for k in ('mode', 'category', 'text', 'rating', 'contact')}
+    # `reason` is not coupled to mode. It answers "why was this bad?", which is
+    # a separate axis from `category` ("what part of the product?") and from
+    # mode itself, and a feedback report carrying one is not an error.
+    payload['reason'] = b.get('reason')
+    # `diagnostics` is gathered automatically by the client, so it goes through
+    # the allowlist; `exchange` is attached deliberately by the user after a
+    # preview, so it does not. See _valid_exchange -- running it through
+    # sanitise() would silently empty it.
     payload['diagnostics'] = sanitise(b.get('diagnostics')) if b['mode'] == 'problem' else None
+    # Coupled to `problem` for the same reason `diagnostics` is: an exchange is
+    # evidence about an answer that went wrong, and a `feedback` report has no
+    # answer to be evidence about. Validation still runs first, so a malformed
+    # exchange is a 400 rather than something silently dropped.
+    payload['exchange'] = (_valid_exchange(b['exchange'])
+                           if b['mode'] == 'problem' and b.get('exchange') is not None else None)
     async with db.pool().acquire() as conn:
         async with conn.transaction():
             result = await conn.execute('insert into client_reports(id,payload) values($1,$2::jsonb) on conflict do nothing', b['id'], json.dumps(payload))
