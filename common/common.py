@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """COMMON. — the commons, belonging to everyone and no one.
 
-The Common Network Alpha (v0.1.7).
+The Common Network Alpha (v0.1.8).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -111,7 +111,7 @@ except ImportError:  # pragma: no cover - Windows
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"

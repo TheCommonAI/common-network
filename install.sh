@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the Common Network CLI tools (macOS / Linux).
-# The Common Network Alpha (v0.1.7).
+# The Common Network Alpha (v0.1.8).
 #
 #   curl -fsSL https://commonai.com.au/install.sh | sh
 #
@@ -26,7 +26,7 @@ INSTALL_DIR="$HOME/.common-network"
 BIN_DIR="$INSTALL_DIR/bin"
 RAW="https://raw.githubusercontent.com/$REPO/main"
 
-echo "Installing the Common Network Alpha (v0.1.7)..."
+echo "Installing the Common Network Alpha (v0.1.8)..."
 mkdir -p "$BIN_DIR"
 
 OS="$(uname -s)"
