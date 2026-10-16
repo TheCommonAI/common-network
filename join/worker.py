@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """The Common worker: the only thing that should ever face the network.
 
-The Common Network Alpha (v0.1.3).
+The Common Network Alpha (v0.1.5).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
 ABSOLUTELY NO WARRANTY.
 
-Before this existed, `common join` tunnelled straight to Ollama and the
-gateway published that URL in GET /nodes. Ollama's API has no authentication,
-so anyone who read the registry could talk to a contributor's machine
-directly: bypass the gateway's contribution gate and rate limit, run
+Before this existed, `common join` tunnelled straight to the model backend and
+the gateway published that URL in GET /nodes. Ollama's API has no
+authentication, so anyone who read the registry could talk to a contributor's
+machine directly: bypass the gateway's contribution gate and rate limit, run
 inference on someone else's hardware for free, and reach model management --
-`/api/pull`, `/api/delete`, `/api/create` -- not just inference.
+`/api/pull`, `/api/delete`, `/api/create` -- not just inference. llama-server is
+the same story with a different name: no authentication either, plus a web UI
+that browses the directory the weights are in.
 
 So the tunnel now points here instead, and this process enforces three rules
-before anything reaches Ollama:
+before anything reaches the model:
 
   1. **Bearer token.** Every request must carry the worker token the gateway
      was issued for this node. No token, no reply.
@@ -45,11 +47,12 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # 127.0.0.1 instead of localhost: on Windows, localhost may resolve to ::1 (IPv6)
-# while Ollama binds only to IPv4, causing requests to fail silently.
-DEFAULT_OLLAMA = "http://127.0.0.1:11434"
+# while the model backend binds only to IPv4, causing requests to fail silently.
+DEFAULT_UPSTREAM = "http://127.0.0.1:11436"
 
-# The complete set of routes reachable from outside. Ollama's own management
-# API is not on it and must never be: this list is the security boundary.
+# The complete set of routes reachable from outside. The model backend's own
+# management surface -- llama-server's /props, /slots and web UI -- is not on it
+# and must never be: this list is the security boundary.
 ROUTE_MODELS = "/v1/models"
 ROUTE_CHAT = "/v1/chat/completions"
 
@@ -59,34 +62,15 @@ ROUTE_CHAT = "/v1/chat/completions"
 # forever.
 UPSTREAM_TIMEOUT = 120
 
-# How long Ollama should keep this node's model resident between requests.
-#
-# Ollama's own default is five minutes. That is fine for a chat session and
-# wrong for a network, because it means the first question of the day -- or the
-# first after any lull longer than five minutes -- pays the full cold load.
-# Measured on this fleet that is 53-77s to the first token, against roughly one
-# second once the weights are in memory. Nothing in this repository set
-# keep_alive anywhere, so every node was on Ollama's default and every idle node
-# was cold.
-#
-# A machine that has run `common join` has already decided its hardware is for
-# this, so the model stays resident for half an hour of quiet before Ollama
-# reclaims the RAM. Half an hour and not forever: a contributor's laptop is
-# still a laptop, and `-1` (never unload) is a deliberate choice for a dedicated
-# always-on donor rather than a sensible default for someone's Air.
-#
-# Overridable per node with COMMON_KEEP_ALIVE (see main()), and on the Ollama
-# side by OLLAMA_KEEP_ALIVE -- but this is the one the project controls and the
-# one that travels with the node.
-DEFAULT_KEEP_ALIVE = "30m"
-
 # The ceiling on one generation, and the value used when the caller names none.
 #
 # Nothing upstream sets one. The client sends {model, messages, stream}; the
-# gateway rewrites the model name and nothing else; this file stamped keep_alive
-# and nothing else. So every request ran on Ollama's default of num_predict = -1
-# -- "generate until the model emits EOS" -- and a model that does not emit EOS
-# had nothing stopping it but the context window.
+# gateway rewrites the model name and nothing else; this file stamps this field
+# and nothing else. So every request runs on the backend's own default, and both
+# backends this has served have the same one -- Ollama's num_predict and
+# llama-server's n_predict both default to -1, "generate until the model emits
+# EOS" -- so a model that does not emit EOS has nothing stopping it but the
+# context window.
 #
 # This fleet serves a maths specialisation, and routing hands it whatever the
 # network is asked. Asked off-distribution -- a roleplay prompt, a question in
@@ -121,7 +105,7 @@ def bounded_max_tokens(requested, ceiling: int = DEFAULT_MAX_TOKENS) -> int:
     This sits on a public HTTP boundary, so the body is whatever a stranger's
     client sent. A limit that is absent, zero, negative, a bool or a string has
     to land on the ceiling rather than raise inside the request path or reach
-    Ollama as junk.
+    the model as junk.
     """
     if isinstance(requested, bool) or not isinstance(requested, (int, float)):
         return ceiling
@@ -131,13 +115,11 @@ def bounded_max_tokens(requested, ceiling: int = DEFAULT_MAX_TOKENS) -> int:
 
 
 class WorkerConfig:
-    def __init__(self, token: str, model: str, ollama_url: str = DEFAULT_OLLAMA,
-                 keep_alive: str = DEFAULT_KEEP_ALIVE,
+    def __init__(self, token: str, model: str, upstream_url: str = DEFAULT_UPSTREAM,
                  max_tokens: int = DEFAULT_MAX_TOKENS):
         self.token = token
         self.model = model
-        self.ollama_url = ollama_url.rstrip("/")
-        self.keep_alive = keep_alive
+        self.upstream_url = upstream_url.rstrip("/")
         self.max_tokens = max_tokens
 
 
@@ -214,8 +196,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         # Answered locally rather than proxied. The gateway's health check only
         # needs to know this node is alive and serving the model it declared,
-        # and generating the reply here means a health check never reaches
-        # Ollama at all.
+        # and generating the reply here means a health check never reaches the
+        # model backend at all.
         self._json(200, {
             "object": "list",
             "data": [{
@@ -257,8 +239,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # This machine donated one model. Anything else is refused rather than
-        # forwarded -- Ollama would happily start pulling a model nobody here
-        # agreed to host.
+        # forwarded -- llama-server serves whatever single model it was started
+        # with, so an unknown name would come back as an opaque 500 from the
+        # backend rather than as the clear refusal a caller can act on.
         requested = body.get("model")
         if requested and requested not in (self.config.model, "auto"):
             self._json(400, {"error": {
@@ -268,33 +251,30 @@ class Handler(BaseHTTPRequestHandler):
             return
         body["model"] = self.config.model
 
-        # Stamp the node's own retention policy, overriding whatever the caller
-        # sent -- the same way the model above is overwritten. Ollama restarts
-        # its unload timer on every request, so this has to travel with each one:
-        # setting it once at start-up would still let the model evict five
-        # minutes later, which is the bug being fixed. And the node owns its own
-        # memory, not the client: a request that asked for keep_alive=0 would
-        # otherwise make every caller after it pay a 53s reload.
-        body["keep_alive"] = self.config.keep_alive
-
-        # And the node owns its own ceiling on generation, for the same reason it
-        # owns the model and the retention above. A caller asking for less is
-        # taken at its word; one asking for more -- or for nothing at all -- gets
-        # this node's limit. See DEFAULT_MAX_TOKENS for why one has to exist.
+        # The node owns its own ceiling on generation, for the same reason it owns
+        # the model. A caller asking for less is taken at its word; one asking for
+        # more -- or for nothing at all -- gets this node's limit. See
+        # DEFAULT_MAX_TOKENS for why one has to exist.
+        #
+        # There used to be a keep_alive stamp beside this, asking Ollama to hold
+        # the model in memory for half an hour. That intent has not gone away, but
+        # the mechanism has: llama-server is started with --sleep-idle-seconds and
+        # decides for itself, which is strictly better than a hint repeated on
+        # every request by a process that does not own the memory.
         body["max_tokens"] = bounded_max_tokens(body.get("max_tokens"),
                                                 self.config.max_tokens)
 
         self._proxy_chat(body)
 
     def _proxy_chat(self, body: dict) -> None:
-        """Forward to Ollama and stream the reply back byte for byte.
+        """Forward to the model backend and stream the reply back byte for byte.
 
         Streaming is the part that has to be exact: the gateway relays these
         bytes to a client parsing server-sent events, so re-chunking or
         re-encoding here truncates answers downstream.
         """
         req = urllib.request.Request(
-            f"{self.config.ollama_url}/v1/chat/completions",
+            f"{self.config.upstream_url}/v1/chat/completions",
             data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -302,9 +282,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             upstream = urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT)
         except urllib.error.HTTPError as e:
-            # Pass Ollama's own error through -- the gateway surfaces it, and a
-            # contributor debugging a bad model name should see the real
-            # reason rather than a generic 502.
+            # Pass the backend's own error through -- the gateway surfaces it, and
+            # a contributor debugging a bad model name should see the real reason
+            # rather than a generic 502.
             detail = e.read()
             self.send_response(e.code)
             self.send_header("Content-Type", "application/json")
@@ -343,34 +323,35 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
 
-def warm_model(model: str, ollama_url: str, keep_alive: str = DEFAULT_KEEP_ALIVE) -> None:
-    """Load the model into memory before any user needs it.
+def warm_model(model: str, upstream_url: str) -> None:
+    """Ask the model backend for one token before any user needs it.
 
-    The cold load is 53-77s to the first token on this fleet and about a second
-    once the weights are resident, so it is paid once per load. There is no
-    reason for a user to be the one who pays it: `common join` already spends
-    tens of seconds coming up, most of it waiting on a tunnel and on
-    registration. Loading the model inside that window moves the cost to the
-    person who chose to donate, at the moment they chose to, and leaves every
-    request after it warm.
+    The cold load used to be the whole story. Ollama deferred loading a model
+    until a request touched it, so the first token cost 53-77s on this fleet and
+    whichever user arrived first paid it. llama-server loads at start-up
+    instead, and `common join` waits for /health before it starts this worker at
+    all -- so most of that cost is now gone before this function is reached.
 
-    Runs on a background thread so registration is not held up behind it -- the
-    model is loading while the tunnel is being minted. A request that arrives
-    mid-warm-up waits on Ollama's queue exactly as it would have anyway.
+    What is left is the first batch. The weights are memory-mapped, so the first
+    inference faults them in and builds its graph, and that is still seconds on a
+    cold machine rather than milliseconds. There is no reason for a user to be
+    the one who pays even that: `common join` has already spent tens of seconds
+    on a tunnel and on registration, and this runs on a background thread inside
+    that window, so registration is not held up behind it and every request after
+    it starts warm.
 
-    Failure is deliberately silent. If Ollama is not up yet, or this model name
-    is not pulled, the first real request loads it instead -- precisely the
-    behaviour that existed before this function, so there is nothing to report
-    and nothing to break.
+    Failure is deliberately silent. If the backend is not up yet, or this model
+    name is not one it serves, the first real request pays exactly what this
+    would have -- precisely the behaviour that existed before this function, so
+    there is nothing to report and nothing to break.
     """
     req = urllib.request.Request(
-        f"{ollama_url}/v1/chat/completions",
+        f"{upstream_url}/v1/chat/completions",
         data=json.dumps({
             "model": model,
             "messages": [{"role": "user", "content": "hi"}],
             "stream": False,
             "max_tokens": 1,
-            "keep_alive": keep_alive,
         }).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -383,8 +364,7 @@ def warm_model(model: str, ollama_url: str, keep_alive: str = DEFAULT_KEEP_ALIVE
 
 
 def serve(token: str, model: str, port: int = 11435,
-          ollama_url: str = DEFAULT_OLLAMA,
-          keep_alive: str = DEFAULT_KEEP_ALIVE,
+          upstream_url: str = DEFAULT_UPSTREAM,
           max_tokens: int = DEFAULT_MAX_TOKENS,
           warm: bool = True) -> ThreadingHTTPServer:
     """Start the worker on a background thread and return the server.
@@ -394,19 +374,19 @@ def serve(token: str, model: str, port: int = 11435,
     not the bind address.
 
     `warm=False` skips the background model load: for a caller that is not
-    really serving, and cannot afford an unannounced 53s inference against
-    whatever happens to be behind `ollama_url`. The test suite is the caller
-    that matters -- a warm-up thread firing mid-suite would land an extra
-    request in the stub's hit log and turn a real assertion into a coin toss.
+    really serving, and cannot afford an unannounced inference against whatever
+    happens to be behind `upstream_url`. The test suite is the caller that
+    matters -- a warm-up thread firing mid-suite would land an extra request in
+    the stub's hit log and turn a real assertion into a coin toss.
     """
     handler = type("BoundHandler", (Handler,), {
-        "config": WorkerConfig(token, model, ollama_url, keep_alive, max_tokens),
+        "config": WorkerConfig(token, model, upstream_url, max_tokens),
     })
     httpd = ThreadingHTTPServer(("0.0.0.0", port), handler)
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     if warm:
-        threading.Thread(target=warm_model, args=(model, ollama_url, keep_alive),
+        threading.Thread(target=warm_model, args=(model, upstream_url),
                          daemon=True).start()
     return httpd
 
@@ -435,9 +415,8 @@ def main() -> int:
     p.add_argument("--token", required=True, help="worker token issued by the gateway")
     p.add_argument("--model", required=True, help="the one model this node serves")
     p.add_argument("--port", type=int, default=11435)
-    p.add_argument("--ollama", default=DEFAULT_OLLAMA)
-    p.add_argument("--keep-alive", default=os.environ.get("COMMON_KEEP_ALIVE", DEFAULT_KEEP_ALIVE),
-                   help="how long Ollama keeps the model resident, e.g. 30m or -1 "
+    p.add_argument("--upstream", default=os.environ.get("COMMON_UPSTREAM", DEFAULT_UPSTREAM),
+                   help="base URL of the model backend this worker fronts "
                         "(default: %(default)s)")
     p.add_argument("--max-tokens", type=int,
                    default=os.environ.get("COMMON_MAX_TOKENS", DEFAULT_MAX_TOKENS),
@@ -445,11 +424,10 @@ def main() -> int:
                         "(default: %(default)s)")
     args = p.parse_args()
 
-    serve(args.token, args.model, args.port, args.ollama, args.keep_alive,
-          args.max_tokens)
-    print(f"common-worker on :{args.port} → {args.ollama} (model: {args.model})")
-    print(f"the model stays loaded for {args.keep_alive} after each request; "
-          f"Ollama unloads it once idle for longer.")
+    serve(args.token, args.model, args.port, args.upstream, args.max_tokens)
+    print(f"common-worker on :{args.port} → {args.upstream} (model: {args.model})")
+    print("the backend unloads the model itself, once idle for longer than the "
+          "sleep timeout it was started with.")
     print(f"one answer is capped at {args.max_tokens} tokens.")
     print("only /v1/models and /v1/chat/completions are reachable; both need the token.")
     try:

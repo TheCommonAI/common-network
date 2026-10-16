@@ -1,8 +1,29 @@
 #!/usr/bin/env python3
-"""Tests for join.py configuration constants.
+"""Tests for join.py, worker.py and runtime.py.
 
-These verify the fixes for Windows localhost IPv4/IPv6 issues and stable node
-identity across restarts.
+Two kinds of thing live here.
+
+The first is configuration constants that encode a Windows-specific decision --
+an address that must be an address and not a name -- and the node identity that
+has to survive a restart. Those were the original subject of this file.
+
+The second is the model-runtime seam: what a catalogue `source` means, what
+command line it turns into, and whether the node's public model name is still
+the string it has always been. That last one is the reason this file exists in
+its current shape. `gateway/app/health.py` marks a node healthy only when the
+`id` in its `GET /v1/models` is exactly equal to the `model_name` it registered,
+and the gateway routes by that name; so the name is not decoration, it is the
+key the whole routing layer is built on. Swapping Ollama for llama.cpp touches
+every path that produces that string, and a mistake in it would not raise
+anywhere -- it would quietly take every node in the fleet out of the routing
+table at once. `wire_name` is asserted against its literal historic value below
+for that reason, and the assertion is meant to be annoying to change.
+
+Everything here is offline. No gateway, no registry, no network, no model: the
+fixtures are minimal manifests, and the template-layer samples are the marker
+sequences observed in the real catalogue's registry entries rather than whole
+templates. `import runtime` must therefore stay free of import-time side
+effects, which is why the module does all of its work inside functions.
 """
 import sys
 from pathlib import Path
@@ -10,11 +31,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import join
+import runtime
+import worker
 
 FAILURES = []
+CHECKS = [0]
 
 
 def check(name: str, got, want) -> None:
+    CHECKS[0] += 1
     if got != want:
         FAILURES.append(f"{name}: got {got!r}, want {want!r}")
         print(f"  FAIL  {name}  (got {got!r}, want {want!r})")
@@ -22,20 +47,217 @@ def check(name: str, got, want) -> None:
         print(f"  ok    {name}")
 
 
-print("\nIPv4 addresses (Windows localhost resolves to IPv6, breaking tunnels)")
-check("OLLAMA_URL uses 127.0.0.1, not localhost",
-      "127.0.0.1" in join.OLLAMA_URL and "localhost" not in join.OLLAMA_URL, True)
+def section(title: str) -> None:
+    print(f"\n{title}")
+
+
+# --- addresses and timeouts -------------------------------------------------
+
+section("IPv4 addresses (Windows localhost resolves to IPv6, breaking tunnels)")
+check("LLAMA_URL uses 127.0.0.1, not localhost",
+      "127.0.0.1" in join.LLAMA_URL and "localhost" not in join.LLAMA_URL, True)
 check("WORKER_URL uses 127.0.0.1, not localhost",
       "127.0.0.1" in join.WORKER_URL and "localhost" not in join.WORKER_URL, True)
+check("the model backend and the worker are on different ports",
+      join.LLAMA_PORT != join.WORKER_PORT, True)
 
-print("\ntunnel health check timeout is reasonable")
+section("tunnel health check timeout is reasonable")
 check("TUNNEL_WARMUP_TIMEOUT_SECONDS is ~30s",
       25 <= join.TUNNEL_WARMUP_TIMEOUT_SECONDS <= 35, True)
 
+
+# --- the wire name, which the gateway routes on ------------------------------
+
+section("the node's public model name is unchanged by the runtime swap")
+
+# The literal, spelled out rather than computed, because its whole job is to be
+# the same string that nodes have been registering since before this change. If
+# this fails, every node whose catalogue entry is `ollama:<that tag>` will
+# register a name the gateway's health check does not recognise, and routing
+# will drop it. Think hard before "fixing" this line.
+check("ollama:mathstral:7b -> mathstral:7b",
+      runtime.resolve_source("ollama:mathstral:7b").wire_name, "mathstral:7b")
+check("ollama:mightykatun/qwen2.5-math:7b keeps its namespace",
+      runtime.resolve_source("ollama:mightykatun/qwen2.5-math:7b").wire_name,
+      "mightykatun/qwen2.5-math:7b")
+check("the scheme is stripped and nothing else",
+      runtime.resolve_source("ollama:phi4-mini-reasoning:latest").wire_name,
+      "phi4-mini-reasoning:latest")
+
+section("an Ollama tag splits into registry coordinates")
+check("a bare tag means the library namespace",
+      runtime.parse_ollama_tag("mathstral:7b"), ("library", "mathstral", "7b"))
+check("a namespaced tag keeps its namespace",
+      runtime.parse_ollama_tag("mightykatun/qwen2.5-math:7b"),
+      ("mightykatun", "qwen2.5-math", "7b"))
+check("a tag with no version means latest",
+      runtime.parse_ollama_tag("llama3.2"), ("library", "llama3.2", "latest"))
+
+section("what common-join can and cannot provision")
+for source in ("api:openai/gpt-4", "graph:something", "", "ollama:"):
+    check(f"{source!r} is not installable",
+          runtime.resolve_source(source), None)
+for bad in ("gguf:https://example.com/m.gguf",                 # no digest
+            "gguf:https://example.com/m.gguf#" + "a" * 63,    # short digest
+            "gguf:https://example.com/m.gguf#" + "z" * 64):   # not hex
+    check(f"{bad[:34]!r}... is rejected", runtime.resolve_source(bad), None)
+
+
+# --- the manifest parser -----------------------------------------------------
+
+section("reading a registry manifest")
+
+# Minimal but structurally real: the same three layers a catalogue model
+# actually carries, with the media types that identify them.
+_DIGEST = "a" * 64
+MANIFEST = {
+    "schemaVersion": 2,
+    "layers": [
+        {"mediaType": runtime.TEMPLATE_MEDIA_TYPE, "digest": "sha256:" + "b" * 64, "size": 1200},
+        {"mediaType": runtime.PARAMS_MEDIA_TYPE, "digest": "sha256:" + "c" * 64, "size": 44},
+        {"mediaType": runtime.MODEL_MEDIA_TYPE, "digest": "sha256:" + _DIGEST, "size": 4113288768},
+    ],
+}
+check("the model layer is found by media type, not by position",
+      runtime.model_layer(MANIFEST), (_DIGEST, 4113288768))
+check("its digest is returned without the sha256: prefix",
+      runtime.model_layer(MANIFEST)[0][:2], "aa")
+try:
+    runtime.model_layer({"layers": []})
+    check("a manifest with no weights raises FetchFailed", "no raise", "FetchFailed")
+except runtime.FetchFailed:
+    check("a manifest with no weights raises FetchFailed", "FetchFailed", "FetchFailed")
+check("the template layer is found separately",
+      runtime._layer(MANIFEST, runtime.TEMPLATE_MEDIA_TYPE)[0], "b" * 64)
+check("a media type that is absent returns None, not a crash",
+      runtime._layer(MANIFEST, "application/vnd.ollama.image.license"), None)
+
+
+# --- template hints ----------------------------------------------------------
+
+section("a template hint points at a built-in llama.cpp chat template")
+
+# The registry's template layer is Go, which llama.cpp cannot load -- so the
+# layer is only ever read as a signature. These are the marker sequences that
+# distinguish the families, taken from the real entries in the catalogue.
+HINTS = [
+    ("llama3",     "{% for m in .Messages %}<|start_header_id|>{{ m.Role }}<|end_header_id|>"),
+    ("chatml",     "<|im_start|>{{ .Role }}\n{{ .Content }}<|im_end|>"),
+    ("gemma",      "<start_of_turn>user\n{{ .Prompt }}<end_of_turn>"),
+    ("phi4",       "<|user|>{{ .Prompt }}<|end|>"),
+    ("llama2",     "<<SYS>>{{ .System }}<</SYS>>[INST] {{ .Prompt }} [/INST]"),
+    ("mistral-v1", "[INST] {{ .Prompt }} [/INST]"),
+    ("deepseek",   "{{ .Prompt }}<|end▁of▁sentence|>"),
+]
+for want, layer in HINTS:
+    check(f"{want:11} is recognised", runtime.template_hint(layer), want)
+check("an empty layer means no hint rather than a wrong one",
+      runtime.template_hint(""), None)
+check("an absent layer means no hint", runtime.template_hint(None), None)
+check("an unrecognised template says so instead of guessing",
+      runtime.template_hint("{{ .Prompt }} please answer nicely"), None)
+
+
+# --- params ------------------------------------------------------------------
+
+section("parameters the registry carries travel with the model")
+check("stop tokens are read as JSON",
+      runtime.read_params('{"stop": ["[INST]", "[/INST]"]}'),
+      {"stop": ["[INST]", "[/INST]"]})
+check("num_ctx is read too",
+      runtime.read_params('{"num_ctx": 2048, "stop": ["<|im_start|>"]}')["num_ctx"], 2048)
+check("an absent layer gives an empty dict", runtime.read_params(None), {})
+check("a layer that is not JSON gives an empty dict, not an exception",
+      runtime.read_params("PARAMETER stop [INST]"), {})
+check("JSON that is not an object gives an empty dict",
+      runtime.read_params('["not", "an", "object"]'), {})
+
+
+# --- the llama.cpp command line ----------------------------------------------
+
+section("the llama-server command line")
+
+check("all six published targets are named",
+      [runtime.llama_asset_name("b1", s, m) for s, m in (
+          ("Darwin", "arm64"), ("Darwin", "x86_64"),
+          ("Linux", "x86_64"), ("Linux", "aarch64"),
+          ("Windows", "AMD64"), ("Windows", "ARM64"))],
+      ["llama-b1-bin-macos-arm64.tar.gz", "llama-b1-bin-macos-x64.tar.gz",
+       "llama-b1-bin-ubuntu-x64.tar.gz", "llama-b1-bin-ubuntu-arm64.tar.gz",
+       "llama-b1-bin-win-cpu-x64.zip", "llama-b1-bin-win-cpu-arm64.zip"])
+check("a platform llama.cpp does not build for returns None",
+      runtime.llama_asset_name("b1", "Plan9", "mips"), None)
+
+ARGV = runtime.llama_server_argv("/r/llama-server", "/m/model.gguf", 11436,
+                                 alias="mathstral:7b")
+check("the weights are named with -m", ARGV[1:3], ["-m", "/m/model.gguf"])
+check("it binds localhost and does not face the network",
+      ARGV[ARGV.index("--host") + 1], "127.0.0.1")
+check("the context is explicit, so min_ram_gb stays honest",
+      ARGV[ARGV.index("-c") + 1], "4096")
+check("one slot, because each slot allocates its own KV cache",
+      ARGV[ARGV.index("-np") + 1], "1")
+check("idle unload is the process's own decision, not a hint per request",
+      ARGV[ARGV.index("--sleep-idle-seconds") + 1], "1800")
+check("the web UI is off -- it is a file browser over the weights directory",
+      "--no-webui" in ARGV, True)
+check("the model answers under its registered name, not its path",
+      ARGV[ARGV.index("--alias") + 1], "mathstral:7b")
+check("-ngl is absent: llama.cpp's default is already auto",
+      "-ngl" in ARGV or "--n-gpu-layers" in ARGV, False)
+check("no chat template is passed when there is no hint",
+      "--chat-template" in ARGV, False)
+_HINTED = runtime.llama_server_argv("/r/l", "/m/g", 11436, chat_template="llama3")
+check("a hint becomes a built-in --chat-template",
+      _HINTED[_HINTED.index("--chat-template") + 1], "llama3")
+
+
+# --- the worker's ceiling on one generation ----------------------------------
+
+section("the worker's max_tokens ceiling")
+
+check("a sane request is taken at its word", worker.bounded_max_tokens(64, 1024), 64)
+check("a request for less than the ceiling is honoured",
+      worker.bounded_max_tokens(1000, 1024), 1000)
+check("more than the ceiling is capped", worker.bounded_max_tokens(10 ** 9, 1024), 1024)
+check("an absent value gets the ceiling", worker.bounded_max_tokens(None, 1024), 1024)
+check("zero gets the ceiling -- 0 means 'unset', not 'generate nothing'",
+      worker.bounded_max_tokens(0, 1024), 1024)
+check("-1 gets the ceiling -- it is the unbounded case, and the bug",
+      worker.bounded_max_tokens(-1, 1024), 1024)
+check("a negative float gets the ceiling",
+      worker.bounded_max_tokens(-0.5, 1024), 1024)
+check("a bool gets the ceiling, because True is not a token count",
+      worker.bounded_max_tokens(True, 1024), 1024)
+check("False gets the ceiling too, not zero",
+      worker.bounded_max_tokens(False, 1024), 1024)
+check("a string gets the ceiling rather than raising in the request path",
+      worker.bounded_max_tokens("500", 1024), 1024)
+check("a float is floored to an int", worker.bounded_max_tokens(12.9, 1024), 12)
+
+section("the worker's default ceiling is the documented one")
+check("DEFAULT_MAX_TOKENS is 1024", worker.DEFAULT_MAX_TOKENS, 1024)
+check("the upstream default is the model backend's port, on 127.0.0.1",
+      worker.DEFAULT_UPSTREAM, "http://127.0.0.1:11436")
+
+
+section("the worker keeps its config tidy")
+_cfg = worker.WorkerConfig("t", "m", "http://127.0.0.1:11436/")
+check("a trailing slash on the upstream is trimmed once, here",
+      _cfg.upstream_url, "http://127.0.0.1:11436")
+check("the model name is kept exactly as given", _cfg.model, "m")
+
+
+section("the sibling modules that must be refreshed together")
+check("runtime.py is in the self-update list",
+      "runtime.py" in join.SIBLING_MODULES, True)
+check("worker.py still is", "worker.py" in join.SIBLING_MODULES, True)
+
+
 print()
 if FAILURES:
-    print(f"{len(FAILURES)} FAILED\n")
+    print(f"{len(FAILURES)} of {CHECKS[0]} FAILED\n")
     for f in FAILURES:
         print(f"  - {f}")
     sys.exit(1)
-print("all join config tests passed")
+print(f"all {CHECKS[0]} tests passed")

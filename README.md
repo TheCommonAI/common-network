@@ -2,7 +2,7 @@
 
 ![Common.](assets/common-banner.png)
 
-**The Common Network Alpha — v0.1.3**
+**The Common Network Alpha — v0.1.5**
 
 A South Australian nonprofit building decentralised AI.
 Small models on participants' devices, routed and combined. No single company owns the gate.
@@ -11,10 +11,7 @@ Small models on participants' devices, routed and combined. No single company ow
 
 ## Install and set up
 
-**1. Install [Ollama](https://ollama.com/download)** — the program that runs the
-AI model on your machine. Install it before step 2 so the installer can find it.
-
-**2. Install Common.**
+**1. Install Common.**
 
 macOS / Linux — paste into Terminal:
 
@@ -28,21 +25,26 @@ Windows — paste into PowerShell:
 irm https://commonai.com.au/install.ps1 | iex
 ```
 
-**3. Close your terminal and open a new one.** The old window can't see the new
+**2. Close your terminal and open a new one.** The old window can't see the new
 command yet.
 
-**4. Donate a machine.** This picks a model that fits your computer, downloads
+**3. Donate a machine.** This picks a model that fits your computer, downloads
 it, and puts you on the network:
 
 ```bash
 common join
 ```
 
+The first `common join` fetches a small `llama-server` binary (12–20 MB) and
+then the model's weights, and remembers both. Later runs start straight from
+what is already on disk. There is nothing else to install first — no Ollama, no
+separate model store, no second product.
+
 Leave that window open — it's your machine being part of the network. (Or run
 `common join --permanent` to have it run quietly in the background and start
 itself at login.)
 
-**5. Ask the network something.** In a second window:
+**4. Ask the network something.** In a second window:
 
 ```bash
 common ask "What's a good way to learn recursion?"
@@ -126,7 +128,7 @@ decisions:
 What is still unproven is whether a *genuinely* non-dominated panel beats its
 own best member. v0.1 could not test it: the pre-flight searched all 411
 OpenRouter model IDs and found **no maths-tuned model hosted anywhere on it**.
-Common runs local Ollama weights, where `mathstral`, `phi4-mini-reasoning` and
+Common runs local weights, where `mathstral`, `phi4-mini-reasoning` and
 `sqlcoder` all resolve today. The blocker was one hosted catalogue's economics,
 not the world — narrow specialists are unprofitable to serve as an API and free
 to serve on donated hardware, which is the network's whole thesis.
@@ -239,15 +241,19 @@ common join --permanent     # run in the background, start at login
 ```
 
 `--lan` is for computer labs and anywhere the gateway is on the same network.
-It skips `cloudflared` entirely, and refuses to register if Ollama is bound to
-localhost only — otherwise you get a node that health-checks green from its own
-machine and is invisible to every other one.
+It skips `cloudflared` entirely, and there is nothing to configure on the node:
+the Common worker already listens on every interface, and the model runtime
+behind it is held to localhost. If the worker turns out not to be reachable from
+the rest of the network, `common join --lan` says so and stops — otherwise you
+get a node that health-checks green from its own machine and is invisible to
+every other one.
 
-On a managed network, LAN mode needs three things: outbound HTTPS to
-`registry.ollama.ai`, `github.com` and `pypi.org` (one-time, to install);
-intra-LAN TCP on `11434` (Ollama) and `8000` (the gateway); and
-`OLLAMA_HOST=0.0.0.0:11434` on each node so it is reachable beyond localhost.
-Client/AP isolation is the usual thing that blocks it.
+On a managed network, LAN mode needs outbound HTTPS to `registry.ollama.ai`
+(one-time, for the model weights), `github.com` with
+`release-assets.githubusercontent.com` (one-time, for the model runtime, and to
+check for updates), and `raw.githubusercontent.com` (the self-update); plus
+intra-LAN TCP on `11435` (the worker) and `8000` (the gateway). Client/AP
+isolation is the usual thing that blocks it.
 
 ### What should I install?
 
@@ -285,6 +291,13 @@ auto-install. v0.1 listed five general-purpose models; **five generalists cannot
 compose**, so v0.1.1 is built around narrow specialists — models clearly worse
 than a generalist at most things and clearly better at one. Every `ollama:` tag
 was verified against `registry.ollama.ai` before being listed.
+
+`ollama:` in a catalogue entry names a model in **that registry**, which the CLI
+reads directly — it is not a statement that Ollama is installed. Ollama's
+registry is an OCI registry serving GGUF blobs, so a `source:` of
+`ollama:mathstral:7b` means "that tag, fetched from registry.ollama.ai and
+content-addressed by the digest in its manifest". An `ollama:` tag in the
+catalogue and a machine that has Ollama installed are independent facts.
 
 Generalists are still there for two jobs, neither of which is being on a panel:
 answering requests that don't span domains, and **aggregating**. The `general`
