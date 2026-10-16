@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Chat with the Common Network from your terminal.
 
-The Common Network Alpha (v0.1.6).
+The Common Network Alpha (v0.1.7).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -30,7 +30,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"

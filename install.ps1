@@ -1,5 +1,5 @@
 # Install the Common Network CLI tools (Windows).
-# The Common Network Alpha (v0.1.6).
+# The Common Network Alpha (v0.1.7).
 #
 #   irm https://commonai.com.au/install.ps1 | iex
 #
@@ -31,7 +31,7 @@ $InstallDir = "$env:USERPROFILE\.common-network"
 $BinDir = "$InstallDir\bin"
 $Raw = "https://raw.githubusercontent.com/$Repo/main"
 
-Write-Host "Installing the Common Network Alpha (v0.1.6)..."
+Write-Host "Installing the Common Network Alpha (v0.1.7)..."
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
 # --- python ---
