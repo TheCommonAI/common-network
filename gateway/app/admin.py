@@ -23,11 +23,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from app import db, ratelimit
 from app.config import settings
 from app.models import NodeOut
 from app.registry import _row_to_node_out
+from app.metrics import refresh_current_epoch, get_current_epoch
 
 router = APIRouter()
 
@@ -321,4 +323,158 @@ async def admin_state(request: Request):
             for f in recent_failures
         ],
         "rate_limit_buckets": buckets,
+    }
+
+
+# --- Release Epochs --------------------------------------------------------
+
+class EpochCreate(BaseModel):
+    label: str = Field(..., min_length=1, max_length=64,
+                       description="Release label, e.g. 'v0.2.8'")
+    notes: str | None = Field(default=None, max_length=500,
+                              description="Optional notes about this release")
+
+
+@router.post("/admin/epochs")
+async def create_epoch(body: EpochCreate, request: Request):
+    """Start a new release epoch.
+
+    Every request recorded after this is tagged with the new epoch label.
+    Old data is never deleted — epochs are comparison windows, not retention
+    policies. Use GET /admin/epochs to compare performance across releases.
+    """
+    _require_admin(request)
+
+    async with db.pool().acquire() as conn:
+        try:
+            await conn.execute(
+                """
+                insert into epochs (label, notes)
+                values ($1, $2)
+                """,
+                body.label,
+                body.notes,
+            )
+        except Exception as exc:
+            if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"epoch '{body.label}' already exists"
+                )
+            raise
+
+    await refresh_current_epoch()
+    return {
+        "created": body.label,
+        "current_epoch": get_current_epoch(),
+        "note": "All new requests will be tagged with this epoch. Old data is preserved.",
+    }
+
+
+@router.get("/admin/epochs")
+async def list_epochs(request: Request):
+    """List all epochs with per-epoch performance stats.
+
+    Returns request count, success rate, median/p90 total latency,
+    time-to-first-token, and tokens/sec for each epoch — everything needed
+    to compare network performance across releases side by side.
+    """
+    _require_admin(request)
+
+    async with db.pool().acquire() as conn:
+        epochs = await conn.fetch(
+            """
+            select id, label, started_at, notes
+            from epochs
+            order by started_at desc
+            """
+        )
+
+        stats = await conn.fetch(
+            """
+            select
+              epoch,
+              count(*)                                              as requests,
+              count(*) filter (where ok)                            as succeeded,
+              count(*) filter (where not ok)                        as failed,
+              count(*) filter (where stream)                        as streaming,
+
+              -- Latency percentiles
+              percentile_cont(0.5)  within group (order by total_ms) as total_p50,
+              percentile_cont(0.9)  within group (order by total_ms) as total_p90,
+              min(total_ms) as total_min, max(total_ms) as total_max,
+
+              -- Time to first token (streaming only)
+              percentile_cont(0.5)  within group (order by ttft_ms) as ttft_p50,
+              percentile_cont(0.9)  within group (order by ttft_ms) as ttft_p90,
+
+              -- Node-reported metrics (unverified)
+              count(*) filter (where node_reported) as reported,
+              percentile_cont(0.5) within group (order by
+                case when eval_ms > 0
+                     then completion_tokens::numeric * 1000 / eval_ms end) as tps_p50,
+              percentile_cont(0.9) within group (order by
+                case when eval_ms > 0
+                     then completion_tokens::numeric * 1000 / eval_ms end) as tps_p90,
+
+              min(created_at) as first_request,
+              max(created_at) as last_request
+            from request_metrics
+            group by epoch
+            """
+        )
+
+    stats_by_epoch = {r["epoch"]: r for r in stats}
+
+    def _num(value, cast=float):
+        if value is None:
+            return None
+        return cast(value)
+
+    result = []
+    for e in epochs:
+        s = stats_by_epoch.get(e["label"], {})
+        requests = int(s.get("requests") or 0)
+        succeeded = int(s.get("succeeded") or 0)
+        reported = int(s.get("reported") or 0)
+
+        result.append({
+            "label": e["label"],
+            "started_at": e["started_at"].isoformat() if e["started_at"] else None,
+            "notes": e["notes"],
+            "stats": {
+                "requests": requests,
+                "succeeded": succeeded,
+                "failed": int(s.get("failed") or 0),
+                "success_rate": round(succeeded / requests, 3) if requests else None,
+                "streaming": int(s.get("streaming") or 0),
+                "latency_ms": {
+                    "total_p50": _num(s.get("total_p50")),
+                    "total_p90": _num(s.get("total_p90")),
+                    "total_min": _num(s.get("total_min"), int),
+                    "total_max": _num(s.get("total_max"), int),
+                },
+                "ttft_ms": {
+                    "p50": _num(s.get("ttft_p50")),
+                    "p90": _num(s.get("ttft_p90")),
+                },
+                "tokens_per_second": {
+                    "p50": _num(s.get("tps_p50")),
+                    "p90": _num(s.get("tps_p90")),
+                    "coverage": round(reported / requests, 3) if requests else None,
+                    "note": "node-reported, unverified" if reported else None,
+                },
+                "first_request": s["first_request"].isoformat() if s.get("first_request") else None,
+                "last_request": s["last_request"].isoformat() if s.get("last_request") else None,
+            } if requests else None,
+        })
+
+    return {
+        "current_epoch": get_current_epoch(),
+        "epochs": result,
+        "caveat": (
+            "Latency figures are measured by this gateway. tokens_per_second is "
+            "node-reported and unverified — check coverage before quoting it. "
+            "ttft covers streaming requests only."
+        ),
     }

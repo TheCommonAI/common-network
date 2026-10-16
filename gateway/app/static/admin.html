@@ -156,6 +156,30 @@
     <div class="card scroll"><div id="buckets"></div></div>
   </section>
 
+  <section>
+    <h2>Release epochs</h2>
+    <p class="hint">
+      Compare network performance across releases. Starting a new epoch tags future
+      requests with that label — old data is never deleted.
+    </p>
+    <div class="card" style="padding: 16px;">
+      <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 16px;">
+        <input type="text" id="epoch-label" placeholder="e.g. v0.2.8" maxlength="64"
+               style="flex: 1; padding: 8px 12px; font: inherit; font-size: 14px;
+                      border: 1px solid var(--border); border-radius: 6px;
+                      background: var(--page); color: var(--text-primary);" />
+        <button id="epoch-btn" type="button"
+                style="padding: 8px 16px; font: inherit; font-size: 14px; cursor: pointer;
+                       background: var(--text-primary); color: var(--page);
+                       border: none; border-radius: 6px;">
+          Start new epoch
+        </button>
+      </div>
+      <div id="epoch-status" style="font-size: 13px; margin-bottom: 14px;"></div>
+      <div class="scroll"><div id="epochs"></div></div>
+    </div>
+  </section>
+
   <footer>Auto-refreshes every 10s · <span id="last-updated"></span></footer>
 </div>
 
@@ -283,6 +307,127 @@ function renderBuckets(buckets, limitOn) {
     'No clients tracked since this worker started.');
 }
 
+function fmtMs(v) {
+  if (v == null) return '—';
+  if (v < 1000) return Math.round(v) + ' ms';
+  const s = v / 1000;
+  return (s < 10 ? s.toFixed(2) : s.toFixed(1)) + ' s';
+}
+
+function fmtRate(v) {
+  return v == null ? '—' : v.toFixed(1);
+}
+
+function fmtPct(v) {
+  return v == null ? '—' : (v * 100).toFixed(1) + '%';
+}
+
+function renderEpochs(data) {
+  const el = document.getElementById('epochs');
+  const statusEl = document.getElementById('epoch-status');
+
+  if (!data || !data.epochs) {
+    el.innerHTML = '<div class="empty">Epochs unavailable — migration 013 may not be applied yet.</div>';
+    statusEl.innerHTML = '';
+    return;
+  }
+
+  statusEl.innerHTML = `Current epoch: <strong>${esc(data.current_epoch)}</strong>`;
+
+  if (data.epochs.length === 0) {
+    el.innerHTML = '<div class="empty">No epochs yet. Create one to start tracking.</div>';
+    return;
+  }
+
+  const rows = data.epochs.map(e => {
+    const s = e.stats;
+    if (!s) {
+      return [
+        `<strong>${esc(e.label)}</strong>`,
+        `<span class="muted">${esc(ago(e.started_at))}</span>`,
+        '—', '—', '—', '—', '—',
+        e.notes ? `<span class="muted">${esc(e.notes)}</span>` : '',
+      ];
+    }
+    return [
+      `<strong>${esc(e.label)}</strong>`,
+      `<span class="muted">${esc(ago(e.started_at))}</span>`,
+      s.requests,
+      fmtPct(s.success_rate),
+      fmtMs(s.latency_ms?.total_p50),
+      fmtMs(s.latency_ms?.total_p90),
+      fmtMs(s.ttft_ms?.p50),
+      s.tokens_per_second?.p50 != null
+        ? `${fmtRate(s.tokens_per_second.p50)} <span class="muted">(${fmtPct(s.tokens_per_second.coverage)} cov)</span>`
+        : '—',
+      e.notes ? `<span class="muted">${esc(e.notes)}</span>` : '',
+    ];
+  });
+
+  el.innerHTML = table(
+    ['Epoch', 'Started', 'Requests', 'Success', 'Total p50', 'Total p90', 'TTFT p50', 'Tok/s p50', 'Notes'],
+    rows, 'No epochs.'
+  ) + `<div class="empty" style="padding-top:12px;">
+    Latency measured by this gateway. Tok/s is node-reported and unverified.
+    TTFT covers streaming requests only.
+  </div>`;
+}
+
+async function createEpoch() {
+  const input = document.getElementById('epoch-label');
+  const btn = document.getElementById('epoch-btn');
+  const label = input.value.trim();
+
+  if (!label) {
+    alert('Enter a label for the new epoch');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Creating...';
+
+  try {
+    const res = await fetch('/admin/epochs?token=' + encodeURIComponent(TOKEN), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert(data.detail || 'Failed to create epoch');
+      return;
+    }
+
+    input.value = '';
+    refreshEpochs();
+  } catch (e) {
+    alert('Failed to create epoch: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Start new epoch';
+  }
+}
+
+async function refreshEpochs() {
+  try {
+    const res = await fetch('/admin/epochs?token=' + encodeURIComponent(TOKEN));
+    if (res.ok) {
+      const data = await res.json();
+      renderEpochs(data);
+    } else {
+      renderEpochs(null);
+    }
+  } catch (e) {
+    renderEpochs(null);
+  }
+}
+
+document.getElementById('epoch-btn').addEventListener('click', createEpoch);
+document.getElementById('epoch-label').addEventListener('keypress', (e) => {
+  if (e.key === 'Enter') createEpoch();
+});
+
 async function refresh() {
   const stamp = document.getElementById('last-updated');
   try {
@@ -301,6 +446,7 @@ async function refresh() {
   } catch (e) {
     stamp.textContent = 'update failed — retrying…';
   }
+  refreshEpochs();
 }
 
 refresh();
