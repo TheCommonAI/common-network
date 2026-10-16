@@ -91,38 +91,72 @@ async def _record_decision(
     aggregator_node: uuid.UUID | None = None,
     compose_reason: dict | None = None,
     report: VerificationReport | None = None,
-) -> None:
+) -> uuid.UUID | None:
     """Log what happened, in enough detail to argue with later.
 
     Composition and single-routing land in the same table, distinguished by
     `topology`. That is deliberate: whether composing actually beats routing to
     the best single node is the open question this version exists to answer, and
     the two arms have to be comparable in one query to answer it.
+
+    Returns the row's id, which goes back to the client as X-Common-Decision-Id.
+    That is what turns a complaint into a diagnosis: the operator takes the id
+    from a report and joins it to this row, and gets the embedding, the chosen
+    and runner-up nodes, the score, the topology, compose_reason and the
+    verification counters -- none of which the client had to send, because the
+    network already kept it.
+
+    Best-effort, and nullable. This used to be a bare `execute` whose failure
+    propagated, which meant a database blip failed a request the node had
+    *already answered*. Now a failure costs the header and nothing else. Losing
+    the id is a lost cross-reference; losing the answer would be the feature
+    breaking the product.
     """
-    async with db.pool().acquire() as conn:
-        await conn.execute(
-            """
+    sql = """
             insert into decisions
                 (request_embed, chosen_node, score, runner_up, latency_ms, ok,
                  matched_domain, topology, panel, aggregator_node, compose_reason,
                  checks_run, checks_failed, disagreements)
             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-            """,
-            request_embed,
-            chosen.node["id"] if chosen else None,
-            chosen.score if chosen else None,
-            runner_up.node["id"] if runner_up else None,
-            latency_ms,
-            ok,
-            matched_domain,
-            topology,
-            panel,
-            aggregator_node,
-            json.dumps(compose_reason) if compose_reason else None,
-            len(report.checks) if report else None,
-            len(report.failed) if report else None,
-            len(report.disagreements) if report else None,
-        )
+            returning id
+            """
+    args = (
+        request_embed,
+        chosen.node["id"] if chosen else None,
+        chosen.score if chosen else None,
+        runner_up.node["id"] if runner_up else None,
+        latency_ms,
+        ok,
+        matched_domain,
+        topology,
+        panel,
+        aggregator_node,
+        json.dumps(compose_reason) if compose_reason else None,
+        len(report.checks) if report else None,
+        len(report.failed) if report else None,
+        len(report.disagreements) if report else None,
+    )
+    async with db.pool().acquire() as conn:
+        try:
+            # `fetchrow`, not `execute`: execute cannot return rows, so
+            # `returning id` would be silently discarded by it.
+            row = await conn.fetchrow(sql, *args)
+        except Exception as exc:  # noqa: BLE001 -- see the docstring
+            print(f"decisions: could not record this decision "
+                  f"({type(exc).__name__}: {exc})", flush=True)
+            return None
+    return row["id"] if row else None
+
+
+def _decision_header(decision_id: uuid.UUID | None) -> dict[str, str]:
+    """The decision id as a response header, or nothing at all.
+
+    Absent rather than empty when the row could not be written: a client that
+    sees no header knows there is nothing to join against, and an empty string
+    would look like an id that failed to parse. `common report` renders the
+    difference as "not recorded".
+    """
+    return {"X-Common-Decision-Id": str(decision_id)} if decision_id else {}
 
 
 async def _update_latency(node_id, latency_ms: int) -> None:
@@ -323,7 +357,7 @@ async def _handle_composed(
         member = next(m for m in plan.members if m.name == node_name)
         latency_ms = int((time.monotonic() - start) * 1000)
         await _update_latency(member.node["id"], latency_ms)
-        await _record_decision(
+        decision_id = await _record_decision(
             request_embed, member.scored, None, latency_ms, True, matched_domain,
             topology="degraded", panel=panel_ids, compose_reason={
                 **plan.as_dict(),
@@ -332,6 +366,7 @@ async def _handle_composed(
         )
         headers = {
             **base_headers,
+            **_decision_header(decision_id),
             "X-Common-Node": node_name,
             "X-Common-Topology": "degraded",
             "X-Common-Score": f"{member.scored.score:.4f}",
@@ -376,13 +411,14 @@ async def _handle_composed(
         best = max(plan.members, key=lambda m: m.scored.score)
         content = answers.get(best.name) or next(iter(answers.values()))
         latency_ms = int((time.monotonic() - start) * 1000)
-        await _record_decision(
+        decision_id = await _record_decision(
             request_embed, best.scored, None, latency_ms, True, matched_domain,
             topology="degraded", panel=panel_ids, compose_reason={
                 **plan.as_dict(), "degraded": "aggregator unreachable; returned strongest panel member",
             }, report=report,
         )
-        headers = {**base_headers, "X-Common-Node": best.name, "X-Common-Topology": "degraded"}
+        headers = {**base_headers, **_decision_header(decision_id),
+                   "X-Common-Node": best.name, "X-Common-Topology": "degraded"}
         # Credited to the member whose answer is being returned, not to the
         # aggregator that failed -- the machine that did the work is the one
         # whose latency this measures.
@@ -396,7 +432,7 @@ async def _handle_composed(
 
     latency_ms = int((time.monotonic() - start) * 1000)
     await _update_latency(plan.aggregator["id"], latency_ms)
-    await _record_decision(
+    decision_id = await _record_decision(
         request_embed, None, None, latency_ms, True, matched_domain,
         topology="panel", panel=panel_ids, aggregator_node=plan.aggregator["id"],
         compose_reason=plan.as_dict(), report=report,
@@ -404,6 +440,7 @@ async def _handle_composed(
 
     headers = {
         **base_headers,
+        **_decision_header(decision_id),
         "X-Common-Topology": "panel",
         "X-Common-Node": _header_safe(plan.aggregator["name"]),
         "X-Common-Aggregator": _header_safe(plan.aggregator["name"]),
@@ -617,7 +654,7 @@ async def chat_completions(request: Request):
 
             await _update_latency(candidate.node["id"], latency_ms)
             runner_up = next((c for i, c in enumerate(candidates) if i != attempt), None)
-            await _record_decision(
+            decision_id = await _record_decision(
                 request_embed, candidate, runner_up, latency_ms, True, matched_domain,
                 topology="single", compose_reason={"compose": False, "reason": plan.reason},
             )
@@ -634,8 +671,9 @@ async def chat_completions(request: Request):
                 "stream": stream,
                 "route_ms": route_ms_at_decision,
                 # Null unless streaming, and that is a real distinction rather
-                # than a gap. For a non-streaming request Ollama buffers and
-                # sends its headers together with the complete body, so there is
+                # than a gap. For a non-streaming request the node's backend
+                # buffers and sends its headers together with the complete body,
+                # so there is
                 # no first token anyone could have timed; filling this in with
                 # the time to headers would put a whole generation into a
                 # distribution of first tokens. See migrations/012.
@@ -644,6 +682,10 @@ async def chat_completions(request: Request):
             }
 
             headers = {
+                # The id of the row just written, so a report about this answer
+                # can be joined to the routing evidence behind it without the
+                # client having to send any of it. Absent if the write failed.
+                **_decision_header(decision_id),
                 "X-Common-Node": candidate.node["name"],
                 "X-Common-Score": "forced" if forced_node_name else f"{candidate.score:.4f}",
                 # How many nodes this was actually chosen from, and by how much
@@ -673,7 +715,7 @@ async def chat_completions(request: Request):
                 # score, and it is the gateway's own half of the client's
                 # time-to-first-byte. Everything the client waits for *after*
                 # this is the chosen node loading and running its model -- on a
-                # laptop with a cold 7B in Ollama, ~57s of it.
+                # laptop with a cold 7B, ~57s of it.
                 "X-Common-Route-Ms": str(route_ms_at_decision),
                 # Why this request was *not* composed. The negative case is the
                 # one worth explaining -- "why did only one node answer this?"

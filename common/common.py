@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """COMMON. — the commons, belonging to everyone and no one.
 
-The Common Network Alpha (v0.1.5).
+The Common Network Alpha (v0.1.6).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -23,6 +23,8 @@ Usage:
     common whoami                  your node identity
     common privacy                 what the network keeps, and what it doesn't
     common config                  settings (all local, all editable)
+    common report [note]           report a bad answer from the network
+    common reports                 reports saved on this machine, and send them
     common test                    benchmark every node + routing, log to jsonl
     common help [verb]             help, per verb
 
@@ -61,6 +63,19 @@ a copy that lives in a git checkout -- a clone updates with `git pull`, and
 clobbering someone's working tree is not this function's job. Pass
 --force-update (or COMMON_FORCE_UPDATE=1) to override, which discards local
 changes. An installed copy keeps a .bak of the version it replaced.
+
+When an answer is wrong, `common report` says so. It attaches the question and
+the answer you just had, plus the routing the gateway recorded (which node
+answered, the topology, the timings) and the decision id, so an operator can
+open the report against the exact request. `--reason` picks from a closed list
+(made-up, wrong, off-topic, truncated, refused, format, slow, other); a note is
+optional but one of the two is required. Nothing is sent until you have seen a
+full preview naming the gateway -- that preview, and the confirmation, are the
+whole of the privacy story: you are sending your own words to the gateway, whose
+operator becomes a second reader of a question the answering machine could
+already read. Reports are saved locally first and sent second, so a gateway that
+is unreachable loses nothing; `common reports --retry` finishes the job, and
+`common reports` lists what is on this machine.
 """
 import argparse
 import json
@@ -68,6 +83,8 @@ import os
 import platform
 import random
 import re
+import secrets
+import shlex
 import socket
 import statistics
 import subprocess
@@ -77,7 +94,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -94,7 +111,7 @@ except ImportError:  # pragma: no cover - Windows
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
@@ -425,7 +442,825 @@ def contributor_headers(gateway: str | None = None) -> dict:
     return {"X-Common-Node-Token": token}
 
 
+# --- Reporting a bad answer --------------------------------------------------
+#
+# The network keeps a routing embedding, the chosen node, the score and the
+# timings for every request, and never the question or the answer. So when an
+# answer is wrong there has been no way to say so that anyone could act on --
+# retrying and hoping was the whole remedy.
+#
+# `common report` closes that loop. It attaches the exchange the user just had,
+# shows them exactly what will leave and which gateway will receive it, and only
+# then saves and sends it. `common reports` is the ledger of what was saved.
+#
+# The gateway half already existed and was called by nobody: POST
+# /client/reports validates an id, a mode, a category, a closed reason list,
+# bounded text and an optional exchange, dedupes on the id, and is readable by
+# an operator at GET /admin/client-reports. This is the client that was missing.
+#
+# Three rules shape everything below.
+#
+# Saved before sent. The report is written to disk first and posted second, so a
+# gateway that is down -- or refusing, or slow -- loses nothing: `common reports
+# --retry` finishes the job later. `send.sent` in the file is the whole
+# difference between the two states.
+#
+# One file per report, not a log. The id is already the gateway's primary key
+# for a report, so "already saved?" is one Path.exists() and "already sent?" is
+# one file read, with no scan and no append that can tear.
+#
+# Nothing leaves without being read first. The preview names the gateway, and
+# prints the question and the answer in full. A report is the only thing in this
+# CLI that sends the user's words somewhere new: the machine that answered could
+# already read the question, and a report adds the gateway's operator as a
+# second reader. That is a sentence to put on screen, not a line in a document.
+
+REPORTS_DIR = INSTALL_DIR / "reports"
+LAST_EXCHANGE_PATH = INSTALL_DIR / "last-exchange.json"
+REPORT_SCHEMA = 1
+REPORT_KEEP_DAYS = 90
+
+# The gateway's own caps, mirrored here so a report that could not be accepted
+# is caught before it is written rather than after it is refused
+# (gateway/app/client_observability.py: QUESTION_MAX_CHARS, ANSWER_MAX_BYTES).
+QUESTION_MAX_CHARS = 4000
+ANSWER_MAX_BYTES = 32768
+
+# Why the answer was bad. The same closed list the gateway validates against,
+# duplicated on purpose: with the list in hand the CLI can say "not one of
+# these" in front of the user instead of posting it and relaying a 400.
+REPORT_REASONS = ("made-up", "wrong", "off-topic", "truncated", "refused",
+                  "format", "slow", "other")
+REPORT_CATEGORIES = ("chat", "general", "setup", "contribution", "bug")
+
+# The gateway's id format, which is also the primary key it dedupes on. Matching
+# it here means a collision -- or a typo in this file -- is caught locally.
+REPORT_ID_RE = re.compile(r"^COMMON-\d{8}-\d{4}-[A-F0-9]{8}$")
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+                     r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+# What the gateway's routing allowlist accepts, and therefore exactly what this
+# client sends (`_valid_routing`, same file). Kept as a list rather than "send
+# everything and let the gateway drop it" because one entry makes that
+# dangerous: the routing header's `compose_reason` is a *string*, while the
+# gateway expects an object there, and sending it would be a 400 rather than a
+# silent drop. Everything not named here stays on this machine.
+ROUTING_WIRE_NUMBERS = ("score", "candidates", "margin_over_runner_up",
+                        "checks_run", "checks_failed", "disagreements",
+                        "routing_ms", "ttft_ms", "total_ms")
+ROUTING_WIRE_STRINGS = ("node", "topology", "aggregator")
+
+# Report flags, and the note. `rest` is argparse.REMAINDER, so everything typed
+# after the verb arrives unparsed -- that is what makes `common ask "what does
+# --all do?"` work, and what makes `common report "it said Sydney" --reason
+# wrong` arrive as four tokens rather than two flags.
+REPORT_VALUE_FLAGS = {"--reason": "reason", "--category": "category",
+                      "--rating": "rating", "--contact": "contact"}
+REPORT_BOOL_FLAGS = {"--yes": "yes", "-y": "yes", "--save-only": "save_only",
+                     "--json": "json"}
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(when: datetime) -> str:
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _as_int(value) -> int | None:
+    """A header's number, or None. Never raises, deliberately.
+
+    These run *after* the answer has been printed, on the success path. A header
+    a proxy rewrote, or one the gateway sent malformed, must cost the user
+    nothing -- least of all their answer, which is already on screen.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _truncate_bytes(text: str, limit: int) -> tuple[str, bool]:
+    """Clip to a byte budget without splitting a character in half.
+
+    The gateway measures the *answer* in bytes, not characters, so an answer of
+    11k emoji is over the cap while looking short. Decoding with errors="ignore"
+    drops the partial character the cut landed in, which is the only honest
+    thing to do with it. The question is capped in characters instead -- the two
+    are capped differently there, so they are clipped differently here.
+    """
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text, False
+    return raw[:limit].decode("utf-8", errors="ignore"), True
+
+
+def _truncate_chars(text: str, limit: int) -> tuple[str, bool]:
+    return (text, False) if len(text) <= limit else (text[:limit], True)
+
+
+def _write_json_atomic(path: Path, payload: dict) -> Path:
+    """Write through a .part file and rename. Returns where it landed.
+
+    A report is written *before* it is sent, so a half-written file is a report
+    that can never be sent and never be read. `join/runtime.py` learned the same
+    lesson downloading weights; `write_identity` in join.py is not atomic and is
+    the wrong model for this.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.parent / (path.name + ".part")
+    with open(part, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+        handle.flush()
+        # Before the rename, not after: a file that is the right name but not
+        # yet on the disk is worse than one that is obviously still in progress.
+        os.fsync(handle.fileno())
+    os.replace(part, path)
+    return path
+
+
+def _write_exchange_stash(payload: dict) -> None:
+    """Remember the exchange just made, so it can be reported afterwards.
+
+    Never raises, and never prints to stdout: this runs at the end of every
+    `common ask`, and the caller may be parsing stdout as JSON (`common ask
+    --json`). A failed write costs a report, not an answer.
+    """
+    record = {"schema": REPORT_SCHEMA, "created_at": _iso(_now()),
+              "created_unix": int(time.time()), "client": CLIENT, **payload}
+    try:
+        _write_json_atomic(LAST_EXCHANGE_PATH, record)
+    except OSError as e:
+        print(dim(f"warning: couldn't save this exchange for reporting ({e})"),
+              file=sys.stderr)
+
+
+def _read_last_exchange() -> dict | None:
+    try:
+        record = json.loads(LAST_EXCHANGE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(record, dict) or record.get("schema") != REPORT_SCHEMA:
+        return None
+    return record
+
+
+def _report_path(report_id: str) -> Path:
+    return REPORTS_DIR / f"{report_id}.json"
+
+
+def _read_report(path: Path) -> dict | None:
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _list_reports() -> list[tuple[Path, dict]]:
+    """Every stored report, newest first. An unreadable file is skipped, not
+    fatal -- one truncated report must not make the rest unreachable."""
+    try:
+        paths = sorted(REPORTS_DIR.glob("COMMON-*.json"))
+    except OSError:
+        return []
+    found = [(path, _read_report(path)) for path in paths]
+    return sorted([(p, r) for p, r in found if r],
+                  key=lambda pair: pair[1].get("created_unix") or 0, reverse=True)
+
+
+def _prune_reports() -> None:
+    """Drop *sent* reports past the server's own 90-day window.
+
+    Unsent ones stay however old they are: they are the user's only copy of
+    something they meant to report, and deleting them to tidy a directory would
+    be the wrong trade.
+    """
+    cutoff = _now() - timedelta(days=REPORT_KEEP_DAYS)
+    for path, record in _list_reports():
+        if not (record.get("send") or {}).get("sent"):
+            continue
+        stamp = record.get("created_at") or ""
+        if stamp and stamp < _iso(cutoff):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _new_report_id(when: datetime | None = None) -> str:
+    """COMMON-YYYYMMDD-HHMM-XXXXXXXX, UTC -- the format the gateway validates.
+
+    The tail is four random bytes rather than anything derived, because the id
+    is also the server's primary key: two reports filed in the same minute are
+    distinct reports, and the gateway dedupes on exactly this string. Four bytes
+    is 1 in 4 billion per minute, so the loop below exists to make a local
+    collision impossible by construction rather than improbable. Sixteen
+    consecutive collisions means the filesystem is lying, and the last candidate
+    is returned so the gateway -- not this loop -- has the final say.
+    """
+    stamp = when or _now()
+    candidate = ""
+    for _ in range(16):
+        candidate = (f"COMMON-{stamp:%Y%m%d}-{stamp:%H%M}-"
+                     f"{secrets.token_hex(4).upper()}")
+        if not _report_path(candidate).exists():
+            return candidate
+    return candidate
+
+
+def _platform_id() -> str:
+    system = platform.system()
+    return "win32" if system == "Windows" else system.lower()
+
+
+def _arch_id() -> str:
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        return "x64"
+    if machine in ("arm64", "aarch64"):
+        return "arm64"
+    if machine in ("i386", "i686", "x86"):
+        return "ia32"
+    return machine
+
+
+def _diagnostics(stash: dict) -> dict:
+    """What is attached without being typed: which client, where, how slow.
+
+    Every key here is on the gateway's allowlist, which is what stops this from
+    quietly becoming a second, unreviewed copy of the user's machine -- anything
+    the gateway does not recognise is dropped by `sanitise()` there. No
+    hostname, no paths, no username, no identity. The user still sees this list
+    in the preview, because "diagnostics" is not a word that explains itself.
+
+    Only keys known to survive that allowlist are sent, and the rule is worth
+    stating because it bit once already: `routingMs` was here and the gateway
+    dropped it silently, since its NUMBERS set has `ttftMs` and `totalMs` and no
+    routing time. Routing time is not lost -- it is on the routing object, as
+    `routing_ms` -- so this is not redundant-but-harmless, it is the second copy
+    of a fact, in the half of the payload where things disappear without saying
+    so. What is here is exactly what comes out the other end.
+    """
+    timings = stash.get("timings") or {}
+    out: dict = {"version": VERSION, "platform": _platform_id(),
+                 "arch": _arch_id()}
+    for source, target in (("ttft_ms", "ttftMs"), ("total_ms", "totalMs")):
+        value = _as_int(timings.get(source))
+        if value is not None:
+            out[target] = value
+    return out
+
+
+def _default_report_text(reason: str | None) -> str:
+    return f"reported a bad answer ({reason})" if reason else "reported a bad answer"
+
+
+def _fmt_age(seconds: float) -> str:
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds / 60)}m ago"
+    if seconds < 86400 * 2:
+        return f"{int(seconds / 3600)}h ago"
+    return f"{int(seconds / 86400)}d ago"
+
+
+def _parse_report_flags(rest: list[str]) -> tuple[str, dict, str | None]:
+    """Split `common report`'s arguments into (note, options, error).
+
+    Flags are picked out by whole-token match, `--flag=value` included, and the
+    leftovers are joined back into the note. The cost is the one `common peers`
+    already lives with: a literal `--reason` *inside* a note has to be quoted
+    (`common report "I typed --reason"`), or it is read as the flag. Nothing
+    here can tell the two apart, and guessing which one the user meant would be
+    worse than the rule.
+    """
+    opts: dict = {name: None for name in REPORT_VALUE_FLAGS.values()}
+    opts.update({name: False for name in ("yes", "save_only", "json")})
+    note: list[str] = []
+    tokens = list(rest or [])
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        name, _, inline = token.partition("=")
+        if name in REPORT_VALUE_FLAGS:
+            if inline:
+                opts[REPORT_VALUE_FLAGS[name]] = inline
+            elif index + 1 < len(tokens):
+                opts[REPORT_VALUE_FLAGS[name]] = tokens[index + 1]
+                index += 1
+            else:
+                return "", opts, f"{name} needs a value"
+        elif token in REPORT_BOOL_FLAGS:
+            opts[REPORT_BOOL_FLAGS[token]] = True
+        else:
+            note.append(token)
+        index += 1
+    return " ".join(note), opts, None
+
+
+def _merge_report_options(opts: dict, args) -> dict:
+    """Union the flags found after the verb with the ones argparse parsed.
+
+    Both positions have to work. `common report "x" --reason wrong` is how it
+    reads to type, and `common --reason wrong report "x"` is what argparse can
+    actually parse -- REMAINDER means only one of them reaches the parser. The
+    token after the verb wins, being nearer to what the user was saying.
+    """
+    for name in ("reason", "category", "rating", "contact"):
+        if opts.get(name) is None:
+            opts[name] = getattr(args, name, None)
+    for name in ("yes", "save_only", "json"):
+        opts[name] = bool(opts.get(name)) or bool(getattr(args, name, False))
+    return opts
+
+
+def _validate_report_options(opts: dict) -> tuple[dict, str | None]:
+    """Turn raw strings into a vetted reason/category/rating/contact."""
+    reason = opts.get("reason")
+    if reason is not None:
+        cleaned = str(reason).strip().lower().replace("_", "-").replace(" ", "-")
+        if cleaned not in REPORT_REASONS:
+            return opts, (f"'{reason}' is not a reason. pick one of: "
+                          + ", ".join(REPORT_REASONS))
+        opts["reason"] = cleaned
+
+    category = str(opts.get("category") or "chat").strip().lower()
+    if category not in REPORT_CATEGORIES:
+        return opts, (f"'{category}' is not a category. pick one of: "
+                      + ", ".join(REPORT_CATEGORIES))
+    opts["category"] = category
+
+    rating = opts.get("rating")
+    if rating is not None:
+        try:
+            rating = int(str(rating).strip())
+        except ValueError:
+            rating = -1
+        if rating not in range(1, 6):
+            return opts, "rating is 1-5 (how good was the *report* experience, not the answer)"
+        opts["rating"] = rating
+
+    contact = opts.get("contact")
+    if contact is not None and len(str(contact)) > 200:
+        return opts, "contact is at most 200 characters"
+    opts["contact"] = str(contact) if contact else None
+    return opts, None
+
+
+def _build_report(stash: dict, note: str, opts: dict, gateway: str) -> dict:
+    question, q_cut = _truncate_chars(stash.get("question") or "", QUESTION_MAX_CHARS)
+    answer, a_cut = _truncate_bytes(stash.get("answer") or "", ANSWER_MAX_BYTES)
+    reason = opts.get("reason")
+    return {
+        "schema": REPORT_SCHEMA,
+        "id": _new_report_id(),
+        "created_at": _iso(_now()),
+        "created_unix": int(time.time()),
+        # Local only, from here to `send`. `asked_unix` is when the *answer* was
+        # given rather than when the report was filed, so a stale stash can be
+        # shown as stale. `_report_wire_body` builds its output field by field,
+        # so none of these can reach the gateway by accident.
+        "asked_unix": stash.get("created_unix"),
+        "gateway": gateway,
+        "client": CLIENT,
+        "mode": "problem",
+        "category": opts.get("category") or "chat",
+        "reason": reason,
+        "text": note.strip() or _default_report_text(reason),
+        "rating": opts.get("rating"),
+        "contact": opts.get("contact"),
+        "diagnostics": _diagnostics(stash),
+        "exchange": {
+            "question": question,
+            "question_truncated": q_cut,
+            "answer": answer,
+            "answer_truncated": a_cut,
+            "routing": dict(stash.get("routing") or {}),
+        },
+        "send": {"sent": False, "attempts": 0,
+                 "last_attempt_at": None, "last_error": None},
+    }
+
+
+def _exchange_wire(exchange: dict) -> dict:
+    out = {"question": exchange.get("question") or "",
+           "answer": exchange.get("answer") or ""}
+    if exchange.get("answer_truncated"):
+        out["answer_truncated"] = True
+    routing = exchange.get("routing") or {}
+    wire: dict = {}
+    for key in ROUTING_WIRE_NUMBERS:
+        value = routing.get(key)
+        # bool is excluded deliberately: it is an int subclass, and `True` here
+        # would be stored as a score of 1.
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            wire[key] = value
+    for key in ROUTING_WIRE_STRINGS:
+        value = routing.get(key)
+        if isinstance(value, str) and value:
+            wire[key] = value[:200]
+    panel = routing.get("panel")
+    if isinstance(panel, list) and panel:
+        wire["panel"] = [str(member)[:200] for member in panel][:32]
+    decision = routing.get("decision_id")
+    if isinstance(decision, str) and UUID_RE.fullmatch(decision):
+        wire["decision_id"] = decision
+    if wire:
+        out["routing"] = wire
+    return out
+
+
+def _report_wire_body(record: dict) -> dict:
+    """The exact body sent to the gateway, and the exact set of fields it keeps.
+
+    A strict subset of the stored record. `schema`, `created_at`, `created_unix`,
+    `asked_unix`, `gateway`, `client` and `send` are this machine's business, and
+    the routing object is filtered down to the keys the gateway's allowlist
+    accepts (see ROUTING_WIRE_*). Building it field by field rather than
+    deleting from a copy is the point: a field added to the store later cannot
+    reach the network without being named here first.
+    """
+    body = {
+        "id": record.get("id"),
+        "mode": record.get("mode") or "problem",
+        "category": record.get("category") or "chat",
+        "reason": record.get("reason"),
+        "text": record.get("text") or _default_report_text(record.get("reason")),
+        "rating": record.get("rating"),
+        "contact": record.get("contact"),
+        "diagnostics": record.get("diagnostics"),
+    }
+    exchange = record.get("exchange")
+    if exchange:
+        body["exchange"] = _exchange_wire(exchange)
+    return body
+
+
+def _routing_line(routing: dict) -> str:
+    bits = []
+    if routing.get("node"):
+        bits.append(paper(str(routing["node"])))
+    candidates = routing.get("candidates")
+    if candidates == 1:
+        bits.append(dim("the only node online"))
+    elif isinstance(candidates, int) and candidates > 1:
+        bits.append(dim(f"closest of {candidates}"))
+    score = routing.get("score")
+    if isinstance(score, float):
+        bits.append(dim(f"score {score:.4f}"))
+    if routing.get("topology") and routing["topology"] != "single":
+        bits.append(dim(str(routing["topology"])))
+    return dim("   ·   ").join(bits) if bits else dim("nothing recorded")
+
+
+def _report_preview(record: dict) -> str:
+    """Everything about to be sent, as one block of text.
+
+    A pure function on purpose. The privacy lines and the named gateway are the
+    part of this feature that must not quietly change, so a test can assert both
+    without a terminal in the way.
+    """
+    exchange = record.get("exchange") or {}
+    routing = exchange.get("routing") or {}
+    lines = [
+        "",
+        paper("Report a bad answer", bold=True) + "   " + dim(record.get("id") or ""),
+        dim("─" * 63),
+        dim("why         ") + paper(record.get("reason") or "(none given)")
+        + dim(f"   ·   {record.get('category') or 'chat'}"),
+        dim("sending to  ") + paper(record.get("gateway") or "(unknown gateway)"),
+        dim("decision    ") + (blue(str(routing["decision_id"]))
+                               if routing.get("decision_id")
+                               else dim("not recorded by the gateway")),
+    ]
+    # "answered by nothing recorded" reads like a failed lookup; when there is
+    # no routing at all, say that there is nothing rather than nothing about a
+    # node. A report filed without a decision id is still worth sending -- the
+    # question and the answer are the evidence either way.
+    if routing.get("node"):
+        lines.append(dim("answered by ") + _routing_line(routing))
+    else:
+        lines.append(dim("routing     ") + dim("nothing recorded for this answer"))
+    asked = _as_int(record.get("asked_unix"))
+    if asked:
+        age = max(time.time() - asked, 0)
+        lines.append(dim("asked       ") + dim(_fmt_age(age)))
+    lines += ["", dim("your question"), "  " + paper(exchange.get("question") or "")]
+    lines += ["", dim("the answer")]
+    answer = exchange.get("answer") or ""
+    lines.append("  " + (paper(answer) if answer.strip()
+                         else red("(the network returned nothing)")))
+    if exchange.get("answer_truncated"):
+        lines.append(comment("clipped at 32768 bytes to fit the network's limit"))
+    if exchange.get("question_truncated"):
+        lines.append(comment("the question was clipped at 4000 characters"))
+    diagnostics = record.get("diagnostics") or {}
+    attached = ", ".join(f"{k}={v}" for k, v in diagnostics.items() if v is not None)
+    lines += [
+        "",
+        dim("your report"),
+        "  " + paper(record.get("text") or ""),
+        "",
+        dim("Attached: the question and the answer above, the routing record, and this"),
+        dim("machine's client version, platform and timings — no files, no other"),
+        dim("conversations, no account."),
+        dim(f"  {attached}" if attached else ""),
+        "",
+        dim("The machine that answered could already read your question. Sending this"),
+        dim("to the gateway makes its operator a second reader, and the report is kept"),
+        dim("for 90 days. Nothing else about you goes with it."),
+        "",
+    ]
+    if asked and time.time() - asked > 3600:
+        lines.append(comment("that answer is more than an hour old — check it is still"))
+        lines.append(comment("the one you mean before sending."))
+    return "\n".join(lines)
+
+
+def _confirm(json_mode: bool) -> bool:
+    """Ask on a stream a --json caller is not parsing.
+
+    `input()` writes its prompt to stdout, which under `--json` is the app's
+    parse target, so the prompt goes to stderr there and stdin is read bare. A
+    closed or piped stdin raises EOFError and the answer is "no": declining is
+    the default, and the default is what silence should mean.
+    """
+    prompt = blue("send? [y/N] ", bold=True)
+    if json_mode:
+        print(prompt, end="", file=sys.stderr, flush=True)
+    else:
+        print(prompt, end="", flush=True)
+    try:
+        return input().strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+def _post_report(record: dict, gateway: str) -> tuple[bool, int | None, str | None]:
+    """POST one report. Returns (accepted, status, error).
+
+    Goes through `http_json`, so the report carries the same client header as
+    every other gateway request, and the node token only when this is the
+    gateway that issued it (`contributor_headers`) -- `--gateway` points the CLI
+    at someone else's server, and a report is not worth a leaked credential.
+    """
+    try:
+        http_json("POST", f"{gateway}/client/reports",
+                  _report_wire_body(record), contributor_headers(gateway))
+        return True, 200, None
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode(errors="ignore")[:300]
+        except Exception:  # noqa: BLE001 - a body we cannot read is still a status
+            pass
+        return False, e.code, f"HTTP {e.code}{': ' + detail if detail else ''}"
+    except (urllib.error.URLError, socket.timeout) as e:
+        return False, None, str(e)
+    except json.JSONDecodeError:
+        # A 2xx that was not JSON. The connection was accepted; claiming the
+        # report was received would be a guess, and the retry is free.
+        return False, None, "the gateway's reply was not JSON"
+
+
+def _send_report(record: dict, gateway: str, *, allow_new_id: bool = True
+                 ) -> tuple[bool, int | None, str | None]:
+    """Send one report and record the outcome in its own file.
+
+    The file already exists by the time this runs, so every failure here is
+    "saved, not sent" rather than lost. The status that is not a failure is 409:
+    the gateway dedupes on the id, so it means the report is already in.
+
+    The exception is a 409 on a report this machine has never once managed to
+    send. That is a genuine collision on a 32-bit tail -- two people, same
+    minute, same four bytes -- and the fix is a new id, tried exactly once. On
+    any later attempt a 409 is the ordinary "you already sent this".
+    """
+    path = _report_path(record["id"])
+    send = record.setdefault("send", {})
+    first_ever = _as_int(send.get("attempts")) in (None, 0)
+    send["attempts"] = (_as_int(send.get("attempts")) or 0) + 1
+    send["last_attempt_at"] = _iso(_now())
+
+    accepted, status, error = _post_report(record, gateway)
+
+    if not accepted and status == 409 and first_ever and allow_new_id:
+        old_path = path
+        record["id"] = _new_report_id()
+        path = _report_path(record["id"])
+        send["attempts"] = 0
+        _write_json_atomic(path, record)
+        try:
+            old_path.unlink()
+        except OSError:
+            pass
+        return _send_report(record, gateway, allow_new_id=False)
+
+    if accepted or status == 409:
+        send["sent"] = True
+        send["last_error"] = None
+    else:
+        send["last_error"] = error or f"HTTP {status}"
+    _write_json_atomic(path, record)
+    return accepted or status == 409, status, error
+
+
+def _report_fail(as_json: bool, headline: str, detail: str) -> None:
+    if as_json:
+        print(json.dumps({"saved": False, "sent": False, "error": headline}))
+    else:
+        print(red(f"{GLYPH_FAILED} {headline}"), file=sys.stderr)
+        print(comment(detail), file=sys.stderr)
+    sys.exit(1)
+
+
 # --- Commands ------------------------------------------------------------
+
+def cmd_report(gateway: str, as_json: bool, rest: list[str], args) -> None:
+    """Report the last network answer. Previews everything, sends nothing unseen.
+
+    Manual only, by design: nothing in this CLI ever interrupts a user to offer
+    a report. The trigger is the user deciding an answer was bad.
+    """
+    note, opts, error = _parse_report_flags(rest)
+    opts = _merge_report_options(opts, args)
+    # `as_json` is settled here rather than later because every refusal below
+    # has to know about it. A `--json` caller parses stdout, so a refusal that
+    # only wrote to stderr would hand it an empty stream to parse -- a failure
+    # indistinguishable from the process being killed. Every exit from this
+    # function goes through _report_fail or writes a result object for that
+    # reason, and there is no bare `sys.exit` left in it.
+    as_json = as_json or opts["json"]
+    opts, error = _validate_report_options(opts) if not error else (opts, error)
+    if error:
+        _report_fail(as_json, error, "nothing was written and nothing was sent.")
+    save_only = bool(opts["save_only"])
+
+    stash = _read_last_exchange()
+    if stash is None:
+        _report_fail(as_json, "nothing to report",
+                     "a report is about an answer — ask a question first: common ask \"...\"")
+    if stash.get("local"):
+        _report_fail(as_json, "that answer never left this machine",
+                     "--local asks a model on this machine, so there is no network "
+                     "answer to report. ask through the network first.")
+    if not (stash.get("question") or "").strip():
+        _report_fail(as_json, "the last exchange has no question in it",
+                     "ask again through the network, then report that answer.")
+
+    if not note.strip() and not opts.get("reason"):
+        _report_fail(as_json, "nothing to say",
+                     "give a reason (--reason made-up, wrong, off-topic, truncated, "
+                     "refused, format, slow, other) or a note: common report \"it said Sydney\"")
+
+    record = _build_report(stash, note, opts, gateway)
+    print(_report_preview(record), file=sys.stderr if as_json else sys.stdout)
+
+    # --save-only skips the prompt because there is nothing to consent to: the
+    # prompt is consent to send, and nothing leaves the machine on this path.
+    if not save_only and not opts["yes"] and not _confirm(as_json):
+        if as_json:
+            print(json.dumps({"id": record["id"], "saved": False, "sent": False,
+                              "reason": "declined"}))
+        else:
+            print(dim("  not saved. nothing was written and nothing was sent."))
+        return
+
+    path = _report_path(record["id"])
+    try:
+        _write_json_atomic(path, record)
+    except OSError as e:
+        _report_fail(as_json, "couldn't save the report",
+                     f"{path}: {e}")
+
+    if save_only:
+        if as_json:
+            print(json.dumps({"id": record["id"], "saved": True, "sent": False,
+                              "path": str(path)}))
+        else:
+            print(f"{GLYPH_DONE} " + paper("saved") + dim(f"    {path}"))
+            print(dim("  → send it later:  ") + paper("common reports --retry"))
+        return
+
+    accepted, status, error = _send_report(record, gateway, allow_new_id=True)
+
+    if accepted:
+        already = "— already received" if status == 409 else ""
+        if as_json:
+            print(json.dumps({"id": record["id"], "saved": True, "sent": True,
+                              "path": str(path), "status": status}))
+        else:
+            print(f"{GLYPH_DONE} " + paper("saved") + dim(f"    {path}"))
+            print(f"{GLYPH_DONE} " + paper("sent") + dim(
+                f"     an operator can now read this against the decision above {already}"))
+        return
+
+    # The file is already on disk, which is the point of writing first.
+    if as_json:
+        print(json.dumps({"id": record["id"], "saved": True, "sent": False,
+                          "path": str(path), "error": error or f"HTTP {status}"}))
+    else:
+        print(f"{GLYPH_FORMING} " + paper("saved, not sent")
+              + dim(f"    {path}"), file=sys.stderr)
+        print(comment(error or f"HTTP {status}"), file=sys.stderr)
+        print(dim("  → retry:  ") + paper("common reports --retry"), file=sys.stderr)
+    sys.exit(1)
+
+
+def cmd_reports(gateway: str, as_json: bool, rest: list[str], args) -> None:
+    """What this machine has saved, and what still needs sending."""
+    tokens = list(rest or [])
+    as_json = as_json or "--json" in tokens
+    unsent = bool(getattr(args, "unsent", False)) or "--unsent" in tokens
+    retry = bool(getattr(args, "retry", False)) or "--retry" in tokens
+
+    _prune_reports()
+    records = _list_reports()
+
+    if retry:
+        waiting = [record for _, record in records
+                   if not (record.get("send") or {}).get("sent")]
+        if not waiting:
+            print(dim("nothing waiting to send."))
+            return
+        sent = 0
+        for record in waiting:
+            accepted, status, error = _send_report(record, gateway)
+            if accepted:
+                sent += 1
+                print(f"{GLYPH_DONE} " + paper(record["id"])
+                      + dim("  sent" if status == 200 else "  already received"))
+            elif status == 429:
+                # Never loop on this. The bucket is 20 reports a minute, shared
+                # with telemetry, and hammering it is how a client gets blocked
+                # rather than served.
+                print(red(f"{GLYPH_FORMING} rate-limited — the gateway takes 20 reports "
+                          f"a minute. {len(waiting) - sent} still waiting."),
+                      file=sys.stderr)
+                break
+            elif status is None or status >= 500:
+                # The network is down or the gateway is unwell; the rest of the
+                # queue would fail identically. Stopping is kinder than a page
+                # of the same error.
+                print(red(f"{GLYPH_FORMING} {record['id']}: {error or f'HTTP {status}'}"),
+                      file=sys.stderr)
+                print(dim(f"  {len(waiting) - sent} still waiting — retry when "
+                          f"the network is back."), file=sys.stderr)
+                break
+            else:
+                # A 4xx is this one report's problem and will not improve with
+                # time, so the rest of the queue is not held hostage to it.
+                print(red(f"{GLYPH_FORMING} {record['id']}: {error or f'HTTP {status}'}"),
+                      file=sys.stderr)
+        if sent:
+            print(dim(f"  {sent} sent."))
+        records = _list_reports()
+
+    if unsent:
+        records = [(path, record) for path, record in records
+                   if not (record.get("send") or {}).get("sent")]
+
+    if as_json:
+        print(json.dumps([record for _, record in records], indent=2))
+        return
+
+    if not records:
+        print(dim("no reports saved on this machine."))
+        print(comment("report a bad answer with: common report \"what was wrong\""))
+        return
+
+    print()
+    for _, record in records:
+        send = record.get("send") or {}
+        state = (blue("sent") if send.get("sent") else red("unsent"))
+        age = _fmt_age(max(time.time() - (_as_int(record.get("created_unix")) or 0), 0))
+        head = (paper(record.get("id") or "?") + "   " + dim(age)
+                + "   " + dim(record.get("mode") or "problem")
+                + dim("/" + (record.get("category") or "chat"))
+                + "   " + dim(record.get("reason") or "no reason")
+                + "   " + state)
+        print(head)
+        first = (record.get("text") or "").strip().splitlines()
+        print(dim("  " + (first[0][:90] if first else "(no note)")))
+        if not send.get("sent") and send.get("last_error"):
+            print(comment(f"last attempt failed: {send['last_error']}"))
+    print()
+    if any(not (r.get("send") or {}).get("sent") for _, r in records):
+        print(dim("  → send what's waiting:  ") + paper("common reports --retry"))
+        print()
+
 
 def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
             local: bool, as_json: bool, quiet: bool, verbose: bool,
@@ -517,6 +1352,10 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
     checks = resp.headers.get("X-Common-Checks")
     checks_failed = resp.headers.get("X-Common-Checks-Failed")
     disagreements = resp.headers.get("X-Common-Disagreements")
+    # The gateway's own row id for this decision. Not shown, not interpreted --
+    # carried, so that a report about this answer can be joined to the routing
+    # the gateway already recorded and the user never had to send.
+    decision_id = resp.headers.get("X-Common-Decision-Id")
 
     if not quiet and not as_json:
         if topology == "panel" and panel:
@@ -618,6 +1457,44 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
         print()
 
     latency_ms = int((time.monotonic() - start) * 1000)
+
+    # Stash the exchange for `common report`. Deliberately *before* the `--json`
+    # branch below: the desktop app runs `common ask --json` for every question,
+    # so a stash that only happened on the human path would mean the app could
+    # never report anything. The write is swallowed and prints to stderr only,
+    # because stdout is that branch's JSON and a stray line corrupts it.
+    #
+    # Normalised fields, never the raw header map: that carries Set-Cookie,
+    # CDN noise and server banners, and this file is one the user may open.
+    answer_text, answer_truncated = _truncate_bytes("".join(full), ANSWER_MAX_BYTES)
+    routing = {k: v for k, v in {
+        "node": node_name,
+        "score": _as_float(score),
+        "forced": score == "forced",
+        "topology": topology,
+        "candidates": _as_int(candidates_hdr),
+        "margin_over_runner_up": _as_float(margin_hdr),
+        "panel": [p.strip() for p in panel.split(",") if p.strip()] if panel else None,
+        "aggregator": aggregator,
+        "compose_reason": compose_reason,
+        "checks_run": _as_int(checks),
+        "checks_failed": _as_int(checks_failed),
+        "disagreements": _as_int(disagreements),
+        "routing_ms": routing_ms,
+        "decision_id": decision_id,
+    }.items() if v is not None and v != []}
+    _write_exchange_stash({
+        "local": False,
+        "gateway": gateway,
+        "question": question,
+        "answer": answer_text,
+        "answer_truncated": answer_truncated,
+        "request": {"region": region, "node": node_override, "model": model,
+                    "compose": compose},
+        "timings": {"routing_ms": routing_ms, "ttft_ms": ttft_ms,
+                    "total_ms": latency_ms},
+        "routing": routing,
+    })
 
     if as_json:
         print(json.dumps({
@@ -763,6 +1640,24 @@ def _ask_local(question: str, model: str | None, as_json: bool, quiet: bool) -> 
 
     answer = "".join(full)
     total_ms = int((time.monotonic() - start) * 1000)
+    # Overwrite the stash rather than leave the previous network exchange
+    # sitting there. `last-exchange.json` has to describe the *last* ask or it
+    # is a trap: `common ask --local "..."` followed by `common report` would
+    # otherwise offer to send a question from ten minutes ago that has nothing
+    # to do with what the user is looking at. The tombstone is what lets
+    # `common report` refuse with the real reason instead of guessing.
+    answer_text, answer_truncated = _truncate_bytes(answer, ANSWER_MAX_BYTES)
+    _write_exchange_stash({
+        "local": True,
+        "gateway": None,
+        "question": question,
+        "answer": answer_text,
+        "answer_truncated": answer_truncated,
+        "request": {"region": None, "node": None, "model": chosen,
+                    "compose": None},
+        "timings": {"routing_ms": None, "ttft_ms": ttft_ms, "total_ms": total_ms},
+        "routing": None,
+    })
     if as_json:
         print(json.dumps({
             "answer": answer, "node": "local", "model": chosen,
@@ -1061,9 +1956,10 @@ def cmd_privacy(as_json: bool) -> None:
     """What the network keeps. Said once, on request, instead of after
     every answer -- a notice repeated forever stops being read."""
     facts = {
-        "request_text": "not stored",
+        "request_text": "not stored, unless you report that answer (common report)",
         "request_embedding": "stored, for demand analytics (which domains are underserved)",
         "recorded_per_request": ["which node answered", "score", "latency", "success"],
+        "reported_answer": "the question, the answer and the routing you chose to attach, kept for 90 days",
         "visible_publicly": ["node names", "operators", "endpoint URLs", "models"],
         "node_operators_see": "the text of requests routed to their machine",
         "licence": "AGPL-3.0",
@@ -1079,6 +1975,8 @@ def cmd_privacy(as_json: bool) -> None:
     print("  " + " " * 21 + "domains the network is short of")
     print("  " + dim("per request") + "          which node answered, score,")
     print("  " + " " * 21 + "latency, whether it worked")
+    print("  " + dim("a reported answer") + "    the question, the answer and the routing")
+    print("  " + " " * 21 + "you chose to attach — see " + paper("common report"))
     print()
     print(dim("  The registry is public by design: node names, operators,"))
     print(dim("  endpoint URLs and models are visible to anyone. That is the"))
@@ -1090,6 +1988,12 @@ def cmd_privacy(as_json: bool) -> None:
     print(dim("  operator can read it. Donated machines are run by strangers."))
     print(dim("  Treat the network like a public place: don't send anything"))
     print(dim("  you wouldn't want a stranger to read."))
+    print()
+    print(dim("  Reporting an answer shows it to a second reader: whoever"))
+    print(dim("  runs the gateway. That is the point of a report — somebody"))
+    print(dim("  has to be able to look at why the answer was bad — but it is"))
+    print(dim("  a second reader, so " + paper("common report") + " always shows you the"))
+    print(dim("  exact question and answer first and asks before sending."))
     print()
     print(dim("  Full detail: SECURITY.md in the repository."))
     print()
@@ -1154,7 +2058,10 @@ def cmd_config(as_json: bool, args: argparse.Namespace) -> None:
     print(comment("every request's embedding + which node answered + latency, for"))
     print(comment("demand analytics (see `common demand`). no raw question text,"))
     print(comment("no account, no telemetry beyond that. nothing sent home beyond"))
-    print(comment("what's needed to route your request and log that decision."))
+    print(comment("what's needed to route your request and log that decision —"))
+    print(comment("with one exception you control: `common report` sends the"))
+    print(comment("question and answer of an answer you call bad, and only after"))
+    print(comment("showing you exactly what would go."))
 
 
 def cmd_leave(gateway: str) -> None:
@@ -2870,10 +3777,29 @@ def cmd_help(verb: str | None) -> None:
     print(__doc__)
 
 
+def _repl_args(line: str) -> list[str]:
+    """Split a /command's arguments the way a shell would.
+
+    `/report "it said Sydney" --reason wrong` has to reach `cmd_report` as three
+    arguments, not five -- a bare `.split()` turns a quoted note into loose words
+    and the note quietly becomes something the user did not type. shlex handles
+    it, and its one failure mode (an unbalanced quote) is swallowed rather than
+    fatal: an interactive session must not die on a stray apostrophe.
+    """
+    parts = line.split(maxsplit=1)
+    rest = parts[1] if len(parts) > 1 else ""
+    if not rest:
+        return []
+    try:
+        return shlex.split(rest)
+    except ValueError:
+        return rest.split()
+
+
 def build_repl_help() -> str:
     return dim(
         "/ask (implicit: just type)  /join  /serve  /leave  /status\n"
-        "/demand  /recommend  /peers  /contrib  /whoami  /privacy  /config  /test  /model  /local  /help  /exit"
+        "/demand  /recommend  /peers  /contrib  /whoami  /privacy  /config  /test  /model  /local  /report  /reports  /help  /exit"
     )
 
 
@@ -2933,6 +3859,15 @@ def interactive_session(gateway: str, args: argparse.Namespace) -> None:
             args.full = "full" in line.split()[1:]
             cmd_test(gateway, args)
             continue
+        if line == "/reports" or line.startswith("/reports "):
+            cmd_reports(gateway, False, _repl_args(line), args)
+            continue
+        if line == "/report" or line.startswith("/report "):
+            # The whole point of the preview is that it is read before anything
+            # is sent, so this goes through the same prompt as the command line
+            # rather than straight to the gateway.
+            cmd_report(gateway, False, _repl_args(line), args)
+            continue
         if line == "/local":
             session_local = not session_local
             print(dim(f"local-only: {'on' if session_local else 'off'}"))
@@ -2983,6 +3918,18 @@ def main() -> None:
     parser.add_argument("--compose", action="store_true", help="ask: compose wherever structurally possible (off by default in Alpha)")
     # `common peers` only
     parser.add_argument("--all", action="store_true", help="peers: include machines that have left")
+    # `common report` only. These are also picked out of `rest` when they are
+    # written after the verb, which is how they read to type -- REMAINDER means
+    # only one of the two positions can reach argparse, so both are handled.
+    parser.add_argument("--reason", default=None, help="report: why the answer was bad (" + ", ".join(REPORT_REASONS) + ")")
+    parser.add_argument("--category", default=None, help="report: what part of the product (" + ", ".join(REPORT_CATEGORIES) + ")")
+    parser.add_argument("--contact", default=None, help="report: how to reach you about this (optional, ≤200 chars)")
+    parser.add_argument("--rating", default=None, help="report: 1-5, how the *reporting* went")
+    parser.add_argument("-y", "--yes", action="store_true", help="report: skip the confirmation prompt (nothing is previewed away)")
+    parser.add_argument("--save-only", action="store_true", help="report: save on this machine, send later with `common reports --retry`")
+    # `common reports` only
+    parser.add_argument("--unsent", action="store_true", help="reports: only the ones not yet sent")
+    parser.add_argument("--retry", action="store_true", help="reports: send every report still waiting")
     # `common recommend` only
     parser.add_argument("--machines", type=int, default=1, help="recommend: plan an install across N machines")
     parser.add_argument("--ram", type=float, default=8.0, help="recommend: RAM per machine in GB (default 8)")
@@ -3059,6 +4006,10 @@ def main() -> None:
         cmd_contrib(gateway, args.json)
     elif args.verb == "config":
         cmd_config(args.json, args)
+    elif args.verb == "report":
+        cmd_report(gateway, args.json, args.rest, args)
+    elif args.verb == "reports":
+        cmd_reports(gateway, args.json, args.rest, args)
     elif args.verb == "test":
         args = _parse_test_flags(args)
         cmd_test(args.gateway.rstrip("/"), args)

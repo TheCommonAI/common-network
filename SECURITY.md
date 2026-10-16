@@ -1,4 +1,4 @@
-# Security notes — The Common Network Alpha (v0.1.5)
+# Security notes — The Common Network Alpha (v0.1.6)
 
 Common is **permissionless by design**: anyone can register a node, and
 anyone can send requests. That is the thesis — but it means the security
@@ -20,9 +20,10 @@ to `<hostname>-<random-suffix>` and `--operator` to `friend` — it never
 publishes your OS username unless you pass it.
 
 Endpoint URLs (the Cloudflare tunnel addresses) are NOT exposed publicly. They
-are available only via `/admin/nodes`, gated on `ADMIN_TOKEN`. This prevents
-strangers from bypassing the gateway to talk directly to contributors' Ollama
-instances.
+are available only via `/admin/nodes`, gated on `ADMIN_TOKEN`. This keeps
+strangers from bypassing the gateway's gate and rate limit to reach a
+contributor's worker directly — and the worker itself requires a bearer token
+they do not have.
 
 ## What a stranger cannot do
 
@@ -60,6 +61,16 @@ instances.
   2026-09-08; see History.)
 - **Read other people's requests.** The decisions log records topology, nodes,
   scores and latencies. It does not expose request text or embeddings.
+- **Read a reported exchange.** `POST /client/reports` accepts an `exchange` —
+  the question and the answer a user is complaining about — and `GET
+  /admin/client-reports` returns it to whoever holds `ADMIN_TOKEN`. This is the
+  one place a question reaches the gateway operator, and it is deliberate: a
+  report about a bad answer is useless without the answer. The exposure it
+  adds is bounded and stated. It is never automatic — the client shows the
+  exact question, answer and gateway and waits for a yes. The node that
+  answered could already read the question; this adds a *second* reader, not a
+  first. Reports expire after 90 days and the endpoint is capped at 100 rows
+  per read. Telemetry is a separate route and remains conversation-free.
 
 ## Running a public gateway
 
@@ -90,17 +101,25 @@ to a public deployment**. On a public gateway:
 
 ## Known limits, stated rather than papered over
 
-- **A contributor's endpoint is an unauthenticated Ollama.** `common join`
-  tunnels straight to `localhost:11434`. Ollama's API has no authentication,
-  so anyone who obtains the tunnel URL can talk to a contributor's Ollama
-  directly — bypassing the gateway's gate and rate limit, and reaching
-  model-management endpoints, not just inference. As of v0.1.2, endpoint URLs
-  are no longer published via `GET /nodes` (they require `ADMIN_TOKEN`), which
-  closes the easiest path to them. However, **an admin or operator with the
-  token can still see them**, and they may leak through other means (logs,
-  Cloudflare dashboard). Until a worker sits in front of Ollama, **only donate
-  a machine you are comfortable exposing**, and prefer `--lan` on a trusted
-  network.
+- **A contributor's endpoint is a bearer-authenticated worker — not the model
+  runtime.** Two separate ports, and the distinction is the whole of this
+  bullet: the tunnel points at the Common worker on `localhost:11435`, and only
+  the worker can reach the model runtime, on `localhost:11436`. The worker
+  checks `Authorization: Bearer <worker_token>` on every request with
+  `compare_digest` (a prefix does not pass), and answers 404 to everything
+  outside `/v1/chat/completions` and `/v1/models` — llama-server's own `/props`,
+  `/slots` and `/ui` are unreachable through it, which matters because `/ui`
+  browses the directory the weights live in. The token is generated per join
+  (`secrets.token_urlsafe(24)`) and goes only to the gateway, on registration.
+
+  What remains is honest and narrower than it used to be: whoever holds both
+  the tunnel URL *and* that token gets inference on the machine, bounded by the
+  node's `max_tokens` ceiling. Endpoint URLs are not published by `GET /nodes`
+  (they need `ADMIN_TOKEN`), but an operator with the token can still see them
+  and they may leak elsewhere (logs, the Cloudflare dashboard). The worker is
+  a plain HTTP server written here, so its own bugs are in scope in a way
+  llama.cpp's are not. **Only donate a machine you are comfortable exposing,
+  and prefer `--lan` on a trusted network.**
 - **DNS rebinding is narrowed, not closed.** Validation resolves the hostname;
   the actual connection resolves it again. A hostname that answers differently
   between those two moments defeats the check. Fixing it properly means
@@ -147,6 +166,17 @@ issue titled "security" with no reproduction details works — we'll follow up
 for the details privately.
 
 ## History
+
+- 2026-10-17: `POST /client/reports` began accepting an `exchange` — the
+  question and answer a user reports — and `GET /admin/client-reports`
+  returns it to whoever holds `ADMIN_TOKEN`. Listed here rather than only
+  under Known limits because it is a genuine change in exposure: report text
+  can now reach the gateway operator, where before no question ever did. It is
+  not a vulnerability and nothing was misconfigured; the intake is bounded
+  (4000 chars of question, 32 KiB of answer, 64 KiB overall, 90-day expiry,
+  100 rows per read) and the client will not send one without showing the user
+  exactly what would go. The reason it is recorded at all is that a reader
+  deciding whether to trust a gateway should be able to find it.
 
 - 2026-10-08: `GET /nodes` was exposing every node's `endpoint_url` publicly —
   the Cloudflare tunnel URLs pointing at contributors' Ollama instances.

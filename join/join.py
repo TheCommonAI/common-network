@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join the Common Network as a node operator.
 
-The Common Network Alpha (v0.1.5).
+The Common Network Alpha (v0.1.6).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -104,7 +104,7 @@ TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
