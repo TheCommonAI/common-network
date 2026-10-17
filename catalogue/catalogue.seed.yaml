@@ -6,9 +6,10 @@
 # merely hidden, so a node can never be assigned a model that isn't listed.
 #
 # This is a commons asset — PRs welcome. Add real, runnable models only.
-# Every `source: ollama:*` tag below was verified to resolve against
-# registry.ollama.ai before being added; a tag that 404s would fail the
-# pull on every machine assigned to it.
+# `source: ollama:*` tags were verified to resolve against registry.ollama.ai
+# before being added; `gguf:URL#sha256` sources pin an exact file on Hugging
+# Face, and common-join verifies the checksum after download, so a bad copy
+# can never reach a node.
 #
 # `verified_in_lane: true` is earned by the benchmark harness (bench/)
 # actually measuring a model beating a frontier model in its domain — never
@@ -21,7 +22,54 @@
 # below are the measured download size plus room for KV cache and the OS;
 # common-join additionally applies a 0.8 headroom factor on top.
 #
-# --- WHAT CHANGED IN v0.1.1, AND WHY -------------------------------------
+# --- WHAT CHANGED IN 2026-10, AND WHY ------------------------------------
+#
+# The catalogue is now the Bonsai ternary family at four footprints:
+# prism-ml's Ternary Bonsai 2 (1.58-bit ternary weights, Apache-2.0,
+# 262K-token cards, derived from the Qwen3.5 line) at 2B/4B/9B, plus the
+# first-generation Bonsai 8B (Qwen3-8B derived) — included because it
+# measured ~15% faster at generation than the 9B on an M3 Air under the
+# stock runtime (30 vs 26 tok/s, 2026-10-17). The v0.1.1 specialist mix
+# below was retired in favour of these.
+#
+# Two hard constraints chose exactly these three entries, recorded so nobody
+# has to re-litigate them:
+#
+#   1. Stock ggml-org llama.cpp — the runtime common-join fetches and every
+#      node runs — loads Bonsai 2 ONLY in its upstream `Q2_0` packing, on
+#      build b11555 or newer (which carries the Hadamard activation runtime;
+#      older builds either reject the weights or, worse, load them and emit
+#      gibberish). The smaller `PQ2_0`/`PTQ1_0` packings are rejected as
+#      unknown types — those need PrismML's fork, which this network does
+#      not ship. common-join always fetches the latest llama.cpp release,
+#      so the b11555 floor needs no enforcement here, but DO NOT add a
+#      catalogue entry in a non-Q2_0 packing. The trap of the same shape in
+#      the first-generation repos: `Ternary-Bonsai-8B-Q2_0.gguf` is a
+#      fork-only layout that stock llama.cpp rejects with a tensor-offset
+#      error; the upstream-compatible file is the `_g64` one, and is the
+#      one pinned below.
+#
+#   2. The 27B Bonsai 2 ships no Q2_0 file at all, so the ladder stops at
+#      9B. An 8GB-free machine can hold every entry here.
+#
+# Bonsai 2's cards default to "thinking mode": the model wants to emit a
+# long chain of thought before answering. That is incompatible with the
+# network's bounded replies (~1024 output tokens, 4096-token context) — a
+# thinking preamble would eat the entire budget and leave nothing for the
+# answer. The worker (join/worker.py) therefore stamps the card's
+# non-thinking sampling on every request — temperature 0.7, top_p 0.8,
+# top_k 20, presence_penalty 1.5, chat_template_kwargs.enable_thinking=false
+# — as defaults the caller may override. If that stamp is ever removed,
+# these entries must be reconsidered with it.
+#
+# What was traded away, honestly: specialist *lanes*. Seam-findings §2's
+# finding stands — a panel of near-identical members cannot beat its own
+# best node — and three sizes of one family are nearer-identical than the
+# old mix. Composition (COMPOSE_EXCLUDED_DOMAINS, the gateway's panel
+# machinery) simply has nothing distinct to seat until a verified specialist
+# returns. CGLA-Legal below is exactly such a specialist, and the route back.
+#
+# --- WHAT CHANGED IN v0.1.1 (SUPERSEDED, KEPT FOR THE RECORD) ------------
 #
 # v0.1's catalogue was five general-purpose models and one API entry. Five
 # generalists cannot compose: the whole finding of `testing/seam-findings.md`
@@ -30,73 +78,55 @@
 # A catalogue of generalists guarantees the network can never beat its own
 # best node, no matter how many machines join.
 #
-# So this catalogue is now built around *narrow* specialists — models that are
-# clearly worse than a generalist at most things and clearly better at one.
-# That is an uncomfortable-looking selection rule, and it is the correct one:
-# a panel needs members who are each best at something, not members who are
-# each pretty good at everything.
-#
-# The pre-flight in seam-findings.md §3 concluded no viable specialist pair
-# existed, having searched all 411 OpenRouter model IDs and found zero
-# maths-tuned models. That conclusion is true of OpenRouter and false of the
-# actual world: `mathstral`, `phi4-mini-reasoning`, `sqlcoder`, `starcoder2`,
-# `meditron` and `openthinker` all resolve on registry.ollama.ai today, and
-# were each checked before being listed here. Narrow specialists are
-# unprofitable to host as a hosted API and free to host on donated hardware —
-# which is the network's thesis, arriving as a practical consequence.
+# So v0.1.1 was built around *narrow* specialists — models clearly worse than
+# a generalist at most things and clearly better at one. The pre-flight in
+# seam-findings.md §3 concluded no viable specialist pair existed, having
+# searched all 411 OpenRouter model IDs and found zero maths-tuned models.
+# That conclusion is true of OpenRouter and false of the actual world:
+# `mathstral`, `phi4-mini-reasoning`, `sqlcoder`, `starcoder2`, `meditron`
+# and `openthinker` all resolved on registry.ollama.ai at the time. Narrow
+# specialists are unprofitable to host as a hosted API and free to host on
+# donated hardware — which is the network's thesis, arriving as a practical
+# consequence.
 
 models:
-  # --- Maths and quantitative reasoning ---------------------------------
+  # --- Bonsai 2, three footprints ---------------------------------------
   #
-  # The lane where the seam findings measured the largest failure (numeric
-  # precision: 0.719 before the handoff, 0.344 after) and the largest recovery
-  # (+0.203 from receiver-side re-derivation). It is also the lane where a
-  # small specialist most clearly beat a much larger generalist: 0.808 for an
-  # 8B reasoning-tuned model against 0.615 for a 70-72B general one.
+  # One family, sized so every realistic donor machine holds a node: the 2B
+  # is the floor (a machine with ~2GB spare), the 4B the default mid-tier,
+  # the 9B the ceiling. Ternary weights make these far smaller on disk than
+  # a conventional model of the same parameter count — the 9B's file is
+  # ~2.4GB.
 
-  - id: mathstral-7b
-    display_name: Mathstral 7B
-    source: "ollama:mathstral:7b"
-    domain_tags: [math, arithmetic, word-problems, quantitative]
+  - id: bonsai2-2b
+    display_name: Bonsai 2 2B
+    source: "gguf:https://huggingface.co/prism-ml/Ternary-Bonsai-2-2B-gguf/resolve/main/Ternary-Bonsai-2-2B-Q2_0.gguf#c2893fa6f951daee8b7263d5f49b455e57989ef56417a22125b03566dc560650"
+    domain_tags: [general, conversation, writing]
     capability_text: >
-      Mathstral 7B. A Mistral model tuned specifically for mathematical and
-      scientific reasoning — arithmetic, algebra, multi-step word problems and
-      quantitative analysis. Narrow by design: weaker than a general model at
-      conversation and writing, stronger at calculation.
-    params_b: 7.2
-    min_ram_gb: 8
+      Bonsai 2 2B by prism-ml. Ternary (1.58-bit) general-purpose model
+      derived from the Qwen3.5 line — conversation, writing, summarisation
+      and everyday questions at a ~0.5GB download. The floor of the network:
+      for a machine with almost nothing to spare, and still able to aggregate
+      a panel's answers, which is the job a constrained machine is most
+      useful for.
+    params_b: 2.0
+    min_ram_gb: 2
     min_vram_gb: 0
     needs_gpu: false
     verified_in_lane: false
     lane_benchmark: null
     licence: apache-2.0
 
-  - id: qwen2.5-math-7b
-    display_name: Qwen2.5 Math 7B (mightykatun)
-    source: "ollama:mightykatun/qwen2.5-math:7b"
-    domain_tags: [math, arithmetic, word-problems, quantitative]
+  - id: bonsai2-4b
+    display_name: Bonsai 2 4B
+    source: "gguf:https://huggingface.co/prism-ml/Ternary-Bonsai-2-4B-gguf/resolve/main/Ternary-Bonsai-2-4B-Q2_0.gguf#64a5183b44921bdb5ac4a6f5f92007821d6ebe5c66997d3c147fd214ab9433d4"
+    domain_tags: [general, conversation, writing]
     capability_text: >
-      Qwen2.5 Math 7B by mightykatun. A Qwen model fine-tuned specifically for
-      mathematical reasoning — arithmetic, algebra, and multi-step word problems.
-      The strongest math specialist available on Ollama for this footprint and
-      the one used for the school-lab thesis test.
-    params_b: 7.6
-    min_ram_gb: 10
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: apache-2.0
-
-  - id: qwen2.5-math-1.5b
-    display_name: Qwen2.5 Math 1.5B (mightykatun)
-    source: "ollama:mightykatun/qwen2.5-math:1.5b"
-    domain_tags: [math, arithmetic, word-problems, quantitative]
-    capability_text: >
-      Qwen2.5 Math 1.5B by mightykatun. The smallest weight-specialized math
-      model on Ollama. Useful for holding the math lane on a constrained machine
-      where the 7B variant will not fit.
-    params_b: 1.5
+      Bonsai 2 4B by prism-ml. Ternary (1.58-bit) general-purpose model
+      derived from the Qwen3.5 line — conversation, writing, summarisation
+      and world knowledge at a ~1.1GB download. The default mid-tier: the
+      right answer for a machine that can spare a few GB but not 5.
+    params_b: 4.0
     min_ram_gb: 3
     min_vram_gb: 0
     needs_gpu: false
@@ -104,92 +134,44 @@ models:
     lane_benchmark: null
     licence: apache-2.0
 
-  - id: phi4-mini-reasoning
-    display_name: Phi-4 Mini Reasoning
-    source: "ollama:phi4-mini-reasoning:latest"
-    domain_tags: [math, reasoning, logic, step-by-step]
+  - id: bonsai-8b
+    display_name: Bonsai 8B (1st gen)
+    source: "gguf:https://huggingface.co/prism-ml/Ternary-Bonsai-8B-gguf/resolve/main/Ternary-Bonsai-8B-Q2_0_g64.gguf#e17b298d84ee78797916ae5c2ecc8211469cc65cccfe3080cd9a9bb503fbc55e"
+    domain_tags: [general, conversation, writing, reasoning]
     capability_text: >
-      Phi-4 Mini Reasoning. Distilled for explicit step-by-step mathematical
-      and logical reasoning at a very small footprint. Shows its working, which
-      makes its arithmetic independently checkable by the gateway's verifier.
-    params_b: 3.8
-    min_ram_gb: 6
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: mit
-
-  - id: deepseek-r1-14b
-    display_name: DeepSeek-R1 14B
-    source: "ollama:deepseek-r1:14b"
-    domain_tags: [reasoning, logic, math, planning]
-    capability_text: >
-      DeepSeek-R1 14B. Explicit chain-of-thought reasoning model — works
-      step by step through logic puzzles, multi-stage problems and planning
-      tasks rather than answering in one pass. The heaviest reasoning
-      specialist in the catalogue.
-    params_b: 14.8
-    min_ram_gb: 16
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: mit
-
-  # --- Code -------------------------------------------------------------
-  #
-  # Three entries at different footprints rather than one, because a school
-  # lab is heterogeneous: an 8GB machine and a 16GB machine should both be
-  # able to serve code, at different depths.
-
-  - id: qwen2.5-coder-7b
-    display_name: Qwen2.5 Coder 7B
-    source: "ollama:qwen2.5-coder:7b"
-    domain_tags: [code, programming, debugging]
-    capability_text: >
-      Qwen2.5 Coder 7B. Code generation, debugging and multi-file reasoning
-      across common languages. The default programming specialist — fits a
-      machine that cannot hold the 14B.
-    params_b: 7.6
-    min_ram_gb: 8
+      Bonsai 8B by prism-ml, the first-generation ternary model (Qwen3-8B
+      derived) — conversation, writing, summarisation and general reasoning.
+      Measured a faster generator than Bonsai 2 9B on Apple Silicon under
+      this network's stock runtime (~30 vs ~26 tok/s on an M3 Air,
+      2026-10-17). The Q2_0_g64 file specifically: without the _g64 suffix
+      the packing is a fork-only layout that stock llama.cpp refuses to
+      load, and the difference is invisible until the failure.
+    params_b: 8.2
+    min_ram_gb: 4
     min_vram_gb: 0
     needs_gpu: false
     verified_in_lane: false
     lane_benchmark: null
     licence: apache-2.0
 
-  - id: qwen2.5-coder-14b
-    display_name: Qwen2.5 Coder 14B
-    source: "ollama:qwen2.5-coder:14b"
-    domain_tags: [code, programming, debugging]
+  - id: bonsai2-9b
+    display_name: Bonsai 2 9B
+    source: "gguf:https://huggingface.co/prism-ml/Ternary-Bonsai-2-9B-gguf/resolve/main/Ternary-Bonsai-2-9B-Q2_0.gguf#1f884aa56aacd2bbbb2e4b7abaead2b1102b74a9c75a23fc33dab916813a384d"
+    domain_tags: [general, conversation, writing, reasoning]
     capability_text: >
-      Qwen2.5 Coder 14B. Code generation, debugging, and multi-file
-      reasoning across common languages. The network's deepest programming
-      specialist.
-    params_b: 14.8
-    min_ram_gb: 16
+      Bonsai 2 9B by prism-ml. Ternary (1.58-bit) general-purpose model
+      derived from Qwen3.5-9B — conversation, writing, summarisation and
+      world knowledge, with solid general reasoning, at a ~2.4GB download.
+      The ceiling of the catalogue and the default aggregator: combining
+      several nodes' replies needs breadth and instruction-following rather
+      than depth in any one lane.
+    params_b: 9.0
+    min_ram_gb: 5
     min_vram_gb: 0
     needs_gpu: false
     verified_in_lane: false
     lane_benchmark: null
     licence: apache-2.0
-
-  - id: sqlcoder-7b
-    display_name: SQLCoder 7B
-    source: "ollama:sqlcoder:7b"
-    domain_tags: [sql, databases, queries]
-    capability_text: >
-      SQLCoder 7B. Translates plain-English questions into SQL against a given
-      schema. Extremely narrow — it does essentially nothing else, and beats
-      general models of any size at the one thing it does.
-    params_b: 7.0
-    min_ram_gb: 8
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: cc-by-sa-4.0
 
   # --- Legal ------------------------------------------------------------
   #
@@ -263,165 +245,3 @@ models:
   #       makes it a viable panel member rather than a redundant one.
   #       Reproduce with CGLA-Legal/run_paraphrase_benchmark.py.
   #   licence: null
-
-  # --- Medicine ---------------------------------------------------------
-  #
-  # Listed because the lane is real and no generalist covers it safely, NOT
-  # because these models are good. Both are old and weak. They are here as
-  # honest placeholders for a domain the network should cover, and neither is
-  # verified_in_lane. Treat any answer as a research artifact.
-
-  - id: meditron-7b
-    display_name: Meditron 7B
-    source: "ollama:meditron:7b"
-    domain_tags: [medical, clinical, biomedical]
-    capability_text: >
-      Meditron 7B. Llama-2 adapted on biomedical literature and clinical
-      guidelines. Research use only — not clinically validated, not a source
-      of medical advice, and older than most of this catalogue.
-    params_b: 7.0
-    min_ram_gb: 8
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: llama2
-
-  # --- Lightweight tier -------------------------------------------------
-  #
-  # Added because the catalogue had a floor problem: the smallest entry needed
-  # 4GB, and common-join applies a 0.8 headroom factor, so a machine had to
-  # have 5GB *free* to run anything at all. A 16GB laptop with a browser open
-  # was told "no locally-runnable catalogue model fits this machine" — which
-  # is true and useless. A school lab is full of machines in exactly that
-  # state.
-  #
-  # These are still specialists, not toys. DeepScaleR is RL-tuned for maths
-  # and Qwen2.5-Coder 1.5B for code, so a machine that can only spare 3GB can
-  # still hold a *lane* rather than being turned away or parked on a
-  # generalist. That matters more than it looks: a panel needs distinct lanes,
-  # and a lab where half the machines can only run a generalist cannot compose.
-
-  - id: deepscaler-1.5b
-    display_name: DeepScaleR 1.5B
-    source: "ollama:deepscaler:1.5b"
-    domain_tags: [math, arithmetic, word-problems]
-    capability_text: >
-      DeepScaleR 1.5B. Reinforcement-tuned specifically for mathematical
-      reasoning and competition-style word problems. Tiny, and narrow — it is
-      a maths model, not a conversationalist. The smallest way to hold the
-      maths lane on a constrained machine.
-    params_b: 1.5
-    min_ram_gb: 3
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: mit
-
-  - id: qwen2.5-coder-1.5b
-    display_name: Qwen2.5 Coder 1.5B
-    source: "ollama:qwen2.5-coder:1.5b"
-    domain_tags: [code, programming, debugging]
-    capability_text: >
-      Qwen2.5 Coder 1.5B. Code completion and small-scale debugging. Clearly
-      weaker than the 7B tier, and still a code specialist rather than a
-      generalist — the smallest way to hold the code lane.
-    params_b: 1.5
-    min_ram_gb: 3
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: apache-2.0
-
-  # --- Generalists ------------------------------------------------------
-  #
-  # Still needed, for two jobs neither of which is being on a panel:
-  #   1. answering requests that don't span domains (most of them), and
-  #   2. AGGREGATING a panel's answers into one reply.
-  # The `general` tag is excluded from panel seats entirely
-  # (COMPOSE_EXCLUDED_DOMAINS) -- a generalist sitting next to a specialist in
-  # that specialist's own lane is the Experiment 2 pairing that lost.
-
-  - id: qwen3-8b
-    display_name: Qwen3 8B
-    source: "ollama:qwen3:8b"
-    domain_tags: [general, conversation, writing, reasoning]
-    capability_text: >
-      Qwen3 8B. Strong general-purpose model — conversation, writing,
-      summarisation and world knowledge, with solid general reasoning. The
-      default aggregator: combining several specialists' replies needs breadth
-      and instruction-following rather than depth in any one lane.
-    params_b: 8.2
-    min_ram_gb: 10
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: apache-2.0
-
-  - id: llama3.1-8b
-    display_name: Llama 3.1 8B
-    source: "ollama:llama3.1:8b"
-    domain_tags: [general, conversation, writing]
-    capability_text: >
-      Llama 3.1 8B. Reliable general-purpose model for conversation, writing,
-      summarisation and world knowledge. A good alternative aggregator when
-      qwen3:8b is unavailable or already assigned elsewhere in the lab.
-    params_b: 8.0
-    min_ram_gb: 10
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: llama3.1
-
-  - id: gemma3-12b
-    display_name: Gemma 3 12B
-    source: "ollama:gemma3:12b"
-    domain_tags: [general, conversation, writing]
-    capability_text: >
-      Gemma 3 12B. General-purpose model for everyday conversation, writing
-      and world-knowledge questions. The heaviest generalist here — prefer it
-      as an aggregator on a machine with room for it.
-    params_b: 12.2
-    min_ram_gb: 14
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: gemma
-
-  - id: llama3.2-1b
-    display_name: Llama 3.2 1B
-    source: "ollama:llama3.2:1b"
-    domain_tags: [general, conversation]
-    capability_text: >
-      Llama 3.2 1B. The smallest entry in the catalogue and the floor of the
-      network — for a machine with almost nothing to spare. Weak on its own,
-      but it can still aggregate a panel's answers, which is the job a
-      constrained machine is most useful for.
-    params_b: 1.2
-    min_ram_gb: 2
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: llama3.2
-
-  - id: llama3.2-3b
-    display_name: Llama 3.2 3B
-    source: "ollama:llama3.2:3b"
-    domain_tags: [general, conversation]
-    capability_text: >
-      Llama 3.2 3B. Small general-purpose model for conversation and everyday
-      questions. A good aggregator for a machine that cannot hold a larger
-      generalist.
-    params_b: 3.2
-    min_ram_gb: 4
-    min_vram_gb: 0
-    needs_gpu: false
-    verified_in_lane: false
-    lane_benchmark: null
-    licence: llama3.2

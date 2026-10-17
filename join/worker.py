@@ -102,6 +102,17 @@ DEFAULT_MAX_TOKENS = 1024
 # COMMON_SLEEP_IDLE_SECONDS join.py reads, so one env var steers both layers.
 DEFAULT_SLEEP_IDLE_SECONDS = 1800
 
+# The catalogue's non-thinking sampling, stamped per request as defaults the
+# caller may override (see the stamp in do_POST for why, and for why these are
+# defaults rather than forced values). The values are the Bonsai 2 cards' own
+# non-thinking configuration, not picks of ours.
+DEFAULT_SAMPLING = {
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 20,
+    "presence_penalty": 1.5,
+}
+
 
 def bounded_max_tokens(requested, ceiling: int = DEFAULT_MAX_TOKENS) -> int:
     """The value to send as max_tokens, honouring a sane caller value.
@@ -289,6 +300,28 @@ class Handler(BaseHTTPRequestHandler):
         # this node's rule, and not a caller's optimisation to trade everyone
         # else's isolation for.
         body["cache_prompt"] = False
+
+        # The catalogue's models default to thinking mode -- a long chain of
+        # thought before the answer -- which is incompatible with the bounded
+        # replies above: at the 1024-token ceiling, a thinking preamble can
+        # eat the whole budget and leave nothing for the answer. So the node
+        # stamps the model cards' non-thinking configuration: thinking off via
+        # the chat template's own switch, then the cards' sampling defaults.
+        #
+        # Unlike the model name, the token ceiling and cache_prompt, these are
+        # defaults rather than overrides -- a caller that knows what it wants
+        # keeps it. setdefault, not assignment: the node's job is to make an
+        # unstamped request produce a usable answer, not to confiscate control
+        # from a caller that sets things deliberately. A junk value is passed
+        # through for the backend to reject in its own words (which _proxy_chat
+        # relays), matching how an unknown model name is handled above.
+        kwargs = body.get("chat_template_kwargs")
+        if not isinstance(kwargs, dict):
+            kwargs = {}
+        kwargs.setdefault("enable_thinking", False)
+        body["chat_template_kwargs"] = kwargs
+        for field, value in DEFAULT_SAMPLING.items():
+            body.setdefault(field, value)
 
         self._proxy_chat(body)
 
