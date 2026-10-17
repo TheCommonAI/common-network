@@ -5,1113 +5,1093 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Common Network — Dashboard</title>
 <style>
-  .viz-root {
+  /* Tokens. Light is the default; dark is the same hues stepped for a dark
+     surface (see dataviz/references/palette.md). Both dark blocks are kept so
+     the viewer's theme toggle wins over the OS setting in either direction. */
+  :root {
     color-scheme: light;
-    --surface-1:      #fcfcfb;
-    --page:           #f9f9f7;
-    --text-primary:   #0b0b0b;
-    --text-secondary: #52514e;
-    --muted:          #898781;
-    --gridline:       #e1e0d9;
-    --baseline:       #c3c2b7;
-    --border:         rgba(11,11,11,0.10);
-    --good:           #0ca30c;
-    --critical:       #d03b3b;
-    --s1: #2a78d6; --s2: #1baf7a; --s3: #eda100; --s4: #008300;
-    --s5: #4a3aa7; --s6: #e34948; --s7: #e87ba4; --s8: #eb6834;
+    --page:        #f5f5f2;
+    --surface:     #fcfcfb;
+    --text:        #0b0b0b;
+    --text-2:      #52514e;
+    --muted:       #7a786f;
+    --line:        #e6e5df;
+    --line-strong: #cfcdc3;
+    --track:       #ecebe6;
+    --chip:        #ecebe6;
+    --border:      rgba(11,11,11,0.09);
+    --good:        #0ca30c;
+    --critical:    #d03b3b;
+    --warn:        #b7791f;
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+    --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
   }
   @media (prefers-color-scheme: dark) {
-    :root:where(:not([data-theme="light"])) .viz-root {
+    :root:not([data-theme="light"]) {
       color-scheme: dark;
-      --surface-1:      #1a1a19;
-      --page:           #0d0d0d;
-      --text-primary:   #ffffff;
-      --text-secondary: #c3c2b7;
-      --muted:          #898781;
-      --gridline:       #2c2c2a;
-      --baseline:       #383835;
-      --border:         rgba(255,255,255,0.10);
-      --good:           #0ca30c;
-      --critical:       #d03b3b;
-      --s1: #3987e5; --s2: #199e70; --s3: #c98500; --s4: #008300;
-      --s5: #9085e9; --s6: #e66767; --s7: #d55181; --s8: #d95926;
+      --page:        #0d0d0d;
+      --surface:     #1a1a19;
+      --text:        #f0efec;
+      --text-2:      #c3c2b7;
+      --muted:       #898781;
+      --line:        #2c2c2a;
+      --line-strong: #3a3a37;
+      --track:       #2c2c2a;
+      --chip:        #262624;
+      --border:      rgba(255,255,255,0.09);
+      --warn:        #e0a33a;
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+      --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
     }
   }
-  :root[data-theme="dark"] .viz-root {
+  :root[data-theme="dark"] {
     color-scheme: dark;
-    --surface-1:      #1a1a19;
-    --page:           #0d0d0d;
-    --text-primary:   #ffffff;
-    --text-secondary: #c3c2b7;
-    --muted:          #898781;
-    --gridline:       #2c2c2a;
-    --baseline:       #383835;
-    --border:         rgba(255,255,255,0.10);
-    --good:           #0ca30c;
-    --critical:       #d03b3b;
-    --s1: #3987e5; --s2: #199e70; --s3: #c98500; --s4: #008300;
-    --s5: #9085e9; --s6: #e66767; --s7: #d55181; --s8: #d95926;
+    --page:        #0d0d0d;
+    --surface:     #1a1a19;
+    --text:        #f0efec;
+    --text-2:      #c3c2b7;
+    --muted:       #898781;
+    --line:        #2c2c2a;
+    --line-strong: #3a3a37;
+    --track:       #2c2c2a;
+    --chip:        #262624;
+    --border:      rgba(255,255,255,0.09);
+    --warn:        #e0a33a;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
   }
 
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; }
-  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-  .viz-root {
-    padding: 32px 24px 64px; max-width: 1100px; margin: 0 auto;
-    min-height: 100%;
-    background: var(--page);
-    color: var(--text-primary);
+  html, body { margin: 0; }
+  body {
+    background: var(--page); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   }
-
-  header { margin-bottom: 28px; }
-  header h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
-  header p { margin: 0; color: var(--text-secondary); font-size: 14px; }
-
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 32px; }
-  .stat-tile {
-    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
-    padding: 16px;
-  }
-  .stat-tile .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
-  .stat-tile .value { font-size: 28px; font-weight: 600; font-variant-numeric: proportional-nums; }
-  /* One line of context under a figure: what it covers, how many requests are
-     behind it, whether it is a claim or a measurement. A number with no
-     population attached is a number nobody can act on. */
-  .stat-tile .sub { font-size: 11px; color: var(--muted); margin-top: 5px; }
-
-  /* The window switcher sits in one row directly above the tiles it scopes.
-     A filter that changes the numbers has to be adjacent to them -- the reader
-     should never have to hunt for the thing that would explain a figure. */
-  .window-switch { display: flex; gap: 6px; margin-bottom: 14px; }
-  .window-switch button {
-    font: inherit; font-size: 12px; padding: 4px 13px; cursor: pointer;
-    background: var(--surface-1); color: var(--text-secondary);
-    border: 1px solid var(--border); border-radius: 100px;
-  }
-  .window-switch button:hover { color: var(--text-primary); }
-  .window-switch button.active {
-    background: var(--text-primary); color: var(--page); border-color: var(--text-primary);
-  }
-
-  /* Two groups, because these numbers do not have the same owner. The top
-     group is measured here; the bottom group is asserted by a stranger's
-     machine. Stacking them in one undifferentiated grid would launder the
-     second kind into the first. */
-  .tile-group { margin-bottom: 22px; }
-  .tile-group:last-of-type { margin-bottom: 0; }
-  .tile-group-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
-  .tile-group .stats { margin-bottom: 0; }
-
-  /* Provenance, not status. An unverified figure is not a bad one, it is an
-     unknown one, so this is a muted outline rather than the amber the
-     dashboard reserves for degraded panels -- nothing here is a warning about
-     the network's health. */
-  .unverified-chip {
-    display: inline-flex; align-items: center; font-size: 11px; font-weight: 500;
-    padding: 1px 7px; border-radius: 100px; margin-left: 6px;
-    border: 1px solid var(--baseline); color: var(--muted);
-  }
-  .latency-note { color: var(--muted); font-size: 12px; line-height: 1.6; margin-top: 16px; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 28px 20px 56px; }
   .mut { color: var(--muted); }
-  /* Equal-width digits, but only here. A column of latencies is read by
-     scanning down it, so the decimal points have to line up -- the opposite of
-     the stat tile above, where proportional figures stop a large number
-     looking loose. */
-  .num { font-variant-numeric: tabular-nums; text-align: right; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
 
-  section { margin-bottom: 36px; }
-  section h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; color: var(--text-primary); }
+  /* Header ---------------------------------------------------------------- */
+  .top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 14px 24px; margin-bottom: 26px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .lede { margin: 2px 0 0; color: var(--text-2); font-size: 13px; }
+  .controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .status { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
-  .card {
-    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
-    padding: 16px; overflow-x: auto;
+  .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; }
+  .seg button {
+    font: inherit; font-size: 13px; padding: 5px 13px; cursor: pointer;
+    background: var(--surface); color: var(--text-2); border: 0;
+    border-left: 1px solid var(--line-strong);
+  }
+  .seg button:first-child { border-left: 0; }
+  .seg button:hover { color: var(--text); }
+  .seg button.active { background: var(--text); color: var(--page); }
+
+  /* Sections -------------------------------------------------------------- */
+  section { margin-top: 38px; }
+  .sec-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-bottom: 14px; }
+  .sec-head h2 { font-size: 15px; font-weight: 600; margin: 0; }
+  .sec-head p { margin: 0; font-size: 12px; color: var(--muted); }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 20px;
+  }
+  .scroll { overflow-x: auto; }
+  .note { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 14px 0 0; max-width: 78ch; }
+  .empty { color: var(--muted); font-size: 13px; padding: 10px 0; }
+
+  /* Stat tiles ------------------------------------------------------------ */
+  .group-label {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--muted); margin: 18px 0 8px;
+  }
+  .group-label:first-child { margin-top: 0; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .tile {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px 13px;
+  }
+  .tile .label { font-size: 12px; color: var(--text-2); }
+  .tile .value { font-size: 26px; font-weight: 600; letter-spacing: -0.01em; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .tile .value .of { font-size: 15px; font-weight: 500; color: var(--muted); }
+  .tile .sub { font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .chip {
+    display: inline-flex; align-items: center; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.02em; text-transform: none; padding: 1px 7px; border-radius: 100px;
+    border: 1px solid var(--line-strong); color: var(--muted);
   }
 
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 6px 10px; border-bottom: 1px solid var(--gridline); white-space: nowrap; }
-  td { padding: 8px 10px; border-bottom: 1px solid var(--gridline); white-space: nowrap; }
-  tr:last-child td { border-bottom: none; }
-  td.wrap { white-space: normal; color: var(--text-secondary); max-width: 320px; }
+  /* Controls above a chart ------------------------------------------------ */
+  .filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 13px; color: var(--text-2); }
+  select {
+    font: inherit; font-size: 13px; color: var(--text); background: var(--surface);
+    border: 1px solid var(--line-strong); border-radius: 8px; padding: 4px 8px;
+  }
 
-  .badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; }
-  .badge .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  /* Horizontal bars -------------------------------------------------------- */
+  .hchart { display: grid; gap: 4px; }
+  .hrow {
+    display: grid; grid-template-columns: minmax(150px, 230px) 1fr minmax(120px, 190px);
+    align-items: center; gap: 12px; padding: 5px 0;
+  }
+  .hrow .lbl { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hrow .lbl .sub { display: block; font-size: 11px; color: var(--muted); }
+  .hrow .val { font-size: 12px; color: var(--text-2); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .track { position: relative; height: 18px; background: var(--track); border-radius: 4px; }
+  .fill { height: 100%; border-radius: 4px; background: var(--s1); }
+  .fill.reported { background: var(--s3); }
+  .fill.small { opacity: 0.45; }
+  /* The p95 tick sits over the bar's track, so the reader sees the spread
+     without a second bar fighting the first for the same space. */
+  .tick { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text); opacity: 0.6; }
+  .hrow .none { font-size: 12px; color: var(--muted); font-style: italic; }
+
+  /* Tables ---------------------------------------------------------------- */
+  table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.data th {
+    text-align: left; font-weight: 500; font-size: 12px; color: var(--muted);
+    padding: 7px 10px; border-bottom: 1px solid var(--line-strong); white-space: nowrap;
+  }
+  table.data td { padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: top; }
+  table.data tr:last-child td { border-bottom: 0; }
+  table.data th.num, table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.data td.multi { white-space: normal; min-width: 180px; }
+  table.data th button {
+    font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer;
+  }
+  table.data th button:hover { color: var(--text); }
+  table.data th[aria-sort="ascending"], table.data th[aria-sort="descending"] { color: var(--text); }
+  .tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+  .tag { font-size: 11px; padding: 1px 7px; border-radius: 100px; background: var(--chip); color: var(--text-2); }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; }
+  .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
   .badge.good { color: var(--good); }
-  .badge.good .dot { background: var(--good); }
   .badge.critical { color: var(--critical); }
-  .badge.critical .dot { background: var(--critical); }
-  /* A degraded panel isn't a failure — the user got a real answer — but it
-     also isn't composition working, so it must not read as either. Amber,
-     defined here rather than reusing --critical, so a lab full of degraded
-     panels looks like what it is: something to look into, not an outage. */
-  .badge.warn { color: #b7791f; }
-  .badge.warn .dot { background: #b7791f; }
+  .badge.warn { color: var(--warn); }
+  .badge.neutral { color: var(--text-2); }
 
-  .bar-row { display: grid; grid-template-columns: 140px 1fr 44px; align-items: center; gap: 10px; padding: 6px 0; }
-  .bar-row .name { font-size: 13px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bar-track { background: var(--gridline); border-radius: 4px; height: 20px; position: relative; }
-  .bar-fill { height: 20px; border-radius: 0 4px 4px 0; }
-  .bar-row .count { font-size: 12px; color: var(--text-secondary); text-align: right; font-variant-numeric: tabular-nums; }
-
-  .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
-  footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 24px; }
-
-  .tag-chip {
-    display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 100px;
-    background: var(--gridline); color: var(--text-secondary); margin: 0 4px 4px 0;
-  }
-  .verified-chip {
-    display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 500;
-    padding: 2px 8px; border-radius: 100px; background: var(--good); color: var(--surface-1);
-  }
-  .catalogue-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-  .catalogue-card {
-    border: 1px dashed var(--border); border-radius: 8px; padding: 12px; background: var(--page);
-  }
-  .catalogue-card .name { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
-  .catalogue-card .meta { font-size: 12px; color: var(--muted); margin-top: 6px; }
-  .gap-row { display: grid; grid-template-columns: 140px 1fr 90px; align-items: center; gap: 10px; padding: 6px 0; font-size: 13px; }
-  .gap-row .domain { text-transform: capitalize; }
-  .gap-track { background: var(--gridline); border-radius: 4px; height: 16px; position: relative; display: flex; }
-  .gap-fill-coverage { height: 16px; background: var(--good); border-radius: 4px 0 0 4px; }
-  .gap-fill-demand { height: 16px; background: var(--critical); opacity: 0.55; }
-  .gap-label { font-size: 12px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
-
-  /* Sub-headings, not new sections. Every chart below is scoped by the one
-     window switcher above them, and a reader must never have to work out
-     whether "7d" applies to the chart they are looking at. */
-  h3.chart-h { font-size: 13px; font-weight: 600; margin: 28px 0 8px; color: var(--text-primary); }
-  h3.chart-h .hint { font-weight: 400; color: var(--muted); }
-
-  /* A stacked bar for one request's three phases, so the segments must sum to
-     the bar's own length. Sized with flex-grow off the millisecond values
-     rather than percentage widths: the 2px gap between fills is then absorbed
-     by the layout instead of being hand-subtracted from each segment, which is
-     the arithmetic that makes stacked bars not add up. */
-  .phase-row { display: grid; grid-template-columns: 132px 1fr 84px; align-items: center; gap: 10px; padding: 5px 0; }
-  .phase-row .name { font-size: 13px; color: var(--text-secondary); }
-  .phase-track { display: flex; gap: 2px; height: 20px; background: var(--gridline); border-radius: 4px; }
+  /* Latency pieces -------------------------------------------------------- */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .grid-2 > .panel h3 { font-size: 13px; font-weight: 600; margin: 0 0 2px; }
+  .grid-2 > .panel .hint { font-size: 12px; color: var(--muted); margin: 0 0 12px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--text-2); margin: 0 0 10px; }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 3px; }
+  .phase-row { display: grid; grid-template-columns: 150px 1fr 84px; align-items: center; gap: 12px; padding: 6px 0 2px; }
+  .phase-row .name { font-size: 13px; color: var(--text-2); }
+  .phase-track { display: flex; gap: 2px; height: 20px; background: var(--track); border-radius: 4px; }
   .phase-seg { height: 20px; }
   .phase-seg:first-child { border-radius: 4px 0 0 4px; }
   .phase-seg:last-child { border-radius: 0 4px 4px 0; }
-  .phase-row .total { font-size: 12px; color: var(--text-secondary); text-align: right; font-variant-numeric: tabular-nums; }
+  .phase-row .total { font-size: 12px; color: var(--text-2); text-align: right; font-variant-numeric: tabular-nums; }
+  .phase-parts { font-size: 11px; color: var(--muted); padding: 0 0 8px 162px; font-variant-numeric: tabular-nums; }
 
-  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 2px 0 12px; font-size: 12px; color: var(--text-secondary); }
-  .legend-item { display: inline-flex; align-items: center; gap: 6px; }
-  .legend-swatch { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
-
-  /* Columns, for magnitude at discrete intervals. No SVG and no canvas: this
-     file's whole visual vocabulary is divs with inline sizes, and columns are
-     the same thing rotated, which also degrades on a phone in a way a fixed
-     viewBox does not. */
-  /* The 2px gap is the same surface gap the phase track uses: two adjacent
-     populated buckets must read as two bars, not one bar of double width. At
-     84 columns it costs 168px of a ~1150px row, leaving ~11px per column. */
+  /* Columns, for magnitude at discrete intervals. A 2px gap keeps adjacent
+     populated buckets reading as two bars. An empty interval is a grey stub on
+     the baseline, never nothing: a gap in traffic is a fact about the network. */
   .col-chart { display: flex; align-items: flex-end; gap: 2px; height: 96px; }
-  .col { flex: 1 1 0; min-width: 1px; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; }
+  .col { flex: 1 1 0; min-width: 1px; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; }
   .col-fill { background: var(--s1); border-radius: 3px 3px 0 0; }
-  /* An empty interval is drawn as a 2px stub on the baseline rather than as
-     nothing. Silently omitting it closes a gap in traffic up into a smooth run
-     of bars, which is the one thing a network of donated machines must not do. */
-  .col-fill.stub { height: 2px; background: var(--gridline); border-radius: 0; }
-  /* The extreme value gets one direct label rather than a number on every
-     column -- and it is anchored over the column it describes. A centred label
-     on a 48-column chart points at column 24, which is not where the peak is;
-     on the real data that put "was slowest" in the middle of an axis whose only
-     populated column was the last one. */
-  .col-marker { position: relative; height: 15px; }
-  .col-marker span { position: absolute; white-space: nowrap; font-size: 11px;
-    color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-  .col-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 7px; font-variant-numeric: tabular-nums; }
+  .col-fill.stub { height: 2px; background: var(--line-strong); border-radius: 0; }
+  .col-marker { position: relative; height: 16px; margin-bottom: 4px; }
+  .col-marker span { position: absolute; white-space: nowrap; font-size: 11px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .col-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
 
-  /* The table view for a chart with more bars than anyone wants open at once.
-     `details` is keyboard-operable natively, which matters here because this
-     file carries no aria attributes and its tables are its accessibility story. */
-  details.twin { margin-top: 14px; }
-  details.twin > summary { font-size: 12px; color: var(--text-secondary); cursor: pointer; }
-  details.twin > summary:hover { color: var(--text-primary); }
-  details.twin .twin-body { margin-top: 10px; }
+  details.twin { margin-top: 12px; }
+  details.twin > summary { font-size: 12px; color: var(--text-2); cursor: pointer; }
+  details.twin > summary:hover { color: var(--text); }
+  details.twin > div { margin-top: 8px; }
+
+  /* Catalogue ------------------------------------------------------------- */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+  .card-mini { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--page); }
+  .card-mini .name { font-weight: 600; font-size: 13px; }
+  .card-mini .meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .verified {
+    display: inline-flex; align-items: center; font-size: 10px; font-weight: 600; margin-left: 6px;
+    padding: 1px 7px; border-radius: 100px; background: var(--good); color: var(--surface);
+  }
+
+  footer { margin-top: 44px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+  /* Narrow screens: stack the bar rows and the paired panels. */
+  @media (max-width: 760px) {
+    .grid-2 { grid-template-columns: 1fr; }
+    .hrow { grid-template-columns: 1fr; gap: 4px; padding: 9px 0; }
+    .hrow .val { text-align: left; }
+    .phase-row { grid-template-columns: 1fr 70px; }
+    .phase-row .name { grid-column: 1 / -1; }
+    .phase-parts { padding-left: 0; }
+  }
 </style>
 </head>
 <body>
-<div class="viz-root">
-  <header>
-    <h1>Common Network</h1>
-    <p>Live registry and routing activity — this network is permissionless and transparent by design.</p>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Common Network</h1>
+      <p class="lede">Live routing and latency. Permissionless and transparent by design.</p>
+    </div>
+    <div class="controls">
+      <div class="seg" id="window-switch" role="group" aria-label="Time window">
+        <button type="button" data-hours="1">1h</button>
+        <button type="button" data-hours="24" class="active">24h</button>
+        <button type="button" data-hours="168">7d</button>
+      </div>
+      <div class="status" id="status">loading…</div>
+    </div>
   </header>
 
-  <div class="stats" id="stats"></div>
+  <!-- Figures, grouped by who vouches for them. Network figures come from the
+       registry; measured figures are timed by this gateway; reported figures are
+       self-declared by the nodes and are not verified. -->
+  <div class="group-label">Network</div>
+  <div class="tiles" id="tiles-network"></div>
 
-  <section>
-    <h2>Latency <span style="color:var(--muted); font-weight:400;">(last <span class="js-window-label">24h</span>, percentiles over requests, not over nodes)</span></h2>
-    <div class="window-switch" id="window-switch">
-      <button type="button" data-hours="1">1h</button>
-      <button type="button" data-hours="24" class="active">24h</button>
-      <button type="button" data-hours="168">7d</button>
+  <div class="group-label">Measured by this gateway <span class="mut" style="text-transform:none;letter-spacing:0;font-weight:400;">· last <span data-window-label>24h</span>, every request</span></div>
+  <div class="tiles" id="tiles-measured"></div>
+
+  <div class="group-label">Reported by nodes <span class="chip">unverified</span></div>
+  <div class="tiles" id="tiles-reported"></div>
+
+  <section id="versions">
+    <div class="sec-head">
+      <h2>Speed by client version</h2>
+      <p>Median answer time, measured here. Compare versions within one model; the models column shows what each was serving.</p>
     </div>
-
-    <div class="tile-group">
-      <div class="tile-group-label">Measured by this gateway</div>
-      <div class="stats" id="latency-tiles-measured"></div>
-    </div>
-
-    <div class="tile-group">
-      <div class="tile-group-label">
-        Reported by the nodes<span class="unverified-chip">unverified</span>
+    <div class="panel">
+      <div class="filter-row">
+        <label for="model-select">Model</label>
+        <select id="model-select"><option value="all">All models</option></select>
+        <span class="mut">· sorted by the table header below</span>
       </div>
-      <div class="stats" id="latency-tiles-reported"></div>
+      <div class="hchart" id="version-chart"></div>
+      <p class="note">Bar: median (p50) total time. Tick: p95 — the slow end of the same requests. Dimmed bars have fewer than 20 requests, too few to read a speed from.</p>
     </div>
 
-    <div class="latency-note" id="latency-note"></div>
+    <div class="panel" style="margin-top:12px;">
+      <div class="sec-head" style="margin-bottom:8px;">
+        <h3 style="font-size:13px;font-weight:600;margin:0;">Generation speed, tokens per second <span class="chip">unverified</span></h3>
+      </div>
+      <div class="hchart" id="tps-chart"></div>
+      <p class="note">Reported by the nodes themselves. A “not reported” row means no node on that version sent the figure, which is not the same as slow.</p>
+    </div>
 
-    <h3 class="chart-h">Where the time goes
-      <span class="hint">(last <span class="js-window-label">24h</span>; total = routing + to first token + generation, so the segments add up)</span></h3>
-    <div class="card"><div id="latency-phases"></div></div>
-
-    <h3 class="chart-h">Latency over time
-      <span class="hint">(last <span class="js-window-label">24h</span>, median total per bucket)</span></h3>
-    <div class="card"><div id="latency-timeseries"></div></div>
-
-    <h3 class="chart-h">Distribution of total latency
-      <span class="hint">(last <span class="js-window-label">24h</span>; how many requests, not how long)</span></h3>
-    <div class="card"><div id="latency-distribution"></div></div>
-
-    <h3 class="chart-h">By node
-      <span class="hint">(last <span class="js-window-label">24h</span>)</span></h3>
-    <div class="card"><div id="latency-by-node-bars"></div></div>
-    <div class="card" style="margin-top:12px;"><div id="latency-by-node"></div></div>
+    <div class="panel" style="margin-top:12px;">
+      <div id="version-table"></div>
+    </div>
   </section>
 
-  <section>
-    <h2>Nodes</h2>
-    <div class="card"><div id="nodes-table"></div></div>
+  <section id="latency">
+    <div class="sec-head">
+      <h2>Latency</h2>
+      <p>Percentiles over requests, not nodes. Measured here unless marked †.</p>
+    </div>
+    <div class="grid-2">
+      <div class="panel">
+        <h3>Latency over time</h3>
+        <p class="hint">Median total time per bucket, <span data-window-label>24h</span></p>
+        <div id="latency-timeseries"></div>
+      </div>
+      <div class="panel">
+        <h3>Distribution of total time</h3>
+        <p class="hint">How many requests, not how long — <span data-window-label>24h</span></p>
+        <div id="latency-distribution"></div>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:14px;">
+      <h3 style="font-size:13px;font-weight:600;margin:0 0 2px;">Where the time goes</h3>
+      <p class="hint" style="font-size:12px;color:var(--muted);margin:0 0 12px;">Each bar is one real request, split into its three phases so the segments add up to its total.</p>
+      <div id="latency-phases"></div>
+    </div>
+    <div class="panel" style="margin-top:14px;">
+      <h3 style="font-size:13px;font-weight:600;margin:0 0 10px;">By node</h3>
+      <div id="latency-by-node"></div>
+      <p class="note" id="latency-note"></p>
+    </div>
   </section>
 
-  <section>
-    <h2>Domain coverage <span style="color:var(--muted); font-weight:400;">(demand vs. healthy nodes serving it, last 50 decisions)</span></h2>
-    <div class="card"><div id="coverage-chart"></div></div>
+  <section id="nodes">
+    <div class="sec-head">
+      <h2>Nodes</h2>
+      <p>Click a column header to sort.</p>
+    </div>
+    <div class="panel"><div id="nodes-table"></div></div>
   </section>
 
-  <section>
-    <h2>Specialist catalogue <span style="color:var(--muted); font-weight:400;">(models the network can assign to a joining machine — not currently-running nodes)</span></h2>
-    <div class="card"><div id="catalogue-grid"></div></div>
+  <section id="routing">
+    <div class="sec-head">
+      <h2>Routing</h2>
+      <p>Demand against healthy nodes, and where the last 50 decisions landed.</p>
+    </div>
+    <div class="grid-2">
+      <div class="panel">
+        <h3 style="font-size:13px;font-weight:600;margin:0 0 10px;">Domain coverage</h3>
+        <div id="coverage-chart"></div>
+      </div>
+      <div class="panel">
+        <h3 style="font-size:13px;font-weight:600;margin:0 0 10px;">Requests routed by node</h3>
+        <div id="routing-chart"></div>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:14px;">
+      <h3 style="font-size:13px;font-weight:600;margin:0 0 10px;">Recent decisions</h3>
+      <div id="decisions-table"></div>
+    </div>
   </section>
 
-  <section>
-    <h2>Requests routed by node <span style="color:var(--muted); font-weight:400;">(last 50 decisions)</span></h2>
-    <div class="card"><div id="routing-chart"></div></div>
+  <section id="catalogue">
+    <div class="sec-head">
+      <h2>Specialist catalogue</h2>
+      <p>Models the network can assign to a joining machine. Not currently running nodes.</p>
+    </div>
+    <div class="panel"><div id="catalogue-grid"></div></div>
   </section>
 
-  <section>
-    <h2>Recent decisions</h2>
-    <div class="card"><div id="decisions-table"></div></div>
-  </section>
-
-  <footer>Auto-refreshes every 5s · <span id="last-updated"></span></footer>
+  <footer>
+    Auto-refreshes every 15 seconds while this tab is open. Figures are cached for up to 15 seconds on the server, so two people looking at the same window see the same numbers.
+  </footer>
 </div>
 
 <script>
-const CATEGORICAL_SLOTS = ['--s1','--s2','--s3','--s4','--s5','--s6','--s7','--s8'];
-const nodeColorAssignment = new Map();
+'use strict';
 
-function colorFor(name) {
-  if (!nodeColorAssignment.has(name)) {
-    const idx = nodeColorAssignment.size % CATEGORICAL_SLOTS.length;
-    nodeColorAssignment.set(name, CATEGORICAL_SLOTS[idx]);
-  }
-  return `var(${nodeColorAssignment.get(name)})`;
-}
-
-function escapeHtml(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
-function fmtTime(iso) {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-}
-
-function renderStats(nodes, decisions) {
-  const healthy = nodes.filter(n => n.healthy).length;
-  const unhealthy = nodes.length - healthy;
-  const ok = decisions.filter(d => d.ok).length;
-  const panels = decisions.filter(d => d.topology === 'panel').length;
-  const degraded = decisions.filter(d => d.topology === 'degraded').length;
-  // Verification fire rate. Worth a tile of its own rather than a footnote:
-  // a rate that quietly falls to zero means the extractor stopped matching,
-  // not that the models stopped making arithmetic errors.
-  const checks = decisions.reduce((a, d) => a + (d.checks_run || 0), 0);
-  const failed = decisions.reduce((a, d) => a + (d.checks_failed || 0), 0);
-  const tiles = [
-    ['Total nodes', nodes.length],
-    ['Healthy', healthy],
-    ['Unhealthy', unhealthy],
-    ['Recent decisions', decisions.length],
-    ['Successful', `${ok}/${decisions.length}`],
-    ['Composed', decisions.length ? `${panels}/${decisions.length}` : '—'],
-    ['Degraded panels', degraded],
-    ['Figures corrected', checks ? `${failed}/${checks}` : '—'],
-  ];
-  document.getElementById('stats').innerHTML = tiles.map(([label, value]) => `
-    <div class="stat-tile">
-      <div class="label">${label}</div>
-      <div class="value">${value}</div>
-    </div>
-  `).join('');
-}
-
-function renderTags(tags) {
-  if (!tags || tags.length === 0) return '';
-  return tags.map(t => `<span class="tag-chip">${escapeHtml(t)}</span>`).join('');
-}
-
-function renderNodes(nodes) {
-  const el = document.getElementById('nodes-table');
-  if (nodes.length === 0) {
-    el.innerHTML = '<div class="empty">No nodes registered yet.</div>';
-    return;
-  }
-  el.innerHTML = `
-    <table>
-      <thead><tr>
-        <th>Name</th><th>Model</th><th>Domain</th><th>Region</th><th>Cost / 1k</th>
-        <th>Avg latency</th><th>Status</th><th>What it does</th>
-      </tr></thead>
-      <tbody>
-        ${nodes.map(n => `
-          <tr>
-            <td>${escapeHtml(n.name)}</td>
-            <td>${escapeHtml(n.model_name)}</td>
-            <td>${n.domain_tags ? renderTags(n.domain_tags) : '<span class="empty">untagged</span>'}</td>
-            <td>${escapeHtml(n.region || '—')}</td>
-            <td>${n.cost_per_1k}</td>
-            <td>${n.avg_latency_ms} ms</td>
-            <td>${n.healthy
-              ? '<span class="badge good"><span class="dot"></span>healthy</span>'
-              : '<span class="badge critical"><span class="dot"></span>unhealthy</span>'}</td>
-            <td class="wrap">${escapeHtml(n.capability_text)}</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-  `;
-}
-
-function renderCatalogue(catalogue) {
-  const el = document.getElementById('catalogue-grid');
-  if (!catalogue || catalogue.length === 0) {
-    el.innerHTML = '<div class="empty">Catalogue is empty.</div>';
-    return;
-  }
-  el.innerHTML = `<div class="catalogue-grid">${catalogue.map(m => `
-    <div class="catalogue-card">
-      <div class="name">${escapeHtml(m.display_name)}${m.verified_in_lane ? ' <span class="verified-chip">✓ verified in lane</span>' : ''}</div>
-      <div>${renderTags(m.domain_tags)}</div>
-      <div class="meta">${escapeHtml(m.capability_text)}</div>
-      <div class="meta">min RAM: ${m.min_ram_gb}GB${m.params_b ? ` · ${m.params_b}B params` : ''} · ${escapeHtml(m.source)}</div>
-    </div>
-  `).join('')}</div>`;
-}
-
-function renderCoverage(nodes, decisions) {
-  const el = document.getElementById('coverage-chart');
-  const demand = new Map();
-  for (const d of decisions) {
-    if (!d.matched_domain) continue;
-    demand.set(d.matched_domain, (demand.get(d.matched_domain) || 0) + 1);
-  }
-  const coverage = new Map();
-  for (const n of nodes) {
-    if (!n.healthy || !n.domain_tags) continue;
-    for (const t of n.domain_tags) coverage.set(t, (coverage.get(t) || 0) + 1);
-  }
-  const domains = new Set([...demand.keys(), ...coverage.keys()]);
-  if (domains.size === 0) {
-    el.innerHTML = '<div class="empty">No domain-matched decisions yet.</div>';
-    return;
-  }
-  const maxVal = Math.max(1, ...demand.values(), ...coverage.values());
-  el.innerHTML = Array.from(domains).sort().map(domain => {
-    const d = demand.get(domain) || 0;
-    const c = coverage.get(domain) || 0;
-    const gap = (d / (c + 1)).toFixed(2);
-    return `
-      <div class="gap-row">
-        <div class="domain">${escapeHtml(domain)}</div>
-        <div class="gap-track">
-          <div class="gap-fill-coverage" style="width:${(c/maxVal*100).toFixed(1)}%"></div>
-          <div class="gap-fill-demand" style="width:${(d/maxVal*100).toFixed(1)}%"></div>
-        </div>
-        <div class="gap-label">${d} req · ${c} node${c === 1 ? '' : 's'} · gap ${gap}</div>
-      </div>
-    `;
-  }).join('');
-}
-
-function renderRoutingChart(nodes, decisions) {
-  const el = document.getElementById('routing-chart');
-  const nameById = new Map(nodes.map(n => [n.id, n.name]));
-  const counts = new Map();
-  for (const d of decisions) {
-    const name = nameById.get(d.chosen_node) || d.chosen_node_name || 'unknown';
-    if (!d.chosen_node) continue;
-    counts.set(name, (counts.get(name) || 0) + 1);
-  }
-  if (counts.size === 0) {
-    el.innerHTML = '<div class="empty">No routed requests yet.</div>';
-    return;
-  }
-  const max = Math.max(...counts.values());
-  el.innerHTML = Array.from(counts.entries()).map(([name, count]) => `
-    <div class="bar-row">
-      <div class="name">${escapeHtml(name)}</div>
-      <div class="bar-track"><div class="bar-fill" style="width:${(count/max*100).toFixed(1)}%; background:${colorFor(name)};"></div></div>
-      <div class="count">${count}</div>
-    </div>
-  `).join('');
-}
-
-function renderDecisions(decisions) {
-  const el = document.getElementById('decisions-table');
-  if (decisions.length === 0) {
-    el.innerHTML = '<div class="empty">No decisions logged yet.</div>';
-    return;
-  }
-  // "Answered by" rather than "chosen node": under composition there may be no
-  // single chosen node, and a column that shows only the aggregator would hide
-  // the specialists that did the work.
-  const answeredBy = (d) => {
-    if (d.topology === 'panel' && d.panel && d.panel.length) {
-      const members = d.panel.map(p => `<span class="tag-chip">${escapeHtml(p)}</span>`).join('');
-      const agg = d.aggregator_node_name ? ` → ${escapeHtml(d.aggregator_node_name)}` : '';
-      return members + agg;
-    }
-    return escapeHtml(d.chosen_node_name || '—');
-  };
-
-  const topologyBadge = (d) => {
-    if (d.topology === 'panel') return '<span class="badge good"><span class="dot"></span>panel</span>';
-    if (d.topology === 'degraded') return '<span class="badge warn"><span class="dot"></span>degraded</span>';
-    return '<span class="badge"><span class="dot"></span>single</span>';
-  };
-
-  const verification = (d) => {
-    if (!d.checks_run) return '—';
-    const bits = [`${d.checks_failed || 0}/${d.checks_run}`];
-    if (d.disagreements) bits.push(`${d.disagreements} disputed`);
-    return bits.join(' · ');
-  };
-
-  el.innerHTML = `
-    <table>
-      <thead><tr>
-        <th>Time</th><th>Topology</th><th>Answered by</th><th>Verified</th><th>Latency</th><th>Result</th>
-      </tr></thead>
-      <tbody>
-        ${decisions.map(d => `
-          <tr title="${escapeHtml((d.compose_reason && d.compose_reason.reason) || '')}">
-            <td>${fmtTime(d.created_at)}</td>
-            <td>${topologyBadge(d)}</td>
-            <td>${answeredBy(d)}</td>
-            <td>${verification(d)}</td>
-            <td>${d.latency_ms != null ? d.latency_ms + ' ms' : '—'}</td>
-            <td>${d.ok
-              ? '<span class="badge good"><span class="dot"></span>ok</span>'
-              : '<span class="badge critical"><span class="dot"></span>failed</span>'}</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-    <div class="empty" style="text-align:left; padding-top:12px;">
-      Hover a row to see why it was or wasn't composed. Latency is unadjusted —
-      a panel waits for the slowest specialist and then an aggregator, so it is
-      expected to be slower than a single node.
-    </div>
-  `;
-}
-
-// --- Latency ---------------------------------------------------------------
-// Everything below reads /metrics/summary. The two rules it exists to keep:
-// a null is never rendered as a zero, and a node-reported number never appears
-// without saying so.
+// --- Constants --------------------------------------------------------------
 
 const WINDOW_LABELS = { 1: '1h', 24: '24h', 168: '7d' };
-// Resolution per window, chosen so a bucket is a readable span at each scale
-// rather than a fixed count that turns 7 days into 24 three-hour slabs.
+// Resolution per window, so a bucket is a readable span at each scale.
 const WINDOW_BUCKETS = { 1: 24, 24: 48, 168: 84 };
 const WINDOW_BINS = { 1: 8, 24: 12, 168: 16 };
-let windowHours = 24;
+const REFRESH_MS = 15000;
+const FETCH_MS = 25000;
+// Below this many requests a speed is drawn but dimmed: a median of three
+// requests is an anecdote, and the chart should not look like a measurement.
+const MIN_SAMPLE = 20;
 
-// Fixed slot per phase, not colorFor(). colorFor assigns a hue by first-seen
-// order and is shared with the routing chart, so a phase would change colour
-// when a new node appeared, and two charts would fight over a new node's slot.
-// These three are the same three every render.
+// Fixed per phase, so a phase keeps its colour whatever the data does.
 const PHASE_SERIES = [
   { key: 'route_ms', label: 'Routing (this gateway)', slot: '--s1' },
   { key: 'ttft_ms', label: 'To first token (node)', slot: '--s2' },
   { key: 'generation_ms', label: 'Generation (node)', slot: '--s3' },
 ];
 
-function statTile(label, value, sub) {
-  return `
-    <div class="stat-tile">
-      <div class="label">${label}</div>
-      <div class="value">${value}</div>
-      ${sub ? `<div class="sub">${sub}</div>` : ''}
-    </div>
-  `;
+// --- State ------------------------------------------------------------------
+
+const state = { hours: 24, model: 'all', data: null };
+const tables = {};      // id -> { columns, defaultSort, el, rows, empty }
+const sortState = {};   // id -> { key, dir }
+
+// --- Helpers ----------------------------------------------------------------
+
+const $ = (id) => document.getElementById(id);
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// Milliseconds are the wrong unit at both ends of this distribution. Routing
-// is tens of ms and a cold model load is thousands, and printing "3192 ms" for
-// a figure a reader wants to compare against "1.98 s" elsewhere on the page is
-// how a dashboard makes someone do arithmetic it should have done.
+// Milliseconds are the wrong unit at both ends of this distribution: routing is
+// tens of ms and a cold model load is thousands, so "3192 ms" next to "1.98 s"
+// makes a reader do arithmetic the page should do.
 function fmtMs(v) {
   if (v == null) return '—';
   if (v < 1000) return Math.round(v) + ' ms';
   const s = v / 1000;
   return (s < 10 ? s.toFixed(2) : s.toFixed(1)) + ' s';
 }
+function fmtPct(v) { return v == null ? '—' : Math.round(v * 100) + '%'; }
+function fmtRate(v) { return v == null ? '—' : v.toFixed(1); }
+function fmtTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d) ? '—' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+function fmtBucket(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return '—';
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function windowLabel(hours) { return WINDOW_LABELS[hours] || (hours + 'h'); }
 
-function fmtPct(v) {
-  return v == null ? '—' : Math.round(v * 100) + '%';
+// A node's client string is "common-cli/0.1.6". Anything else is shown as sent.
+function clientLabel(client, version, program) {
+  if (client == null) return 'not reported';
+  return version ? `${program} ${version}` : client;
 }
 
-function fmtRate(v) {
-  return v == null ? '—' : v.toFixed(1);
+function unavailable(what, endpoint) {
+  return `<div class="empty">${esc(what)} is unavailable: ${esc(endpoint)} did not answer.</div>`;
 }
 
-function renderLatency(summary, hours) {
-  const measuredEl = document.getElementById('latency-tiles-measured');
-  const reportedEl = document.getElementById('latency-tiles-reported');
-  const noteEl = document.getElementById('latency-note');
-  const nodeEl = document.getElementById('latency-by-node');
+function tile(label, value, sub) {
+  return `<div class="tile"><div class="label">${label}</div>` +
+    `<div class="value">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+}
 
-  const phasesEl = document.getElementById('latency-phases');
-  const nodeBarsEl = document.getElementById('latency-by-node-bars');
+function twin(summary, body) {
+  return `<details class="twin"><summary>${esc(summary)}</summary><div>${body}</div></details>`;
+}
 
-  // The two chart containers that read from the summary are blanked here too.
-  // The other two are fed by their own endpoints and clear themselves, so a
-  // window with no traffic loses nothing by this.
-  const clear = () => {
-    measuredEl.innerHTML = ''; reportedEl.innerHTML = '';
-    noteEl.innerHTML = ''; nodeEl.innerHTML = '';
-    phasesEl.innerHTML = ''; nodeBarsEl.innerHTML = '';
-  };
+// --- Sortable tables --------------------------------------------------------
+//
+// One mechanism for every sortable table on the page. A column declares its
+// `kind` ('num' | 'text' | 'version'), how to read a sort value, and how to
+// render. Missing values always sort last, in either direction, so a sort never
+// floats a "—" to the top as though it were a result.
 
-  // A dashboard that dies because one endpoint is missing is worse than one
-  // section that says it is missing. This is caught in refresh() and arrives
-  // here as null.
-  if (!summary) {
-    clear();
-    measuredEl.innerHTML = `<div class="empty">
-      Latency metrics are unavailable — /metrics/summary did not answer.
-      If this deployment predates the metrics table, apply migration 012.
-    </div>`;
-    // The heading still says "Where the time goes", so the space below it has
-    // to say why it is empty rather than be a blank card.
-    phasesEl.innerHTML = '<div class="empty">Unavailable without /metrics/summary.</div>';
-    nodeBarsEl.innerHTML = '<div class="empty">Unavailable without /metrics/summary.</div>';
-    return;
+function defineTable(id, columns, defaultSort) {
+  tables[id] = { id, columns, defaultSort, el: null, rows: [], empty: 'Nothing to show.' };
+}
+
+function splitClient(s) {
+  const i = s.indexOf('/');
+  if (i < 0) return [s, []];
+  return [s.slice(0, i), s.slice(i + 1).split('.').map(n => parseInt(n, 10) || 0)];
+}
+
+function compareVersions(a, b) {
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a[i] ?? 0, y = b[i] ?? 0;
+    if (x !== y) return x - y;
   }
+  return 0;
+}
 
-  const T = summary.totals;
-  if (!T.requests) {
-    clear();
-    const none = `No requests in the last ${WINDOW_LABELS[hours] || hours + 'h'}.`;
-    measuredEl.innerHTML = `<div class="empty">${none}</div>`;
-    phasesEl.innerHTML = `<div class="empty">${none}</div>`;
-    nodeBarsEl.innerHTML = `<div class="empty">${none}</div>`;
-    return;
+function compareKind(kind, x, y) {
+  if (kind === 'num') return x - y;
+  if (kind === 'version') {
+    const [pa, va] = splitClient(String(x));
+    const [pb, vb] = splitClient(String(y));
+    if (pa !== pb) return pa.localeCompare(pb);
+    return compareVersions(va, vb);
   }
+  return String(x).localeCompare(String(y), undefined, { numeric: true, sensitivity: 'base' });
+}
 
-  const L = summary.latency_ms;
+function sortRows(id, rows) {
+  const t = tables[id];
+  const st = sortState[id] || t.defaultSort;
+  const col = t.columns.find(c => c.key === st.key) || t.columns[0];
+  const dir = st.dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const x = col.value(a), y = col.value(b);
+    if (x == null || y == null) return (x == null) - (y == null);
+    return dir * compareKind(col.kind, x, y);
+  });
+}
 
-  measuredEl.innerHTML = [
-    statTile('TTFT p50', fmtMs(L.ttft.p50),
-      T.streaming ? `typical · of ${T.streaming} streaming` : 'no streaming requests yet'),
-    statTile('TTFT p95', fmtMs(L.ttft.p95), '1 in 20 slower'),
-    statTile('Total p50', fmtMs(L.total.p50), `typical · all ${T.requests} req`),
-    statTile('Total p95', fmtMs(L.total.p95), '1 in 20 slower'),
-    statTile('Routing p50', fmtMs(L.routing.p50), "this gateway's own share"),
+function drawTable(id) {
+  const t = tables[id];
+  if (!t || !t.el) return;
+  if (!t.rows.length) { t.el.innerHTML = `<div class="empty">${esc(t.empty)}</div>`; return; }
+  const st = sortState[id] || t.defaultSort;
+  const head = t.columns.map(c => {
+    const cls = c.num ? ' class="num"' : '';
+    if (c.sortable === false) return `<th${cls}>${esc(c.label)}</th>`;
+    const active = c.key === st.key;
+    const aria = active ? (st.dir === 'asc' ? 'ascending' : 'descending') : 'none';
+    const arrow = active ? (st.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    return `<th${cls} aria-sort="${aria}"><button type="button" data-table="${id}" data-key="${c.key}">${esc(c.label)}${arrow}</button></th>`;
+  }).join('');
+  const body = sortRows(id, t.rows).map(r =>
+    `<tr>${t.columns.map(c => `<td class="${c.num ? 'num' : ''}${c.wrap ? ' multi' : ''}">${c.render(r)}</td>`).join('')}</tr>`
+  ).join('');
+  t.el.innerHTML = `<div class="scroll"><table class="data"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>` + (t.foot || '');
+}
+
+function mountTable(id, el, rows, opts = {}) {
+  const t = tables[id];
+  t.el = el;
+  t.rows = rows;
+  t.empty = opts.empty || 'Nothing to show.';
+  t.foot = opts.foot || '';
+  drawTable(id);
+}
+
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-table]');
+  if (!btn) return;
+  const id = btn.dataset.table, key = btn.dataset.key;
+  const t = tables[id];
+  if (!t) return;
+  const cur = sortState[id] || t.defaultSort;
+  const col = t.columns.find(c => c.key === key);
+  // Numbers open largest-first and text opens A–Z; a second click flips it.
+  const dir = cur.key === key ? (cur.dir === 'asc' ? 'desc' : 'asc') : (col.kind === 'text' ? 'asc' : 'desc');
+  sortState[id] = { key, dir };
+  drawTable(id);
+});
+
+// --- Stat tiles -------------------------------------------------------------
+
+function renderTiles(d) {
+  const nodes = d.nodes || [];
+  const decisions = d.decisions || [];
+  const healthy = nodes.filter(n => n.healthy).length;
+  const panels = decisions.filter(x => x.topology === 'panel').length;
+  const versions = d.byClient ? d.byClient.versions.filter(v => v.client != null).length : null;
+
+  $('tiles-network').innerHTML = [
+    tile('Nodes online', d.nodes ? `${healthy}<span class="of"> / ${nodes.length}</span>` : '—', 'healthy of registered'),
+    tile('Composed answers', decisions.length ? `${panels}<span class="of"> / ${decisions.length}</span>` : '—', 'panels, last 50 decisions'),
+    tile('Client versions', versions == null ? '—' : versions, 'reporting in this window'),
   ].join('');
 
-  const bits = [];
-  if (T.failed) {
-    bits.push(`${T.failed} of ${T.requests} requests failed in this window.`);
-  }
-  const mode = L.total_by_mode;
-  if (mode.streaming_p50 != null && mode.non_streaming_p50 != null) {
-    bits.push(`Typical total by mode — streaming ${fmtMs(mode.streaming_p50)}, ` +
-              `non-streaming ${fmtMs(mode.non_streaming_p50)}.`);
-  }
-  bits.push('TTFT is the wait for the node\'s first byte, which for a streaming ' +
-            'request is the first token: Ollama sends no response headers until the ' +
-            'model is resident, so a cold node\'s TTFT is mostly a model load, not ' +
-            'routing. Routing above is what this gateway is actually responsible for.');
-  bits.push('A non-streaming request has no observable first token — Ollama ' +
-            'buffers the whole answer and sends headers with it — so its TTFT is ' +
-            'null rather than estimated, and TTFT covers streaming requests only.');
-  noteEl.innerHTML = bits.join(' ');
+  const S = d.summary, T = S && S.totals, L = S && S.latency_ms;
+  const none = !S || !T || !T.requests;
+  const m = (v) => none ? '—' : fmtMs(v);
+  $('tiles-measured').innerHTML = [
+    tile('Requests', none ? (T ? '0' : '—') : T.requests.toLocaleString(),
+      none ? 'no traffic in this window' : `${T.succeeded} succeeded · ${T.failed} failed`),
+    tile('Median answer', m(none ? null : L.total.p50), 'whole answer, all requests'),
+    tile('Slow end (p95)', m(none ? null : L.total.p95), '1 in 20 takes longer'),
+    tile('First token (median)', m(none ? null : L.ttft.p50),
+      none ? '' : (T.streaming ? `of ${T.streaming} streaming requests` : 'no streaming requests')),
+    tile('Routing (median)', m(none ? null : L.routing.p50), 'this gateway’s own share'),
+  ].join('');
 
-  const NR = summary.node_reports;
-  // Today every node sends nothing, so this branch is the live one. It must
-  // read as "not measurable yet", not as "instant".
-  if (!NR.reported) {
-    reportedEl.innerHTML = `<div class="empty">
-      Nothing reported, by design. Model load and generation throughput are only
-      knowable at the node itself, and the worker does not ask for them — it
-      proxies Ollama's OpenAI-compatible endpoint, which returns no durations.
-      They are shown as absent rather than as zero, so that a gap never reads as
-      a fast node. Everything this gateway can measure on its own is in the
-      group above.
-    </div>`;
+  const NR = S && S.node_reports;
+  const nr = NR && NR.reported;
+  $('tiles-reported').innerHTML = [
+    tile('Cold model load', nr && NR.model_load_ms.cold_p50 != null ? fmtMs(NR.model_load_ms.cold_p50) : '—',
+      nr ? `${NR.cold_requests} cold of ${NR.reported} reported` : 'no node sent a load time'),
+    tile('Tokens / second', nr && NR.tokens_per_second.p50 != null ? fmtRate(NR.tokens_per_second.p50) : '—',
+      'generation throughput, median'),
+    tile('Cold share', nr ? fmtPct(NR.cold_fraction) : '—',
+      nr ? `covers ${fmtPct(NR.coverage)} of requests` : 'nothing reported'),
+  ].join('');
+}
+
+// --- Speed by client version ------------------------------------------------
+
+const VERSION_COLUMNS = [
+  { key: 'client', label: 'Version', kind: 'version', value: r => r.client, render: r => esc(r.label) },
+  { key: 'requests', label: 'Requests', kind: 'num', num: true, value: r => r.requests, render: r => r.requests.toLocaleString() },
+  { key: 'nodes', label: 'Nodes', kind: 'num', num: true, value: r => r.nodes, render: r => r.nodes ?? '—' },
+  { key: 'total_p50', label: 'Median', kind: 'num', num: true, value: r => r.total_p50_ms, render: r => fmtMs(r.total_p50_ms) },
+  { key: 'total_p95', label: 'p95', kind: 'num', num: true, value: r => r.total_p95_ms, render: r => fmtMs(r.total_p95_ms) },
+  { key: 'tps', label: 'Tokens/s †', kind: 'num', num: true, value: r => r.tps, render: r => fmtRate(r.tps) },
+  { key: 'models', label: 'Models', sortable: false, wrap: true, render: r => modelMix(r) },
+];
+defineTable('versions', VERSION_COLUMNS, { key: 'client', dir: 'desc' });
+
+// The models a version served, as shares of its requests, largest first.
+function modelMix(r) {
+  if (!r.models || !r.models.length) return '<span class="mut">—</span>';
+  const total = r.models.reduce((a, m) => a + m.requests, 0) || 1;
+  return `<span class="tags">${r.models.map(m =>
+    `<span class="tag">${esc(m.model_name)} ${Math.round(m.requests / total * 100)}%</span>`).join('')}</span>`;
+}
+
+// Rows for the chart and table: the whole network, or one model's requests on
+// each version. A version that never served the chosen model is left out rather
+// than drawn as zero.
+function versionRows(d) {
+  const bc = d.byClient;
+  if (!bc) return [];
+  const rows = [];
+  for (const v of bc.versions) {
+    const label = clientLabel(v.client, v.version, v.program);
+    if (state.model === 'all') {
+      rows.push({
+        client: v.client ?? '', label, requests: v.requests, nodes: v.nodes,
+        total_p50_ms: v.total_p50_ms, total_p95_ms: v.total_p95_ms,
+        tps: v.tokens_per_second_p50, models: v.models,
+      });
+    } else {
+      const m = v.models.find(x => x.model_name === state.model);
+      if (!m) continue;
+      rows.push({
+        client: v.client ?? '', label, requests: m.requests, nodes: null,
+        total_p50_ms: m.total_p50_ms, total_p95_ms: m.total_p95_ms,
+        tps: m.tokens_per_second_p50, models: v.models,
+      });
+    }
+  }
+  return rows;
+}
+
+// Horizontal bars. The scale runs to the largest p95 (or p50) so the tick always
+// fits. A row with no value says so in words rather than drawing an empty bar.
+function hbars(rows, { fill = '', value, scaleOf, fmt, dimmable = false }) {
+  const max = Math.max(0, ...rows.map(scaleOf).filter(v => v != null));
+  if (!rows.length || !(max > 0)) return '<div class="empty">Nothing to draw in this window.</div>';
+  const pct = (v) => (v / max * 100).toFixed(1) + '%';
+  return `<div class="hchart">${rows.map(r => {
+    const v = value(r);
+    if (v == null) {
+      return `<div class="hrow"><div class="lbl">${esc(r.label)}</div>` +
+        `<div class="track"></div><div class="val none">not reported</div></div>`;
+    }
+    const cls = ['fill', fill, dimmable && r.requests < MIN_SAMPLE ? 'small' : ''].filter(Boolean).join(' ');
+    const p95 = r.total_p95_ms != null && dimmable
+      ? `<span class="tick" style="left:${pct(r.total_p95_ms)}" title="p95 ${esc(fmt(r.total_p95_ms))}"></span>` : '';
+    const sub = dimmable ? `${r.requests.toLocaleString()} req${r.requests < MIN_SAMPLE ? ' · too few to read' : ''}` : '';
+    const valText = dimmable && r.total_p95_ms != null
+      ? `${fmt(v)} <span class="mut">· p95 ${fmt(r.total_p95_ms)}</span>`
+      : fmt(v);
+    return `<div class="hrow"><div class="lbl">${esc(r.label)}${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</div>` +
+      `<div class="track"><div class="${cls}" style="width:${pct(v)}"></div>${p95}</div>` +
+      `<div class="val">${valText}</div></div>`;
+  }).join('')}</div>`;
+}
+
+function renderVersions(d) {
+  // The model filter lists every model seen on any version in the window.
+  const sel = $('model-select');
+  const bc = d.byClient;
+  if (bc) {
+    const counts = new Map();
+    for (const v of bc.versions) for (const m of v.models) counts.set(m.model_name, (counts.get(m.model_name) || 0) + m.requests);
+    const models = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a));
+    const html = '<option value="all">All models</option>' + models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+    if (sel.dataset.models !== models.join('|')) {
+      sel.innerHTML = html;
+      sel.dataset.models = models.join('|');
+    }
+    if (state.model !== 'all' && !models.includes(state.model)) state.model = 'all';
+    sel.value = state.model;
+  }
+
+  const rows = sortRows('versions', versionRows(d));
+  const chart = $('version-chart');
+  const tps = $('tps-chart');
+  if (!bc) {
+    chart.innerHTML = unavailable('Speed by version', '/metrics/by_client');
+    tps.innerHTML = '';
+    mountTable('versions', $('version-table'), []);
+    return;
+  }
+  if (!rows.length) {
+    chart.innerHTML = `<div class="empty">No requests from any version in the last ${windowLabel(d.hours)}${state.model === 'all' ? '' : ` for ${esc(state.model)}`}.</div>`;
+    tps.innerHTML = '';
   } else {
-    reportedEl.innerHTML = [
-      statTile('Cold model load p50', fmtMs(NR.model_load_ms.cold_p50),
-        `${NR.cold_requests} cold of ${NR.reported} reported`),
-      statTile('Tokens/sec p50', fmtRate(NR.tokens_per_second.p50),
-        'generation throughput'),
-      statTile('Cold share', fmtPct(NR.cold_fraction),
-        'of requests a node reported on'),
-    ].join('');
-    noteEl.innerHTML += ` Node-reported figures cover ${NR.reported} of ${T.requests} ` +
-      `requests (${fmtPct(NR.coverage)}). Warm model load p50 is ` +
-      `${fmtMs(NR.model_load_ms.warm_p50)} — near zero is correct, since Ollama ` +
-      `keeps the model resident; a warm figure that is not near zero means the ` +
-      `node is timing its keep-alive window rather than a load.`;
+    chart.innerHTML = hbars(rows, {
+      value: r => r.total_p50_ms,
+      scaleOf: r => r.total_p95_ms ?? r.total_p50_ms,
+      fmt: fmtMs, dimmable: true,
+    });
+    tps.innerHTML = hbars(rows, {
+      fill: 'reported', value: r => r.tps,
+      scaleOf: r => r.tps, fmt: fmtRate,
+    });
+  }
+  mountTable('versions', $('version-table'), rows, {
+    empty: `No requests from any version in the last ${windowLabel(d.hours)}.`,
+    foot: `<p class="note">† Tokens per second is reported by the node and unverified. Table order follows the header you click; the charts above follow it too.</p>`,
+  });
+}
+
+// --- Latency ----------------------------------------------------------------
+
+const BY_NODE_COLUMNS = [
+  { key: 'node', label: 'Node', kind: 'text', value: r => r.node_name, render: r => esc(r.node_name) },
+  { key: 'model', label: 'Model', kind: 'text', value: r => r.model_name, render: r => esc(r.model_name || '—') },
+  { key: 'requests', label: 'Requests', kind: 'num', num: true, value: r => r.requests,
+    render: r => `${r.requests}${r.reported ? ` <span class="mut">(${r.reported} rep)</span>` : ''}` },
+  { key: 'ttft50', label: 'First token p50', kind: 'num', num: true, value: r => r.ttft_p50_ms, render: r => fmtMs(r.ttft_p50_ms) },
+  { key: 'ttft95', label: 'First token p95', kind: 'num', num: true, value: r => r.ttft_p95_ms, render: r => fmtMs(r.ttft_p95_ms) },
+  { key: 'total50', label: 'Total p50', kind: 'num', num: true, value: r => r.total_p50_ms, render: r => fmtMs(r.total_p50_ms) },
+  { key: 'route50', label: 'Routing p50', kind: 'num', num: true, value: r => r.route_p50_ms, render: r => fmtMs(r.route_p50_ms) },
+  { key: 'load50', label: 'Cold load p50 †', kind: 'num', num: true, value: r => r.load_p50_ms, render: r => fmtMs(r.load_p50_ms) },
+  { key: 'tps', label: 'Tokens/s †', kind: 'num', num: true, value: r => r.tokens_per_second_p50, render: r => fmtRate(r.tokens_per_second_p50) },
+];
+defineTable('by-node', BY_NODE_COLUMNS, { key: 'requests', dir: 'desc' });
+
+const PHASE_NOTE = '† Reported by the node itself, and unverified. A “—” means the node sent nothing for that column, which is not the same as a fast one.';
+
+function renderLatency(d) {
+  const S = d.summary, T = S && S.totals;
+  const phases = $('latency-phases'), byNode = $('latency-by-node'), note = $('latency-note');
+
+  if (!S) {
+    phases.innerHTML = unavailable('The phase breakdown', '/metrics/summary');
+    byNode.innerHTML = unavailable('By-node timings', '/metrics/summary');
+    note.textContent = '';
+    mountTable('by-node', null, []);
+    renderTimeseries(d);
+    renderDistribution(d);
+    return;
+  }
+  if (!T.requests) {
+    const none = `No requests in the last ${windowLabel(d.hours)}.`;
+    phases.innerHTML = `<div class="empty">${none}</div>`;
+    byNode.innerHTML = `<div class="empty">${none}</div>`;
+    note.textContent = '';
+    mountTable('by-node', null, []);
+    renderTimeseries(d);
+    renderDistribution(d);
+    return;
   }
 
-  renderLatencyByNode(summary);
-  renderPhases(summary);
-  renderLatencyByNodeBars(summary);
+  const bits = [];
+  if (T.failed) bits.push(`${T.failed} of ${T.requests} requests failed in this window.`);
+  const mode = S.latency_ms.total_by_mode;
+  if (mode.streaming_p50 != null && mode.non_streaming_p50 != null) {
+    bits.push(`Typical total: streaming ${fmtMs(mode.streaming_p50)}, non-streaming ${fmtMs(mode.non_streaming_p50)}.`);
+  }
+  bits.push('First token is the wait for the node’s first byte. Ollama sends no headers until the model is in memory, so on a cold node it is mostly a model load, not routing.');
+  const NR = S.node_reports;
+  if (NR.reported) {
+    bits.push(`Node-reported figures cover ${NR.reported} of ${T.requests} requests (${fmtPct(NR.coverage)}). Warm model load of ${fmtMs(NR.model_load_ms.warm_p50)} is correct near zero, since Ollama keeps the model resident.`);
+  }
+  note.textContent = bits.join(' ');
+
+  renderPhases(S);
+  mountTable('by-node', byNode, S.by_node || [], {
+    empty: 'No per-node timings in this window.',
+    foot: `<p class="note">${esc(PHASE_NOTE)}</p>`,
+  });
+  renderTimeseries(d);
+  renderDistribution(d);
 }
 
-// --- The four charts ------------------------------------------------------
-//
-// Each gets a table view as well as a picture. That is not decoration on this
-// page: the file carries no aria attributes at all, so a table is the only way
-// one of these numbers is reachable without a mouse.
-
-function legendHtml(series) {
-  return `<div class="legend">${series.map(s => `
-    <span class="legend-item">
-      <span class="legend-swatch" style="background:var(${s.slot});"></span>${s.label}
-    </span>`).join('')}</div>`;
-}
-
-// One bar per phase, sized by flex-grow off the millisecond value. The label
-// wears a text token, never the series colour -- a coloured mark beside it
-// carries the identity.
+// One bar per phase, sized by flex-grow off the millisecond value. A zero-length
+// phase gets flex-grow 0 and vanishes: routing that took no measurable time is
+// not given a sliver so the bar looks complete.
 function phaseBarHtml(name, req) {
-  const total = req.total_ms || 0;
-  const segs = PHASE_SERIES.map(s => {
-    const ms = req[s.key] || 0;
-    // A zero-length phase gets flex-grow 0 and vanishes. That is the honest
-    // rendering: routing that took no measurable time should not be given a
-    // visible sliver just so the bar looks complete.
-    return `<div class="phase-seg" style="flex:${ms}; background:var(${s.slot});"></div>`;
-  }).join('');
-  const parts = PHASE_SERIES
-    .map(s => `${s.label.split(' (')[0]} ${fmtMs(req[s.key])}`).join(' · ');
-  return `
-    <div class="phase-row">
-      <div class="name">${name}</div>
-      <div class="phase-track">${segs}</div>
-      <div class="total">${fmtMs(total)}</div>
-    </div>
-    <div class="empty" style="text-align:left; padding:0 0 6px 142px; font-size:11px;">${parts}</div>
-  `;
+  const segs = PHASE_SERIES.map(s =>
+    `<div class="phase-seg" style="flex:${req[s.key] || 0}; background:var(${s.slot});"></div>`).join('');
+  const parts = PHASE_SERIES.map(s => `${s.label.split(' (')[0]} ${fmtMs(req[s.key])}`).join(' · ');
+  return `<div class="phase-row"><div class="name">${name}</div>` +
+    `<div class="phase-track">${segs}</div><div class="total">${fmtMs(req.total_ms)}</div></div>` +
+    `<div class="phase-parts">${parts}</div>`;
 }
 
-function renderPhases(summary) {
-  const el = document.getElementById('latency-phases');
-  const P = summary.phases;
-
+function renderPhases(S) {
+  const el = $('latency-phases');
+  const P = S.phases;
   if (!P || !P.median_request) {
-    // Two ways to have nothing to draw, and they are different facts. Say which.
-    el.innerHTML = `<div class="empty">
-      ${P && P.count ? 'No decomposition available.' :
-        'Nothing to decompose yet. A request can only be split into phases if it '
-        + 'streamed — a non-streaming request has no first token to measure from — '
-        + 'and no request in this window did.'}
-    </div>`;
+    el.innerHTML = `<div class="empty">${P && P.count ? 'No decomposition available.' :
+      'Nothing to decompose yet. A request can only be split into phases if it streamed, and no request in this window did.'}</div>`;
     return;
   }
-
-  const rows = [
-    ['Typical request (median)', P.median_request],
-    ['Slow request (p95)', P.p95_request],
-  ].filter(([, r]) => r);
-
+  const rows = [['Typical request (median)', P.median_request], ['Slow request (p95)', P.p95_request]].filter(([, r]) => r);
   el.innerHTML = `
-    ${legendHtml(PHASE_SERIES)}
+    <div class="legend">${PHASE_SERIES.map(s =>
+      `<span class="legend-item"><span class="legend-swatch" style="background:var(${s.slot});"></span>${s.label}</span>`).join('')}</div>
     ${rows.map(([name, r]) => phaseBarHtml(name, r)).join('')}
-    <div class="empty" style="text-align:left; padding-top:14px;">
-      Each bar is <strong>one real request</strong> — the median and the p95th of the
-      ${P.count} request${P.count === 1 ? '' : 's'} in this window that streamed — so its
-      three segments sum exactly to its own total. <span class="mut">The per-phase
-      figures in the table below are percentiled separately, so they come from
-      different requests and do not add up to the total beside them; that is why the
-      bars are built this way.</span>
-    </div>
-    <details class="twin">
-      <summary>Table view — per-phase percentiles (ms)</summary>
-      <div class="twin-body">
-        <table>
-          <thead><tr>
-            <th>Phase</th><th class="num">p50</th><th class="num">p95</th>
-          </tr></thead>
-          <tbody>
-            ${PHASE_SERIES.map(s => `
-              <tr>
-                <td>${s.label}</td>
-                <td class="num">${fmtMs(P[s.key].p50)}</td>
-                <td class="num">${fmtMs(P[s.key].p95)}</td>
-              </tr>`).join('')}
-            <tr>
-              <td class="mut">Total (all three clocks, measured separately)</td>
-              <td class="num">${fmtMs(summary.latency_ms.total.p50)}</td>
-              <td class="num">${fmtMs(summary.latency_ms.total.p95)}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </details>
-  `;
+    <p class="note">Built from ${P.count} streamed request${P.count === 1 ? '' : 's'} in this window. Each bar is a single real request, so its segments sum to its own total.</p>
+    ${twin('Table view — per-phase percentiles', `
+      <div class="scroll"><table class="data">
+        <thead><tr><th>Phase</th><th class="num">p50</th><th class="num">p95</th></tr></thead>
+        <tbody>
+          ${PHASE_SERIES.map(s => `<tr><td>${s.label}</td><td class="num">${fmtMs(P[s.key].p50)}</td><td class="num">${fmtMs(P[s.key].p95)}</td></tr>`).join('')}
+          <tr><td class="mut">Total (measured separately)</td><td class="num">${fmtMs(S.latency_ms.total.p50)}</td><td class="num">${fmtMs(S.latency_ms.total.p95)}</td></tr>
+        </tbody>
+      </table></div>`)}`;
 }
 
-// Bars for the per-node comparison. Single hue on purpose: the row label
-// already carries identity, so a categorical colour per node would encode the
-// same thing twice.
-function renderLatencyByNodeBars(summary) {
-  const el = document.getElementById('latency-by-node-bars');
-  const rows = (summary.by_node || []).filter(r => r.total_p50_ms != null);
-  if (rows.length === 0) {
-    el.innerHTML = '<div class="empty">No per-node timings in this window.</div>';
-    return;
-  }
-  const max = Math.max(...rows.map(r => r.total_p50_ms));
-  el.innerHTML = rows.map(r => `
-    <div class="bar-row">
-      <div class="name">${escapeHtml(r.node_name)}</div>
-      <div class="bar-track">
-        <div class="bar-fill" style="width:${(r.total_p50_ms / max * 100).toFixed(1)}%; background:var(--s1);"></div>
-      </div>
-      <div class="count">${fmtMs(r.total_p50_ms)}</div>
-    </div>
-  `).join('') + `
-    <div class="empty" style="text-align:left; padding-top:12px;">
-      Median total latency per node, scaled to the slowest. The full table below
-      has the percentiles and the reported columns.
-    </div>
-  `;
-}
-
-// A missing value and a genuine zero both render as the gray stub. The
-// difference matters: a zero that falls through to the fill path becomes a
-// *blue* 2px bar flush against its neighbours, and twelve of those fuse into
-// one continuous blue stripe across the histogram that reads as data.
+// Columns, for magnitude at discrete intervals. Empty buckets are drawn, not
+// dropped: closing a gap in traffic into a smooth run would be a lie about it.
 function colChartHtml(values, max) {
   return values.map(v => {
-    if (v == null || !(max > 0) || !(v > 0)) {
-      return '<div class="col"><div class="col-fill stub"></div></div>';
-    }
+    if (v == null || !(max > 0) || !(v > 0)) return '<div class="col"><div class="col-fill stub"></div></div>';
     const pct = Math.max(2, Math.round(v / max * 100));
     return `<div class="col"><div class="col-fill" style="height:${pct}%;"></div></div>`;
   }).join('');
 }
 
-// A single direct label for a chart's extreme value, placed over the column it
-// names. Anchored at that column's centre, flipping to sit inside the chart
-// near either end so it never overflows its card. Returns the span only; the
-// caller supplies the .col-marker row it sits in.
+// One direct label for a chart's extreme value, placed over the column it names
+// and kept inside the chart near either end.
 function peakLabelHtml(idx, n, text) {
   const pct = (idx + 0.5) / n * 100;
   const anchor = pct < 14 ? 0 : pct > 86 ? 100 : 50;
-  return `<span style="left:${pct}%; transform:translateX(-${anchor}%)">` +
-    `${escapeHtml(text)}</span>`;
+  return `<span style="left:${pct}%; transform:translateX(-${anchor}%)">${esc(text)}</span>`;
 }
 
-function renderTimeseries(ts, hours) {
-  const el = document.getElementById('latency-timeseries');
-  if (!ts) {
-    el.innerHTML = '<div class="empty">Latency over time is unavailable — /metrics/timeseries did not answer.</div>';
-    return;
-  }
+function renderTimeseries(d) {
+  const el = $('latency-timeseries');
+  const ts = d.timeseries;
+  if (!ts) { el.innerHTML = unavailable('Latency over time', '/metrics/timeseries'); return; }
   const pts = ts.points || [];
   const values = pts.map(p => p.total_p50_ms);
   const max = values.reduce((a, v) => (v != null && v > a ? v : a), 0);
-
-  if (!(max > 0)) {
-    el.innerHTML = `<div class="empty">No requests in the last
-      ${WINDOW_LABELS[hours] || hours + 'h'}.</div>`;
-    return;
-  }
-
   const withData = pts.filter(p => p.requests > 0);
-  const busiest = withData.reduce((a, p) => (p.total_p50_ms > a.total_p50_ms ? p : a), withData[0]);
-  const busiestIdx = pts.indexOf(busiest);
-
-  el.innerHTML = `
-    <div class="col-marker">${peakLabelHtml(busiestIdx, pts.length,
-      `${fmtBucket(busiest.bucket_start)} was slowest · ${fmtMs(busiest.total_p50_ms)}`)}</div>
-    <div class="col-chart">${colChartHtml(values, max)}</div>
-    <div class="col-axis">
-      <span>−${WINDOW_LABELS[hours] || hours + 'h'}</span>
-      <span>now</span>
-    </div>
-    <div class="empty" style="text-align:left; padding-top:12px;">
-      One column per bucket of ${Math.round(windowHours * 3600 / ts.buckets / 60)} minutes,
-      height is that bucket's median total latency, scaled to ${fmtMs(max)} across the window.
-      ${pts.length - withData.length} of ${pts.length} buckets had no requests at all and are
-      drawn as a flat mark on the baseline — a gap in traffic is a fact about this
-      network, not missing data. A bucket holding one request has a median equal to
-      that request, so read a lone tall column as one slow request rather than as an
-      hour that got worse.
-    </div>
-    <details class="twin">
-      <summary>Table view — ${pts.length} buckets</summary>
-      <div class="twin-body">
-        <table>
-          <thead><tr>
-            <th>Bucket</th><th class="num">Requests</th><th class="num">Total p50</th>
-            <th class="num">Total p95</th><th class="num">TTFT p50</th><th class="num">Routing p50</th>
-          </tr></thead>
-          <tbody>
-            ${pts.map(p => `
-              <tr>
-                <td>${escapeHtml(fmtBucket(p.bucket_start))}</td>
-                <td class="num">${p.requests}</td>
-                <td class="num">${fmtMs(p.total_p50_ms)}</td>
-                <td class="num">${fmtMs(p.total_p95_ms)}</td>
-                <td class="num">${fmtMs(p.ttft_p50_ms)}</td>
-                <td class="num">${fmtMs(p.route_p50_ms)}</td>
-              </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>
-    </details>
-  `;
-}
-
-function fmtBucket(iso) {
-  const d = new Date(iso);
-  if (isNaN(d)) return '—';
-  return d.toLocaleString(undefined,
-    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
-
-function renderDistribution(dist, hours) {
-  const el = document.getElementById('latency-distribution');
-  if (!dist) {
-    el.innerHTML = '<div class="empty">The distribution is unavailable — /metrics/distribution did not answer.</div>';
+  if (!(max > 0) || !withData.length) {
+    el.innerHTML = `<div class="empty">No requests in the last ${windowLabel(d.hours)}.</div>`;
     return;
   }
+  const busiest = withData.reduce((a, p) => (p.total_p50_ms > a.total_p50_ms ? p : a), withData[0]);
+  const minutes = Math.round(d.hours * 3600 / ts.buckets / 60);
+  el.innerHTML = `
+    <div class="col-marker">${peakLabelHtml(pts.indexOf(busiest), pts.length,
+      `slowest ${fmtBucket(busiest.bucket_start)} · ${fmtMs(busiest.total_p50_ms)}`)}</div>
+    <div class="col-chart">${colChartHtml(values, max)}</div>
+    <div class="col-axis"><span>−${windowLabel(d.hours)}</span><span>now</span></div>
+    <p class="note">One column per ${minutes} minutes, height the median total time, scaled to ${fmtMs(max)}. ${pts.length - withData.length} of ${pts.length} buckets had no traffic. A column holding one request is one slow request, not an hour getting worse.</p>
+    ${twin(`Table view — ${pts.length} buckets`, `
+      <div class="scroll"><table class="data">
+        <thead><tr><th>Bucket</th><th class="num">Requests</th><th class="num">Median</th><th class="num">p95</th><th class="num">First token</th><th class="num">Routing</th></tr></thead>
+        <tbody>${pts.map(p => `<tr>
+          <td>${esc(fmtBucket(p.bucket_start))}</td><td class="num">${p.requests}</td>
+          <td class="num">${fmtMs(p.total_p50_ms)}</td><td class="num">${fmtMs(p.total_p95_ms)}</td>
+          <td class="num">${fmtMs(p.ttft_p50_ms)}</td><td class="num">${fmtMs(p.route_p50_ms)}</td></tr>`).join('')}
+        </tbody></table></div>`)}`;
+}
+
+function renderDistribution(d) {
+  const el = $('latency-distribution');
+  const dist = d.distribution;
+  if (!dist) { el.innerHTML = unavailable('The distribution', '/metrics/distribution'); return; }
   const pts = dist.points || [];
+  if (!dist.total || !pts.length) {
+    el.innerHTML = `<div class="empty">No requests in the last ${windowLabel(d.hours)}, so there is no shape to draw.</div>`;
+    return;
+  }
   const counts = pts.map(p => p.requests);
   const max = counts.reduce((a, v) => (v > a ? v : a), 0);
-
-  if (!dist.total) {
-    el.innerHTML = `<div class="empty">No requests in the last
-      ${WINDOW_LABELS[hours] || hours + 'h'}, so there is no shape to draw.</div>`;
-    return;
-  }
-
   const peak = pts.reduce((a, p) => (p.requests > a.requests ? p : a), pts[0]);
   const edges = dist.edge_ms || [];
-
   el.innerHTML = `
-    <div class="col-chart">${colChartHtml(counts, max)}</div>
     <div class="col-marker">${peakLabelHtml(peak.bin - 1, pts.length,
-      `most requests: ${fmtMs(edges[peak.bin - 1])}–${fmtMs(edges[peak.bin])} ` +
-      `(${peak.requests} of ${dist.total})`)}</div>
-    <div class="col-axis">
-      <span>0</span>
-      <span>${fmtMs(dist.hi_ms)}</span>
-    </div>
-    ${dist.sparse ? `
-      <div class="empty" style="text-align:left; padding-top:12px;">
-        <strong>${dist.total} request${dist.total === 1 ? '' : 's'} is too few to read a shape from.</strong>
-        Bars drawn from a handful of requests look exactly like bars drawn from
-        thousands. Treat this as a placeholder that will fill in as traffic arrives —
-        the percentiles above are the figures to quote at this sample size.
-      </div>` : `
-      <div class="empty" style="text-align:left; padding-top:12px;">
-        ${dist.bins} bins spanning 0 to ${fmtMs(dist.hi_ms)}, the slowest request in the
-        window, across ${dist.total} requests. Height is how many requests landed in
-        each range, not how long they took.
-      </div>`}
-    <details class="twin">
-      <summary>Table view — ${dist.bins} bins (ms)</summary>
-      <div class="twin-body">
-        <table>
-          <thead><tr>
-            <th>Range</th><th class="num">Requests</th><th class="num">Range observed</th>
-          </tr></thead>
-          <tbody>
-            ${pts.map(p => `
-              <tr>
-                <td>${fmtMs(edges[p.bin - 1])} – ${fmtMs(edges[p.bin])}</td>
-                <td class="num">${p.requests}</td>
-                <td class="num mut">${p.requests
-                  ? fmtMs(p.min_ms) + ' – ' + fmtMs(p.max_ms) : '—'}</td>
-              </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>
-    </details>
-  `;
+      `most requests: ${fmtMs(edges[peak.bin - 1])}–${fmtMs(edges[peak.bin])} (${peak.requests} of ${dist.total})`)}</div>
+    <div class="col-chart">${colChartHtml(counts, max)}</div>
+    <div class="col-axis"><span>0</span><span>${fmtMs(dist.hi_ms)}</span></div>
+    <p class="note">${dist.sparse
+      ? `${dist.total} request${dist.total === 1 ? '' : 's'} is too few to read a shape from. Treat this as a placeholder; the percentiles are the figures to quote at this sample size.`
+      : `${dist.bins} bins from 0 to the slowest request, ${fmtMs(dist.hi_ms)}. Height is how many requests fell in each range, not how long they took.`}</p>
+    ${twin(`Table view — ${dist.bins} bins`, `
+      <div class="scroll"><table class="data">
+        <thead><tr><th>Range</th><th class="num">Requests</th><th class="num">Observed</th></tr></thead>
+        <tbody>${pts.map(p => `<tr>
+          <td>${fmtMs(edges[p.bin - 1])} – ${fmtMs(edges[p.bin])}</td><td class="num">${p.requests}</td>
+          <td class="num mut">${p.requests ? fmtMs(p.min_ms) + ' – ' + fmtMs(p.max_ms) : '—'}</td></tr>`).join('')}
+        </tbody></table></div>`)}`;
 }
 
-function renderLatencyByNode(summary) {
-  const el = document.getElementById('latency-by-node');
-  const rows = summary.by_node || [];
-  if (rows.length === 0) {
-    el.innerHTML = '<div class="empty">No per-node timings in this window.</div>';
+// --- Nodes, decisions, routing ---------------------------------------------
+
+const NODE_COLUMNS = [
+  { key: 'name', label: 'Name', kind: 'text', value: n => n.name, render: n => `<span title="${esc(n.capability_text)}">${esc(n.name)}</span>` },
+  { key: 'model', label: 'Model', kind: 'text', value: n => n.model_name, render: n => esc(n.model_name) },
+  { key: 'domains', label: 'Domain', kind: 'text', value: n => (n.domain_tags || []).join(', '),
+    render: n => n.domain_tags && n.domain_tags.length
+      ? `<span class="tags">${n.domain_tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</span>`
+      : '<span class="mut">untagged</span>' },
+  { key: 'region', label: 'Region', kind: 'text', value: n => n.region || '', render: n => esc(n.region || '—') },
+  { key: 'cost', label: 'Cost / 1k', kind: 'num', num: true, value: n => n.cost_per_1k, render: n => n.cost_per_1k },
+  { key: 'latency', label: 'Avg latency', kind: 'num', num: true, value: n => n.avg_latency_ms, render: n => `${n.avg_latency_ms} ms` },
+  { key: 'status', label: 'Status', kind: 'text', value: n => (n.healthy ? 'healthy' : 'unhealthy'),
+    render: n => n.healthy
+      ? '<span class="badge good"><span class="dot"></span>healthy</span>'
+      : '<span class="badge critical"><span class="dot"></span>unhealthy</span>' },
+];
+defineTable('nodes', NODE_COLUMNS, { key: 'status', dir: 'asc' });
+
+const DECISION_COLUMNS = [
+  { key: 'time', label: 'Time', kind: 'text', value: d => d.created_at, render: d => fmtTime(d.created_at) },
+  { key: 'topology', label: 'Topology', kind: 'text', value: d => d.topology || 'single', render: d => topologyBadge(d) },
+  { key: 'answered', label: 'Answered by', kind: 'text', sortable: false, wrap: true, render: d => answeredBy(d) },
+  { key: 'verified', label: 'Verified', kind: 'num', num: true, value: d => d.checks_run || null, render: d => verification(d) },
+  { key: 'latency', label: 'Latency', kind: 'num', num: true, value: d => d.latency_ms, render: d => d.latency_ms != null ? d.latency_ms + ' ms' : '—' },
+  { key: 'result', label: 'Result', kind: 'text', value: d => (d.ok ? 'ok' : 'failed'),
+    render: d => d.ok ? '<span class="badge good"><span class="dot"></span>ok</span>'
+      : '<span class="badge critical"><span class="dot"></span>failed</span>' },
+];
+defineTable('decisions', DECISION_COLUMNS, { key: 'time', dir: 'desc' });
+
+function topologyBadge(d) {
+  if (d.topology === 'panel') return '<span class="badge good"><span class="dot"></span>panel</span>';
+  if (d.topology === 'degraded') return '<span class="badge warn"><span class="dot"></span>degraded</span>';
+  return '<span class="badge neutral"><span class="dot"></span>single</span>';
+}
+// "Answered by", not "chosen node": under composition there may be no single
+// chosen node, and a column that shows only the aggregator hides the specialists.
+function answeredBy(d) {
+  if (d.topology === 'panel' && d.panel && d.panel.length) {
+    const members = d.panel.map(p => `<span class="tag">${esc(p)}</span>`).join(' ');
+    return members + (d.aggregator_node_name ? ` → ${esc(d.aggregator_node_name)}` : '');
+  }
+  return esc(d.chosen_node_name || '—');
+}
+function verification(d) {
+  if (!d.checks_run) return '—';
+  const bits = [`${d.checks_failed || 0}/${d.checks_run}`];
+  if (d.disagreements) bits.push(`${d.disagreements} disputed`);
+  return bits.join(' · ');
+}
+
+function renderNodes(d) {
+  const el = $('nodes-table');
+  if (!d.nodes) { el.innerHTML = unavailable('The node list', '/nodes'); return; }
+  mountTable('nodes', el, d.nodes, { empty: 'No nodes registered yet.' });
+}
+
+function renderDecisions(d) {
+  const el = $('decisions-table');
+  if (!d.decisions) { el.innerHTML = unavailable('Recent decisions', '/decisions/recent'); return; }
+  mountTable('decisions', el, d.decisions, {
+    empty: 'No decisions logged yet.',
+    foot: '<p class="note">Hover a row to see why it was or was not composed. Latency is unadjusted: a panel waits for its slowest specialist and then an aggregator, so it is expected to be slower than a single node.</p>',
+  });
+}
+
+function renderRouting(d) {
+  const coverageEl = $('coverage-chart'), routingEl = $('routing-chart');
+  if (!d.nodes || !d.decisions) {
+    coverageEl.innerHTML = unavailable('Domain coverage', '/nodes or /decisions/recent');
+    routingEl.innerHTML = unavailable('Routing', '/nodes or /decisions/recent');
     return;
   }
-  el.innerHTML = `
-    <table>
-      <thead><tr>
-        <th>Node</th><th>Model</th><th class="num">Requests</th>
-        <th class="num">TTFT p50</th><th class="num">TTFT p95</th>
-        <th class="num">Total p50</th><th class="num">Routing p50</th>
-        <th class="num">Cold load p50 †</th><th class="num">Tokens/sec †</th>
-      </tr></thead>
-      <tbody>
-        ${rows.map(r => `
-          <tr>
-            <td>${escapeHtml(r.node_name)}</td>
-            <td>${escapeHtml(r.model_name || '—')}</td>
-            <td class="num">${r.requests}${r.reported ? ` <span class="mut">(${r.reported} rep)</span>` : ''}</td>
-            <td class="num">${fmtMs(r.ttft_p50_ms)}</td>
-            <td class="num">${fmtMs(r.ttft_p95_ms)}</td>
-            <td class="num">${fmtMs(r.total_p50_ms)}</td>
-            <td class="num">${fmtMs(r.route_p50_ms)}</td>
-            <td class="num">${fmtMs(r.load_p50_ms)}</td>
-            <td class="num">${fmtRate(r.tokens_per_second_p50)}</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-    <div class="empty" style="text-align:left; padding-top:12px;">
-      † Reported by the node itself, and unverified. Nodes are strangers' machines
-      on a permissionless registry, and a node that wanted to look fast could send
-      whatever it liked. A "—" means the node sent nothing for that column, which is
-      not the same as a fast one. The other columns are measured here.
-    </div>
-  `;
+  const nodes = d.nodes, decisions = d.decisions;
+
+  // Coverage: demand from decisions against healthy nodes tagged for the domain.
+  const demand = new Map();
+  for (const x of decisions) {
+    if (x.matched_domain) demand.set(x.matched_domain, (demand.get(x.matched_domain) || 0) + 1);
+  }
+  const coverage = new Map();
+  for (const n of nodes) {
+    if (!n.healthy || !n.domain_tags) continue;
+    for (const t of n.domain_tags) coverage.set(t, (coverage.get(t) || 0) + 1);
+  }
+  const domains = [...new Set([...demand.keys(), ...coverage.keys()])].sort();
+  if (!domains.length) {
+    coverageEl.innerHTML = '<div class="empty">No domain-matched decisions yet.</div>';
+  } else {
+    const maxVal = Math.max(1, ...demand.values(), ...coverage.values());
+    coverageEl.innerHTML = domains.map(domain => {
+      const dm = demand.get(domain) || 0, c = coverage.get(domain) || 0;
+      return `<div class="hrow"><div class="lbl" style="text-transform:capitalize;">${esc(domain)}</div>` +
+        `<div class="track" style="display:flex;background:var(--track);">` +
+        `<div style="width:${(c / maxVal * 100).toFixed(1)}%;background:var(--s3);border-radius:4px 0 0 4px;"></div>` +
+        `<div style="width:${(dm / maxVal * 100).toFixed(1)}%;background:var(--s8);opacity:.55;"></div></div>` +
+        `<div class="val">${dm} req · ${c} node${c === 1 ? '' : 's'}</div></div>`;
+    }).join('') + '<p class="note">Green is healthy nodes tagged for the domain; red is requests that asked for it.</p>';
+  }
+
+  // Routed by node: the last 50 decisions, counted per chosen node.
+  const nameById = new Map(nodes.map(n => [n.id, n.name]));
+  const counts = new Map();
+  for (const x of decisions) {
+    if (!x.chosen_node) continue;
+    const name = nameById.get(x.chosen_node) || x.chosen_node_name || 'unknown';
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  if (!counts.size) {
+    routingEl.innerHTML = '<div class="empty">No routed requests yet.</div>';
+    return;
+  }
+  const max = Math.max(...counts.values());
+  routingEl.innerHTML = [...counts.entries()].map(([name, count]) =>
+    `<div class="hrow"><div class="lbl">${esc(name)}</div>` +
+    `<div class="track"><div class="fill" style="width:${(count / max * 100).toFixed(1)}%"></div></div>` +
+    `<div class="val">${count}</div></div>`).join('');
 }
 
-// Refreshes never overlap, and a window change during one is coalesced into a
-// single follow-up. Two reasons this is a guard and not a "newest wins" ticket:
-// with a ticket, a tick that started before a click can resolve after it and
-// repaint the abandoned window; and if a fetch ever takes longer than the 5s
-// interval, every refresh is superseded before it can paint and the dashboard
-// stops updating entirely -- on a dashboard whose subject is 50-second
-// requests, a slow fetch is the normal case, not the edge case.
-let refreshing = false;
-let pending = false;
+function renderCatalogue(catalogue) {
+  const el = $('catalogue-grid');
+  if (!catalogue) { el.innerHTML = unavailable('The catalogue', '/catalogue'); return; }
+  if (!catalogue.length) { el.innerHTML = '<div class="empty">Catalogue is empty.</div>'; return; }
+  el.innerHTML = `<div class="cards">${catalogue.map(m => `
+    <div class="card-mini">
+      <div class="name">${esc(m.display_name)}${m.verified_in_lane ? '<span class="verified">verified in lane</span>' : ''}</div>
+      <div class="tags" style="margin-top:6px;">${(m.domain_tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
+      <div class="meta">${esc(m.capability_text)}</div>
+      <div class="meta">min RAM ${m.min_ram_gb} GB${m.params_b ? ` · ${m.params_b} B params` : ''} · ${esc(m.source)}</div>
+    </div>`).join('')}</div>`;
+}
 
-// A per-request budget. The gateway's own pool gives up at 30s (db.py), so
-// stopping first at 25s means a stuck request fails *this* refresh and the next
-// tick retries, instead of holding `refreshing` true and freezing the page
-// forever. Every request on this deployment has been observed under 3s, so this
-// never fires in normal operation -- it is the backstop for the abnormal one.
-const FETCH_MS = 25000;
-const budget = () => AbortSignal.timeout(FETCH_MS);
+// --- Rendering ---------------------------------------------------------------
+
+function renderAll() {
+  const d = state.data;
+  if (!d) return;
+  document.querySelectorAll('[data-window-label]').forEach(el => { el.textContent = windowLabel(d.hours); });
+  renderTiles(d);
+  renderVersions(d);
+  renderLatency(d);
+  renderNodes(d);
+  renderRouting(d);
+  renderDecisions(d);
+}
+
+// --- Fetching ---------------------------------------------------------------
+//
+// Refreshes never overlap. A click during one is coalesced into a single
+// follow-up. A "newest wins" ticket would let a tick that started before a click
+// repaint the window the reader just left. Each request has its own budget, so a
+// stuck one fails this refresh rather than freezing the page on its last render.
+
+let busy = false;
+let queued = false;
 
 async function refresh() {
-  if (refreshing) { pending = true; return; }
-  refreshing = true;
-  // The window this refresh is fetching, captured once. Captions are written
-  // from this and not from the global, so a click that lands mid-flight cannot
-  // relabel data that is already on its way.
-  const hours = windowHours;
+  if (busy) { queued = true; return; }
+  busy = true;
+  const hours = state.hours;
+  const get = (url) => fetch(url, { signal: AbortSignal.timeout(FETCH_MS) })
+    .then(r => { if (!r.ok) throw new Error(String(r.status)); return r.json(); });
+  const q = `window_hours=${hours}`;
   try {
-    // Two independent groups, settled separately. Previously all six requests
-    // shared one Promise.all and three of them had no catch, so a single slow
-    // node list blanked the latency charts too and kept the page on its last
-    // render permanently. The legacy three stay all-or-nothing *with each
-    // other* -- they are one view of one topology -- but they no longer share a
-    // fate with the charts.
-    const legacy = Promise.all([
-      fetch('/nodes', { signal: budget() }).then(r => r.json()),
-      fetch('/decisions/recent?limit=50', { signal: budget() }).then(r => r.json()),
-      fetch('/catalogue', { signal: budget() }).then(r => r.json()),
-    ]).then(([nodes, decisions, catalogue]) => {
-      renderStats(nodes, decisions);
-      renderNodes(nodes);
-      renderCoverage(nodes, decisions);
-      renderCatalogue(catalogue);
-      renderRoutingChart(nodes, decisions);
-      renderDecisions(decisions);
+    const names = ['nodes', 'decisions', 'summary', 'timeseries', 'distribution', 'byClient'];
+    const results = await Promise.allSettled([
+      get('/nodes'),
+      get('/decisions/recent?limit=50'),
+      get(`/metrics/summary?${q}`),
+      get(`/metrics/timeseries?${q}&buckets=${WINDOW_BUCKETS[hours] || 24}`),
+      get(`/metrics/distribution?${q}&bins=${WINDOW_BINS[hours] || 12}`),
+      get(`/metrics/by_client?${q}`),
+    ]);
+    const data = { hours };
+    const failed = [];
+    results.forEach((r, i) => {
+      data[names[i]] = r.status === 'fulfilled' ? r.value : null;
+      if (r.status === 'rejected') failed.push(names[i]);
     });
-
-    const charts = Promise.all([
-      // Each resolves to null instead of rejecting, so a deployment without the
-      // metrics table loses one section rather than the whole dashboard.
-      fetch('/metrics/summary?window_hours=' + hours, { signal: budget() })
-        .then(r => r.ok ? r.json() : null)
-        .catch(() => null),
-      // Bucket counts vary by window on purpose: 24 columns for an hour of
-      // traffic is a readable column chart, 24 for a week collapses the week
-      // into two-hour blocks that hide the shape it is meant to show.
-      fetch(`/metrics/timeseries?window_hours=${hours}&buckets=${WINDOW_BUCKETS[hours] || 24}`,
-            { signal: budget() })
-        .then(r => r.ok ? r.json() : null)
-        .catch(() => null),
-      fetch(`/metrics/distribution?window_hours=${hours}&bins=${WINDOW_BINS[hours] || 12}`,
-            { signal: budget() })
-        .then(r => r.ok ? r.json() : null)
-        .catch(() => null),
-    ]).then(([summary, timeseries, distribution]) => {
-      renderLatency(summary, hours);
-      renderTimeseries(timeseries, hours);
-      renderDistribution(distribution, hours);
-      // Only now, with the matching numbers in the DOM. The labels name the
-      // window the reader is actually looking at.
-      setWindowLabels(hours);
-    });
-
-    const [legacyResult, chartsResult] = await Promise.allSettled([legacy, charts]);
-    // Say so rather than showing the previous topology as if it were current.
-    const stale = legacyResult.status === 'rejected' || chartsResult.status === 'rejected';
-    document.getElementById('last-updated').textContent = stale
-      ? 'partly stale — retrying…'
-      : 'updated ' + new Date().toLocaleTimeString();
+    state.data = data;
+    renderAll();
+    $('status').textContent = failed.length
+      ? `partly stale · ${failed.length} section${failed.length === 1 ? '' : 's'} unavailable · retrying`
+      : `updated ${new Date().toLocaleTimeString()}`;
   } catch (e) {
-    document.getElementById('last-updated').textContent = 'update failed — retrying…';
+    $('status').textContent = 'update failed · retrying';
   } finally {
-    refreshing = false;
+    busy = false;
   }
-  // A click that landed while we were fetching gets its own pass, with the
-  // window it asked for.
-  if (pending) { pending = false; refresh(); }
+  if (queued) { queued = false; refresh(); }
 }
 
-// The labels name the window the numbers below them belong to, so they are set
-// when the data lands and not when the button is clicked. Setting them on click
-// printed "24h" over charts that were still the 1h render for as long as the
-// fetch took -- and if that fetch then failed, the page kept naming a window it
-// was not showing, which is the one thing a metrics page must not do.
-function setWindowLabels(hours) {
-  const text = WINDOW_LABELS[hours] || hours + 'h';
-  document.querySelectorAll('.js-window-label').forEach(el => { el.textContent = text; });
+// The node catalogue changes rarely, so it is fetched once.
+async function loadCatalogue() {
+  try {
+    const r = await fetch('/catalogue', { signal: AbortSignal.timeout(FETCH_MS) });
+    if (!r.ok) throw new Error(String(r.status));
+    renderCatalogue(await r.json());
+  } catch (e) {
+    renderCatalogue(null);
+  }
 }
 
-document.getElementById('window-switch').addEventListener('click', (e) => {
+// --- Controls ----------------------------------------------------------------
+
+function setWindowButtons() {
+  document.querySelectorAll('#window-switch button')
+    .forEach(b => b.classList.toggle('active', Number(b.dataset.hours) === state.hours));
+}
+
+$('window-switch').addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-hours]');
   if (!btn) return;
-  windowHours = Number(btn.dataset.hours);
-  document.querySelectorAll('#window-switch button')
-    .forEach(b => b.classList.toggle('active', b === btn));
+  state.hours = Number(btn.dataset.hours);
+  setWindowButtons();
   refresh();
 });
 
+$('model-select').addEventListener('change', (e) => {
+  state.model = e.target.value;
+  if (state.data) renderVersions(state.data);
+});
+
+// Polling pauses while the tab is hidden, and catches up the moment it returns.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+setInterval(() => { if (!document.hidden) refresh(); }, REFRESH_MS);
+
+loadCatalogue();
 refresh();
-setInterval(refresh, 5000);
 </script>
 </body>
 </html>
