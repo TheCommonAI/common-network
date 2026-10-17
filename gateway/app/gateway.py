@@ -335,7 +335,7 @@ async def _handle_composed(
         """
         metrics.record_request(
             node_id=node["id"], node_name=node["name"], model_name=node["model_name"],
-            topology=topology, stream=stream, route_ms=route_ms,
+            client=node.get("client"), topology=topology, stream=stream, route_ms=route_ms,
             ttft_ms=ttft_ms, total_ms=total_ms, ok=ok, error=error,
         )
 
@@ -455,6 +455,7 @@ async def _handle_composed(
         "node_id": plan.aggregator["id"],
         "node_name": plan.aggregator["name"],
         "model_name": plan.aggregator["model_name"],
+        "client": plan.aggregator.get("client"),
         "topology": "panel",
         "stream": stream,
         "route_ms": route_ms,
@@ -667,6 +668,7 @@ async def chat_completions(request: Request):
                 "node_id": candidate.node["id"],
                 "node_name": candidate.node["name"],
                 "model_name": candidate.node["model_name"],
+                "client": candidate.node.get("client"),
                 "topology": "single",
                 "stream": stream,
                 "route_ms": route_ms_at_decision,
@@ -762,6 +764,7 @@ async def chat_completions(request: Request):
                     node_id=candidate.node["id"],
                     node_name=candidate.node["name"],
                     model_name=candidate.node["model_name"],
+                    client=candidate.node.get("client"),
                     topology="single",
                     stream=stream,
                     route_ms=route_ms_at_decision,

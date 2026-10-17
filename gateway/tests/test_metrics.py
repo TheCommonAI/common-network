@@ -134,6 +134,8 @@ class Conn:
         self.phases = []
         self.timeseries = []
         self.distribution = []
+        self.versions = []
+        self.by_model = []
         self.queries = []
 
     async def fetchrow(self, sql, *args):
@@ -152,6 +154,11 @@ class Conn:
             return self.distribution
         if 'bucket_start' in sql:
             return self.timeseries
+        # Checked before 'group by client', which is a prefix of it.
+        if 'group by client, model_name' in sql:
+            return self.by_model
+        if 'group by client' in sql:
+            return self.versions
         return self.rows if 'group by' in sql else self.recent
 
 
@@ -278,13 +285,39 @@ class WritePathTests(unittest.IsolatedAsyncioTestCase):
             metrics.record_request(node_name='n', total_ms=5, ttft_ms=4)
             await asyncio.gather(*list(metrics._pending))
         self.assertEqual(len(conn.executed), 1)
-        self.assertEqual(len(conn.executed[0]), 18, 'all columns are bound')
+        self.assertEqual(len(conn.executed[0]), 19, 'all columns are bound')
+
+    async def test_the_client_is_snapshotted_onto_the_row(self):
+        # The node's client string at request time, not a join to nodes later:
+        # an upgraded node's older timings must stay under the older version.
+        class Recording(Conn):
+            def __init__(self):
+                super().__init__()
+                self.executed = []
+
+            async def execute(self, sql, *args):
+                self.executed.append((sql, args))
+                return 'INSERT 0 1'
+
+        conn = Recording()
+        with patch.object(metrics.db, 'pool', return_value=_Pool(conn)):
+            metrics.record_request(node_name='n', client='common-cli/0.1.5', total_ms=5)
+            await asyncio.gather(*list(metrics._pending))
+        sql, args = conn.executed[0]
+        self.assertIn('client)', sql)
+        self.assertEqual(args[-1], 'common-cli/0.1.5')
 
 
 # --- The read path --------------------------------------------------------
 
 class SummaryTests(unittest.IsolatedAsyncioTestCase):
+    # The cache is off so each request reads the rows staged for it.
+    cache_ttl = 0.0
+
     async def asyncSetUp(self):
+        metrics._cache.clear()
+        self.ttl = patch.object(metrics, '_CACHE_TTL_S', self.cache_ttl)
+        self.ttl.start()
         self.conn = Conn()
         self.pool = patch.object(metrics.db, 'pool', return_value=_Pool(self.conn))
         self.pool.start()
@@ -297,6 +330,7 @@ class SummaryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.aclose()
         self.pool.stop()
+        self.ttl.stop()
 
     async def test_window_and_topology_are_bound_never_interpolated(self):
         await self.client.get('/metrics/summary?window_hours=6&topology=panel')
@@ -520,7 +554,14 @@ def ts_row(**overrides):
 class _ReadPathTests(unittest.IsolatedAsyncioTestCase):
     """Shared setup: the router over a canned pool, no database."""
 
+    # Off by default, so a test that stages rows and asks again reads the new
+    # rows. CacheTests turns it back on.
+    cache_ttl = 0.0
+
     async def asyncSetUp(self):
+        metrics._cache.clear()
+        self.ttl = patch.object(metrics, '_CACHE_TTL_S', self.cache_ttl)
+        self.ttl.start()
         self.conn = Conn()
         self.pool = patch.object(metrics.db, 'pool', return_value=_Pool(self.conn))
         self.pool.start()
@@ -533,6 +574,7 @@ class _ReadPathTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.aclose()
         self.pool.stop()
+        self.ttl.stop()
 
 
 class TimeseriesTests(_ReadPathTests):
@@ -658,6 +700,121 @@ class DistributionTests(_ReadPathTests):
             with self.subTest(query=query):
                 r = await self.client.get(f'/metrics/distribution?{query}')
                 self.assertEqual(r.status_code, 422)
+
+
+# --- Speed by client version ----------------------------------------------
+
+class ClientVersionTests(unittest.TestCase):
+    def test_a_client_string_splits_into_program_and_version(self):
+        self.assertEqual(metrics.parse_client('common-cli/0.1.6'), ('common-cli', '0.1.6'))
+        self.assertEqual(metrics.parse_client('common-desktop/0.1.0'), ('common-desktop', '0.1.0'))
+
+    def test_a_string_that_is_not_name_slash_version_is_kept_whole(self):
+        # The string is self-reported. Anything that does not parse is shown as
+        # it was sent, with no version invented for it.
+        for raw in ('curl/8.4.0', 'common-cli', 'common-cli/latest', 'common-cli/', '/0.1.0'):
+            with self.subTest(raw=raw):
+                program, version = metrics.parse_client(raw)
+                if version is None:
+                    self.assertEqual(program, raw)
+
+    def test_missing_client_is_none_not_a_label(self):
+        self.assertEqual(metrics.parse_client(None), (None, None))
+        self.assertEqual(metrics.parse_client(''), (None, None))
+
+    def test_versions_compare_numerically(self):
+        # Lexically, '0.1.10' sorts before '0.1.9'. The release after 0.1.9 must not.
+        self.assertGreater(metrics.version_key('0.1.10'), metrics.version_key('0.1.9'))
+        self.assertLess(metrics.version_key(None), metrics.version_key('0.0.1'))
+
+
+class ByClientTests(_ReadPathTests):
+    @staticmethod
+    def _version(client, requests, total_p50, **extra):
+        row = {'client': client, 'nodes': 1, 'requests': requests, 'succeeded': requests,
+               'reported': 0, 'total_p50': total_p50, 'total_p95': total_p50 * 2,
+               'ttft_p50': None, 'route_p50': 10.0, 'tps_p50': None}
+        row.update(extra)
+        return row
+
+    async def test_newest_version_leads_within_a_program(self):
+        self.conn.versions = [
+            self._version('common-cli/0.1.9', 5, 900.0),
+            self._version('common-cli/0.1.10', 5, 800.0),
+            self._version('common-desktop/0.1.0', 5, 700.0),
+        ]
+        body = (await self.client.get('/metrics/by_client')).json()
+        self.assertEqual([v['client'] for v in body['versions']], [
+            'common-cli/0.1.10', 'common-cli/0.1.9', 'common-desktop/0.1.0'])
+
+    async def test_a_version_without_a_client_string_sorts_after_the_known_ones(self):
+        self.conn.versions = [self._version(None, 3, 500.0), self._version('common-cli/0.1.0', 3, 400.0)]
+        body = (await self.client.get('/metrics/by_client')).json()
+        self.assertEqual([v['client'] for v in body['versions']], ['common-cli/0.1.0', None])
+        self.assertIsNone(body['versions'][1]['program'])
+
+    async def test_each_version_carries_the_model_mix_behind_it(self):
+        self.conn.versions = [self._version('common-cli/0.1.6', 10, 1200.0)]
+        self.conn.by_model = [
+            {'client': 'common-cli/0.1.6', 'model_name': 'bonsai2-4b', 'requests': 8,
+             'total_p50': 1000.0, 'total_p95': 1900.0, 'ttft_p50': None, 'tps_p50': 31.5},
+            {'client': 'common-cli/0.1.6', 'model_name': 'bonsai-8b', 'requests': 2,
+             'total_p50': 2400.0, 'total_p95': 2500.0, 'ttft_p50': None, 'tps_p50': None},
+        ]
+        body = (await self.client.get('/metrics/by_client')).json()
+        models = body['versions'][0]['models']
+        self.assertEqual([m['model_name'] for m in models], ['bonsai2-4b', 'bonsai-8b'])
+        self.assertEqual(models[0]['requests'], 8)
+        self.assertEqual(models[0]['total_p95_ms'], 1900.0)
+        self.assertIsNone(models[1]['tokens_per_second_p50'])
+
+    async def test_a_version_with_no_reports_says_so_rather_than_zero(self):
+        self.conn.versions = [self._version('common-cli/0.1.6', 4, 900.0, reported=0,
+                                            tps_p50=None)]
+        body = (await self.client.get('/metrics/by_client')).json()
+        self.assertEqual(body['versions'][0]['reported'], 0)
+        self.assertIsNone(body['versions'][0]['tokens_per_second_p50'])
+
+    async def test_the_window_is_bound_as_a_parameter_not_interpolated(self):
+        await self.client.get('/metrics/by_client?window_hours=168')
+        sql, args = next(q for q in self.conn.queries if 'group by client' in q[0])
+        self.assertIn('make_interval(hours => $1::int)', sql)
+        self.assertEqual(args, [168])
+
+    async def test_the_window_is_validated(self):
+        for query in ('window_hours=0', 'window_hours=8761', 'window_hours=soon'):
+            with self.subTest(query=query):
+                r = await self.client.get(f'/metrics/by_client?{query}')
+                self.assertEqual(r.status_code, 422)
+
+
+class CacheTests(_ReadPathTests):
+    cache_ttl = 15.0
+
+    async def test_a_second_poll_inside_the_ttl_does_not_query_again(self):
+        await self.client.get('/metrics/by_client?window_hours=24')
+        await self.client.get('/metrics/by_client?window_hours=24')
+        self.assertEqual(sum('group by client' in q[0] for q in self.conn.queries), 2,
+                         'one version query and one model query, once, not twice')
+
+    async def test_a_different_window_is_a_different_entry(self):
+        await self.client.get('/metrics/by_client?window_hours=1')
+        await self.client.get('/metrics/by_client?window_hours=24')
+        self.assertEqual(sum('group by client' in q[0] for q in self.conn.queries), 4)
+
+    async def test_an_expired_entry_is_recomputed(self):
+        await self.client.get('/metrics/by_client?window_hours=24')
+        key = ('by_client', 24)
+        stamp, value = metrics._cache[key]
+        metrics._cache[key] = (stamp - metrics._CACHE_TTL_S - 1, value)
+        await self.client.get('/metrics/by_client?window_hours=24')
+        self.assertEqual(sum('group by client' in q[0] for q in self.conn.queries), 4)
+
+    async def test_the_summary_is_cached_as_well(self):
+        await self.client.get('/metrics/summary?window_hours=24')
+        await self.client.get('/metrics/summary?window_hours=24')
+        self.assertEqual(sum('created_at' in q[0] and 'phase_count' in q[0]
+                             for q in self.conn.queries), 1)
 
 
 if __name__ == '__main__':

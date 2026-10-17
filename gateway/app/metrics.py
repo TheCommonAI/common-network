@@ -28,6 +28,8 @@ says where it came from.
 from __future__ import annotations
 
 import asyncio
+import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -187,9 +189,9 @@ async def _record(row: dict[str, Any]) -> None:
                      route_ms, ttft_ms, total_ms,
                      node_reported, load_ms, prompt_eval_ms, eval_ms,
                      prompt_tokens, prompt_cached_tokens, completion_tokens, cold,
-                     ok, error)
+                     ok, error, client)
                 values ($1, $2, $3, $4, $5, $6, $7, $8,
-                        $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                        $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                 """,
                 row.get("node_id"),
                 row.get("node_name"),
@@ -209,6 +211,7 @@ async def _record(row: dict[str, Any]) -> None:
                 row.get("cold"),
                 bool(row.get("ok", True)),
                 (row.get("error") or None) and str(row["error"])[:200],
+                row.get("client") or None,
             )
     except Exception as exc:  # noqa: BLE001 -- see docstring
         print(f"metrics: could not record request metrics "
@@ -281,6 +284,36 @@ _LATENCY_KEYS = {
 }
 
 
+# --- Short-lived cache ------------------------------------------------------
+#
+# The dashboard polls these endpoints, and every viewer's tab polls them
+# independently. Each summary is a dozen percentile sorts over the whole window,
+# so without a cache the cost of the page grows with the number of people
+# looking at it. A short shared cache makes it one query per window per
+# interval. Fifteen seconds is well inside the cadence a reader can tell apart
+# from live, and the response carries its own `generated_at` so the age is
+# visible rather than hidden.
+_CACHE_TTL_S = 15.0
+_cache: dict[tuple, tuple[float, Any]] = {}
+
+
+def _cache_get(key: tuple) -> Any | None:
+    hit = _cache.get(key)
+    if hit and time.monotonic() - hit[0] < _CACHE_TTL_S:
+        return hit[1]
+    return None
+
+
+def _cache_put(key: tuple, value: Any) -> None:
+    now = time.monotonic()
+    _cache[key] = (now, value)
+    # Keys are bounded by the window and bucket parameters, but a caller can
+    # vary them freely, so stale entries are dropped rather than left to grow.
+    if len(_cache) > 256:
+        for k in [k for k, (t, _) in _cache.items() if now - t >= _CACHE_TTL_S]:
+            del _cache[k]
+
+
 @router.get("/metrics/summary")
 async def metrics_summary(
     window_hours: int = Query(default=24, ge=1, le=8760),
@@ -309,6 +342,10 @@ async def metrics_summary(
     reported on. It is returned rather than implied so that a summary showing
     model load for 3% of traffic cannot be read as covering all of it.
     """
+    key = ("summary", window_hours, topology)
+    if (hit := _cache_get(key)) is not None:
+        return JSONResponse(hit)
+
     where = ["created_at > now() - make_interval(hours => $1::int)"]
     args: list[Any] = [window_hours]
     if topology:
@@ -487,7 +524,7 @@ async def metrics_summary(
     warm_count = int(row["warm_count"] or 0)
     stream_count = int(row["streaming"] or 0)
 
-    return JSONResponse({
+    payload = {
         "window_hours": window_hours,
         "topology_filter": topology,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -594,7 +631,9 @@ async def metrics_summary(
             "having finished before the node is called, so route_ms exceeding "
             "ttft_ms is possible and is not a measurement error."
         ),
-    })
+    }
+    _cache_put(key, payload)
+    return JSONResponse(payload)
 
 
 @router.get("/metrics/timeseries")
@@ -627,6 +666,10 @@ async def metrics_timeseries(
     picks the resolution: 24 buckets over an hour is 2.5 minutes each, over a
     month it is a day and a bit.
     """
+    key = ("timeseries", window_hours, buckets, topology)
+    if (hit := _cache_get(key)) is not None:
+        return JSONResponse(hit)
+
     async with db.pool().acquire() as conn:
         rows = await conn.fetch(
             """
@@ -670,7 +713,7 @@ async def metrics_timeseries(
             window_hours, buckets, topology,
         )
 
-    return JSONResponse({
+    payload = {
         "window_hours": window_hours,
         "buckets": buckets,
         "topology_filter": topology,
@@ -695,7 +738,9 @@ async def metrics_timeseries(
             "is over that bucket alone, so a bucket with one request has a p95 "
             "equal to that request."
         ),
-    })
+    }
+    _cache_put(key, payload)
+    return JSONResponse(payload)
 
 
 @router.get("/metrics/distribution")
@@ -722,6 +767,10 @@ async def metrics_distribution(
     rendering of that is a different one -- so the threshold lives here, with the
     data, instead of in every consumer.
     """
+    key = ("distribution", window_hours, bins, topology)
+    if (hit := _cache_get(key)) is not None:
+        return JSONResponse(hit)
+
     async with db.pool().acquire() as conn:
         rows = await conn.fetch(
             """
@@ -767,7 +816,7 @@ async def metrics_distribution(
     # Chosen rather than derived: it is a rendering decision, not a statistic.
     min_for_shape = 20
 
-    return JSONResponse({
+    payload = {
         "window_hours": window_hours,
         "bins": bins,
         "topology_filter": topology,
@@ -795,7 +844,9 @@ async def metrics_distribution(
             "calls but not between different windows. When `sparse` is true there "
             "are too few requests for the shape to mean anything."
         ),
-    })
+    }
+    _cache_put(key, payload)
+    return JSONResponse(payload)
 
 
 @router.get("/metrics/recent")
@@ -856,3 +907,146 @@ async def metrics_recent(
             "error": r["error"],
         })
     return out
+
+
+# --- Speed by client version -----------------------------------------------
+#
+# A node's client string is `common-cli/0.1.6` or `common-desktop/0.1.0`, and
+# it is self-reported. So it is parsed defensively: anything that does not look
+# like `name/x.y.z` is kept whole and sorts last, rather than being rejected or
+# coerced into a version it never claimed.
+
+_VERSION_RE = re.compile(r"^(\d+(?:\.\d+)*)")
+
+
+def parse_client(raw: str | None) -> tuple[str | None, str | None]:
+    """`common-cli/0.1.6` -> ('common-cli', '0.1.6'). Unparseable -> (raw, None)."""
+    if not raw:
+        return None, None
+    program, sep, version = raw.partition("/")
+    match = _VERSION_RE.match(version) if sep else None
+    if not program or match is None:
+        return raw, None
+    return program, match.group(1)
+
+
+def version_key(version: str | None) -> tuple[int, ...]:
+    """Numeric so 0.1.10 sorts after 0.1.9. Unknown versions sort lowest."""
+    if version is None:
+        return ()
+    return tuple(int(part) for part in version.split("."))
+
+
+@router.get("/metrics/by_client")
+async def metrics_by_client(
+    window_hours: int = Query(default=24, ge=1, le=8760),
+):
+    """Latency and throughput per client version, with the model mix behind each.
+
+    Speed is only comparable within a model, and a version's median can move
+    because its nodes happened to be assigned a bigger model. So the response
+    carries `models` beside each version, and `by_model` gives the same figures
+    split by model for anyone who wants the like-for-like comparison.
+
+    `total_p50_ms` is measured here. `tokens_per_second_p50` is node-reported
+    and unverified, and `reported` says how many requests it rests on.
+    """
+    key = ("by_client", window_hours)
+    if (hit := _cache_get(key)) is not None:
+        return JSONResponse(hit)
+
+    window = "created_at > now() - make_interval(hours => $1::int)"
+    async with db.pool().acquire() as conn:
+        versions = await conn.fetch(
+            f"""
+            select client,
+                   count(distinct node_name)                             as nodes,
+                   count(*)                                              as requests,
+                   count(*) filter (where ok)                            as succeeded,
+                   count(*) filter (where node_reported)                 as reported,
+                   percentile_cont(0.5)  within group (order by total_ms) as total_p50,
+                   percentile_cont(0.95) within group (order by total_ms) as total_p95,
+                   percentile_cont(0.5)  within group (order by ttft_ms)  as ttft_p50,
+                   percentile_cont(0.5)  within group (order by route_ms) as route_p50,
+                   percentile_cont(0.5)  within group (order by
+                     case when eval_ms > 0
+                          then completion_tokens::numeric * 1000 / eval_ms end) as tps_p50
+            from request_metrics
+            where {window}
+            group by client
+            """,
+            window_hours,
+        )
+        by_model = await conn.fetch(
+            f"""
+            select client,
+                   model_name,
+                   count(*)                                              as requests,
+                   percentile_cont(0.5)  within group (order by total_ms) as total_p50,
+                   percentile_cont(0.95) within group (order by total_ms) as total_p95,
+                   percentile_cont(0.5)  within group (order by ttft_ms)  as ttft_p50,
+                   percentile_cont(0.5)  within group (order by
+                     case when eval_ms > 0
+                          then completion_tokens::numeric * 1000 / eval_ms end) as tps_p50
+            from request_metrics
+            where {window}
+            group by client, model_name
+            order by count(*) desc
+            limit 1000
+            """,
+            window_hours,
+        )
+
+    models: dict[str | None, list[dict[str, Any]]] = {}
+    for r in by_model:
+        models.setdefault(r["client"], []).append({
+            "model_name": r["model_name"],
+            "requests": int(r["requests"]),
+            "total_p50_ms": _num(r["total_p50"], float),
+            "total_p95_ms": _num(r["total_p95"], float),
+            "ttft_p50_ms": _num(r["ttft_p50"], float),
+            "tokens_per_second_p50": _num(r["tps_p50"], float),
+        })
+
+    rows = []
+    for r in versions:
+        program, version = parse_client(r["client"])
+        requests = int(r["requests"])
+        rows.append({
+            "client": r["client"],
+            "program": program,
+            "version": version,
+            "nodes": int(r["nodes"]),
+            "requests": requests,
+            "succeeded": int(r["succeeded"]),
+            "reported": int(r["reported"]),
+            "total_p50_ms": _num(r["total_p50"], float),
+            "total_p95_ms": _num(r["total_p95"], float),
+            "ttft_p50_ms": _num(r["ttft_p50"], float),
+            "route_p50_ms": _num(r["route_p50"], float),
+            "tokens_per_second_p50": _num(r["tps_p50"], float),
+            "models": models.get(r["client"], []),
+        })
+    # Program then version, newest first within a program. A reader scanning
+    # the list sees the latest release at the top without having to sort.
+    rows.sort(key=lambda x: (
+        x["program"] or "~",
+        x["version"] is None,
+        tuple(-p for p in version_key(x["version"])),
+    ))
+
+    payload = {
+        "window_hours": window_hours,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "versions": rows,
+        "caveat": (
+            "total_p50_ms and total_p95_ms are measured by this gateway, for every "
+            "request including failures. Compare versions within a model: the "
+            "models column shows what each version was serving. "
+            "tokens_per_second_p50 is reported by the node and unverified; "
+            "reported says how many requests it rests on. A null client means the "
+            "node did not say which program it was running."
+        ),
+    }
+    _cache_put(key, payload)
+    return JSONResponse(payload)
