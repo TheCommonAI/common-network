@@ -1,8 +1,8 @@
+import asyncio
 import ipaddress
 import logging
 import secrets
 import socket
-import time
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -18,15 +18,27 @@ logger = logging.getLogger(__name__)
 
 # --- Endpoint validation ---------------------------------------------------
 
-def _resolve_once(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address] | None:
-    """Single DNS resolution attempt; returns None on failure."""
+async def _resolve_once(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address] | None:
+    """Single DNS resolution attempt; returns None on failure.
+
+    Runs in the loop's default executor, not inline. A `getaddrinfo` call is a
+    blocking syscall: for a host that does not resolve it holds the thread for
+    however long the resolver takes to give up, which on this gateway is long
+    enough to be visible. Called inline it holds *the event loop* for the same
+    stretch — and the loop is shared by every concurrent request including
+    /health. See `_resolved_addresses` for what that cost.
+    """
+    loop = asyncio.get_running_loop()
     try:
-        return [ipaddress.ip_address(info[4][0]) for info in socket.getaddrinfo(host, None)]
+        infos = await loop.getaddrinfo(host, None)
     except socket.gaierror:
         return None
+    return [ipaddress.ip_address(info[4][0]) for info in infos]
 
 
-def _resolved_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+async def _resolved_addresses(
+    host: str, *, wait_seconds: float | None = None
+) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     """Every address the endpoint host could resolve to.
 
     Literal IPs parse directly; hostnames are resolved now, at registration
@@ -39,19 +51,34 @@ def _resolved_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv
     NXDOMAIN for a brief window after the tunnel comes up — Railway's
     resolvers and other cloud DNS caches may lag behind public DNS. Retrying
     lets the propagation settle rather than rejecting a healthy tunnel.
+
+    `wait_seconds` bounds that retry window; None means the configured
+    registration-time tolerance. Pass 0 for a single attempt.
+
+    **The retry burst is a registration-moment need and nothing else.** This
+    ran with it everywhere at first, including from the health checker's pass
+    over every registered node every 30s — and there it was not a tolerance
+    but a stall. `time.sleep` does not yield: an unresolvable node parked the
+    *whole event loop*, once per non-resolving node, for up to
+    `dns_resolve_max_backoff_seconds` at a time. With 23 rows, 21 of them
+    dead, that is minutes of every request in the process sitting behind
+    DNS for hosts that were never going to resolve. Both halves are fixed —
+    the sleep yields now, and the health path asks for a single attempt.
     """
     try:
         return [ipaddress.ip_address(host)]
     except ValueError:
         pass
 
-    addrs = _resolve_once(host)
+    addrs = await _resolve_once(host)
     if addrs is not None:
         return addrs
 
+    max_wait = (
+        settings.dns_resolve_max_wait_seconds if wait_seconds is None else wait_seconds
+    )
     backoff = settings.dns_resolve_initial_backoff_seconds
     max_backoff = settings.dns_resolve_max_backoff_seconds
-    max_wait = settings.dns_resolve_max_wait_seconds
     elapsed = 0.0
 
     while elapsed < max_wait:
@@ -60,10 +87,10 @@ def _resolved_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv
             "DNS resolution failed for '%s', retrying in %.1fs (elapsed %.1fs / %.1fs)",
             host, sleep_time, elapsed, max_wait,
         )
-        time.sleep(sleep_time)
+        await asyncio.sleep(sleep_time)
         elapsed += sleep_time
 
-        addrs = _resolve_once(host)
+        addrs = await _resolve_once(host)
         if addrs is not None:
             logger.info("DNS resolution succeeded for '%s' after %.1fs", host, elapsed)
             return addrs
@@ -78,7 +105,7 @@ def _resolved_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv
     )
 
 
-def validate_endpoint_url(url: str) -> None:
+async def validate_endpoint_url(url: str, *, wait_seconds: float | None = None) -> None:
     """A node's endpoint_url is where the gateway POSTs request bodies, and it
     is chosen by an unauthenticated stranger — registration is permissionless,
     which is the network's thesis. Left unvalidated it makes the gateway a
@@ -98,6 +125,10 @@ def validate_endpoint_url(url: str) -> None:
     same-machine dev both register `localhost:11434`, so the default keeps
     those working. A *publicly reachable* gateway should set it to false in
     its environment; see SECURITY.md.
+
+    `wait_seconds` is passed through to `_resolved_addresses`; registration
+    leaves it at the configured tolerance, and the periodic health check
+    passes 0 so its pass over every node cannot inherit a retry burst.
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -105,7 +136,7 @@ def validate_endpoint_url(url: str) -> None:
             status_code=400,
             detail="endpoint_url must be an http:// or https:// URL the gateway can POST to.",
         )
-    for addr in _resolved_addresses(parsed.hostname):
+    for addr in await _resolved_addresses(parsed.hostname, wait_seconds=wait_seconds):
         if addr.is_link_local:
             raise HTTPException(
                 status_code=400,
@@ -191,7 +222,11 @@ async def register_node(
       migration, which nobody holds a token for. First re-registration
       claims it and is issued a fresh token.
     """
-    validate_endpoint_url(node.endpoint_url)
+    # Registration is the one place the retry burst belongs: a contributor
+    # that just opened a fresh quick tunnel may be registering a hostname
+    # whose DNS has not propagated yet, and rejecting them there costs them
+    # the whole join. Defaults to the configured window.
+    await validate_endpoint_url(node.endpoint_url)
     vec = embedder.embed(node.capability_text)
 
     # Body field first, X-Common-Client header second. The desktop app sends
