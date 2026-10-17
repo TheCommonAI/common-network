@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join the Common Network as a node operator.
 
-The Common Network Alpha (v0.1.9).
+The Common Network Alpha (v0.1.10).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -129,7 +129,7 @@ TUNNEL_RATE_LIMITED_PATTERN = re.compile(r"\b1015\b|\b429\b|too many requests", 
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.1.9"
+VERSION = "0.1.10"
 RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
@@ -1132,6 +1132,15 @@ TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS = 120  # quick tunnels can silently reconne
 # This timeout must exceed that window, otherwise the client aborts mid-retry.
 REGISTRATION_TIMEOUT = 90  # seconds — comfortably above gateway's 30s DNS retry
 
+# How a re-announce is retried once the gateway's copy of our address has gone
+# stale. Short and bounded, unlike the initial registration's 60s, because this
+# runs on the serving loop -- the same loop that notices a dead tunnel or a
+# dead model, and that must not sit in a retry while it does. Giving up here is
+# safe in a way it is not there: the disagreement this exists to fix outlives
+# the attempt, so the next pass simply tries again.
+REANNOUNCE_ATTEMPTS = 3
+REANNOUNCE_BACKOFF_SECONDS = 2
+
 
 def tunnel_is_healthy(tunnel_url: str, worker_token: str) -> bool:
     """Is the tunnel still carrying traffic to our worker?
@@ -1181,6 +1190,68 @@ def wait_for_tunnel(tunnel_url: str, worker_token: str) -> bool:
             working(f"waiting for tunnel to become reachable (up to {TUNNEL_WARMUP_TIMEOUT_SECONDS}s)...")
         time.sleep(wait)
     return False
+
+
+def reannounce_target(tunnel_url: str, registered_url: str | None) -> str | None:
+    """The address the gateway should have for us, or None if it already has it.
+
+    A serving node has two addresses and they can disagree: the one it is
+    answering on, and the one the gateway has on file. Only the first is
+    anything this process can check from here -- which is the whole reason a
+    node can sit for hours looking perfectly fine locally while every request
+    the network sends it goes nowhere. A health check cannot see this
+    disagreement, because the tunnel really is healthy; what is stale is the
+    gateway's copy of where it points.
+
+    Both kinds of address land here, because both move for reasons the far end
+    cannot observe: a quick tunnel rotates its hostname without the cloudflared
+    process dying, and a DHCP lease renewal reassigns a LAN address.
+    """
+    wanted = f"{tunnel_url}/v1"
+    return None if wanted == registered_url else wanted
+
+
+def reannounce(gateway: str, payload: dict, node_token: str, wanted: str,
+               attempts: int = REANNOUNCE_ATTEMPTS,
+               backoff: float = REANNOUNCE_BACKOFF_SECONDS,
+               poster=None) -> tuple[dict | None, str | None]:
+    """Tell the gateway where we are now, retrying a bounded number of times.
+
+    Returns `(node, None)` on success, `(None, detail)` once every attempt has
+    failed -- and a failure here is deliberately not fatal. This is the one
+    case in this file where giving up is right: the disagreement this exists to
+    fix is still true after a failed attempt, so the caller retries on its next
+    pass rather than dying.
+
+    That shape is the fix for a real outage. The code here used to try exactly
+    once and then forget, while mutating the payload as if it had succeeded --
+    so after a rotation the node stayed registered against a hostname that no
+    longer existed, answering every heartbeat, until it was restarted by hand.
+    The retry is not a nicety: a restarted quick tunnel is NXDOMAIN for a while,
+    and the first attempt lands squarely in that window, so one retry is often
+    the difference between re-announcing and never re-announcing at all.
+
+    `poster` is injectable so the retry can be exercised without a gateway.
+    """
+    post = poster or http_json
+    # A copy: a failed attempt must leave `payload` -- and with it the address
+    # the rest of the loop believes the gateway holds -- exactly as it was.
+    body = dict(payload, endpoint_url=wanted)
+    detail = None
+    tries = max(1, attempts)
+    for attempt in range(tries):
+        try:
+            node = post("POST", f"{gateway}/nodes", body=body,
+                        headers=gateway_headers({"X-Common-Node-Token": node_token}),
+                        timeout=REGISTRATION_TIMEOUT)
+            return node, None
+        except urllib.error.HTTPError as e:
+            detail = f"{e.code} {e.read().decode(errors='ignore').strip()}"
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+            detail = str(getattr(e, "reason", e))
+        if attempt + 1 < tries:
+            time.sleep(backoff * (2 ** attempt))
+    return None, detail
 
 
 def lan_ip() -> str | None:
@@ -1762,6 +1833,12 @@ def main() -> None:
 
     node_id = node["id"]
     node_token = node["node_token"]
+    # What the gateway has just been told, remembered for the life of this
+    # process. Every change to where this machine answers has to be reconciled
+    # against it -- see `reannounce_target` -- and it only ever moves once the
+    # gateway has confirmed the new address, never when a request to say so
+    # failed.
+    registered_url = payload["endpoint_url"]
     print(f"{GLYPH_DONE} {blue('you are live', bold=True)} · node id: {node_id}")
     print(comment("keep this window open to stay in the network — ctrl+c to leave."))
 
@@ -1804,46 +1881,53 @@ def main() -> None:
                   f"— code {llama_proc.returncode}. Leaving the network; restart to rejoin.")
             cleanup()
 
-        # A LAN node has no tunnel to rotate or restart, but its address can
-        # still change under it -- DHCP renewal on a school network reassigns
-        # addresses routinely, and a node registered at a stale IP is a node
-        # the gateway will mark unhealthy for reasons nobody can see.
-        if tunnel_proc is None and time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
+        if time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
             last_tunnel_check = time.monotonic()
-            current = lan_ip()
-            if current and f"http://{current}:{WORKER_PORT}" != tunnel_url:
-                tunnel_url = f"http://{current}:{WORKER_PORT}"
-                payload["endpoint_url"] = f"{tunnel_url}/v1"
-                print(f"{GLYPH_FORMING} this machine's address changed — re-registering at {blue(tunnel_url)}")
-                try:
-                    node = http_json("POST", f"{gateway}/nodes", body=payload,
-                                     headers=gateway_headers({"X-Common-Node-Token": node_token}),
-                                     timeout=REGISTRATION_TIMEOUT)
-                    node_id, node_token = node["id"], node["node_token"]
-                except (urllib.error.HTTPError, urllib.error.URLError, socket.timeout, TimeoutError) as e:
-                    err_msg = f"{e.code}" if isinstance(e, urllib.error.HTTPError) else str(e)
-                    print(f"{GLYPH_FAILED} {red(f'failed to re-register on the new address: {err_msg}')}", file=sys.stderr)
 
-        if tunnel_proc is not None and time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
-            last_tunnel_check = time.monotonic()
-            if not tunnel_is_healthy(tunnel_url, worker_token):
+            # Where are we serving from now? Two things can move that, and
+            # neither is visible from the far end.
+            #
+            # A LAN node has no tunnel to rotate or restart, but its address can
+            # still change under it -- DHCP renewal on a school network reassigns
+            # addresses routinely, and a node registered at a stale IP is a node
+            # the gateway will mark unhealthy for reasons nobody can see.
+            if tunnel_proc is None:
+                current = lan_ip()
+                if current and f"http://{current}:{WORKER_PORT}" != tunnel_url:
+                    tunnel_url = f"http://{current}:{WORKER_PORT}"
+            elif not tunnel_is_healthy(tunnel_url, worker_token):
                 print(f"{GLYPH_FORMING} {red('tunnel is no longer reachable')} (quick tunnels can silently rotate hostnames) — restarting it...")
                 stop_process(tunnel_proc)
                 tunnel_proc, tunnel_url = start_tunnel()
                 print(f"{GLYPH_DONE} tunnel live at {blue(tunnel_url)}")
-                payload["endpoint_url"] = f"{tunnel_url}/v1"
-                try:
-                    node = http_json("POST", f"{gateway}/nodes", body=payload,
-                                     headers=gateway_headers({"X-Common-Node-Token": node_token}),
-                                     timeout=REGISTRATION_TIMEOUT)
+
+            # Then tell the gateway, rather than only testing ourselves.
+            # Restarting the tunnel is half the job: the gateway still holds the
+            # old hostname, and the check above cannot notice that, because the
+            # tunnel is fine -- it is the gateway's copy of our address that is
+            # stale. So the re-announce is driven by the two addresses
+            # disagreeing, not by a health check that cannot see the
+            # disagreement at all.
+            #
+            # A failed attempt leaves them disagreeing on purpose, so the next
+            # pass tries again; see `reannounce` for why that is the shape.
+            wanted = reannounce_target(tunnel_url, registered_url)
+            if wanted is not None:
+                # The wording is the pre-existing wording for each case, kept
+                # exactly: the desktop app reads these lines.
+                if tunnel_proc is None:
+                    print(f"{GLYPH_FORMING} this machine's address changed — re-registering at {blue(tunnel_url)}")
+                node, detail = reannounce(gateway, payload, node_token, wanted)
+                if node is None:
+                    what = "on the new address" if tunnel_proc is None else "after tunnel restart"
+                    print(f"{GLYPH_FAILED} {red(f'failed to re-register {what}: {detail}')}", file=sys.stderr)
+                else:
                     node_id = node["id"]
                     node_token = node["node_token"]
-                    print(f"{GLYPH_DONE} re-registered '{args.name}' with the new tunnel url.")
-                except urllib.error.HTTPError as e:
-                    print(f"{GLYPH_FAILED} {red(f'failed to re-register after tunnel restart: {e.code} {e.read().decode()}')}", file=sys.stderr)
-                except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
-                    err_msg = str(e)
-                    print(f"{GLYPH_FAILED} {red(f'failed to re-register after tunnel restart: {err_msg}')}", file=sys.stderr)
+                    payload["endpoint_url"] = wanted
+                    registered_url = wanted
+                    if tunnel_proc is not None:
+                        print(f"{GLYPH_DONE} re-registered '{args.name}' with the new tunnel url.")
 
         if not args.no_update and time.monotonic() - last_update_check > UPDATE_CHECK_INTERVAL_SECONDS:
             last_update_check = time.monotonic()
