@@ -12,6 +12,16 @@ from app.upstream import auth_headers
 
 logger = logging.getLogger(__name__)
 
+# How many nodes are checked at once.
+#
+# Bounded rather than unbounded, because endpoint_url is chosen by whoever
+# registered: an unbounded pass would mean one outbound connection and one
+# executor thread per registered row, so the number of hosts this gateway
+# talks to simultaneously is something a stranger could raise by registering
+# in a loop. Eight keeps a pass to a few seconds while leaving the fan-out a
+# decision the gateway makes rather than one the registry makes for it.
+HEALTH_CHECK_CONCURRENCY = 8
+
 
 async def _check_one(client: httpx.AsyncClient, node: dict) -> bool:
     url = node["endpoint_url"].rstrip("/") + "/models"
@@ -74,21 +84,27 @@ async def run_health_checks_once() -> None:
         )
 
     async with httpx.AsyncClient() as client:
-        # Every node at once, not one after another. A pass costs the sum of
-        # its checks when run in series: at the 5s cap, 23 registered rows is
-        # over a minute -- and `last_heartbeat`, which only this loop writes,
-        # is then aged by however many dead nodes happen to sort above a live
-        # one rather than by the 30s the interval promises. Concurrently a
-        # pass costs the slowest single check, so what `last_heartbeat` says
-        # keeps meaning what the field above claims it means.
+        # Concurrently, not one after another. A pass costs the sum of its
+        # checks when run in series: at the 5s cap, 23 registered rows is over
+        # a minute -- and `last_heartbeat`, which only this loop writes, is
+        # then aged by however many dead nodes happen to sort above a live one
+        # rather than by the 30s the interval promises. Concurrently a pass
+        # costs the slowest single check, so what `last_heartbeat` says keeps
+        # meaning what the field above claims it means.
         #
         # return_exceptions=True because one node raising must not abandon the
         # pass or leave the rest unrecorded. An unexpected error is treated as
         # not-healthy, matching what this returns for every failure mode it
         # does handle -- and it is recomputed next pass, so a transient one
         # cannot strand a node.
+        gate = asyncio.Semaphore(HEALTH_CHECK_CONCURRENCY)
+
+        async def check(row) -> bool:
+            async with gate:
+                return await _check_one(client, dict(row))
+
         results = await asyncio.gather(
-            *(_check_one(client, dict(row)) for row in rows), return_exceptions=True
+            *(check(row) for row in rows), return_exceptions=True
         )
 
     async with db.pool().acquire() as conn:
