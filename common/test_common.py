@@ -25,11 +25,13 @@ them into the user's real `~/.common-network`.
     python3 test_common.py
 """
 import contextlib
+import http.server
 import importlib.util
 import io
 import json
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -518,6 +520,107 @@ with contextlib.redirect_stdout(_out):
 _config = _out.getvalue()
 check("config no longer claims nothing is sent home, unqualified",
       "nothing sent home beyond" in _config and "common report" in _config, True)
+
+
+section("--local talks to the model backend, and to nothing else")
+
+# The seam this section exists for. `--local` promises the prompt never leaves
+# this machine, and the process answering it changed underneath: it used to be
+# Ollama on 11434, and it is now the llama.cpp server join.py binds to 11436.
+# Both are OpenAI-shaped, and that is exactly what makes a wrong port here quiet
+# rather than loud -- pointed at the old one, this keeps working and keeps
+# talking to a process the network did not start. So the port is asserted, not
+# assumed, and the request is served by a real socket rather than compared to a
+# string in this file.
+check("the backend port is the one join.py binds", common.LLAMA_PORT, 11436)
+check("and it is written as an address, not as `localhost`",
+      common.LLAMA_URL, "http://127.0.0.1:11436")
+
+# Read as text rather than imported, the way gateway/tests/test_timeouts.py reads
+# its own constant: join.py pulls worker.py and runtime.py in on use, and a test
+# about which port three files share must not need a working install to say so.
+# The duplication is deliberate (see the constant's comment in common.py), and
+# this is the check that keeps it honest.
+_join_src = (Path(__file__).resolve().parent.parent / "join" / "join.py").read_text()
+_worker_src = (Path(__file__).resolve().parent.parent / "join" / "worker.py").read_text()
+check("the three files that name this port still agree",
+      (f"LLAMA_PORT = {common.LLAMA_PORT}" in _join_src,
+       f"http://127.0.0.1:{common.LLAMA_PORT}" in _worker_src),
+      (True, True))
+
+# A real socket, because the request itself is what has to be asserted: that it
+# carries no keep_alive -- Ollama's per-request idle-unload instruction, which
+# llama.cpp ignores *silently*, the worst way for it to be wrong -- that it
+# carries no X-Common-Client, and that it reaches the two OpenAI routes rather
+# than Ollama's /api/tags. One recorder covers all three, and every one of them
+# would have failed against the shape this replaced.
+_seen: list = []
+
+
+class _Backend(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):  # the run's own output is the report
+        pass
+
+    def _record(self, body):
+        _seen.append({
+            "method": self.command,
+            "path": self.path,
+            "headers": {k.lower(): v for k, v in self.headers.items()},
+            "body": body,
+        })
+
+    def do_GET(self):
+        self._record(None)
+        payload = json.dumps({"data": [{"id": "qwen3-1.7b"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length)
+        self._record(json.loads(raw) if raw else None)
+        # HTTP/1.0, which is this handler's default: the connection closes after
+        # the body, so the client's line iteration ends there instead of waiting
+        # on a length nobody sent.
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.write(b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n')
+        self.wfile.write(b"data: [DONE]\n\n")
+
+
+_backend = http.server.HTTPServer(("127.0.0.1", 0), _Backend)
+threading.Thread(target=_backend.serve_forever, daemon=True).start()
+# An ephemeral port on purpose. Hardcoding 11436 would make this test fail
+# whenever the person running it happens to be serving, which is the one state
+# it is most likely to be run in.
+_real_llama_url = common.LLAMA_URL
+common.LLAMA_URL = f"http://127.0.0.1:{_backend.server_address[1]}"
+try:
+    _out = io.StringIO()
+    with contextlib.redirect_stdout(_out), contextlib.redirect_stderr(io.StringIO()):
+        common._ask_local("what is a node?", None, True, True)
+    _asked = json.loads(_out.getvalue())
+finally:
+    common.LLAMA_URL = _real_llama_url
+    _backend.shutdown()
+
+check("the answer comes back", _asked["answer"], "hi")
+check("--local reports no node, because no node answered", _asked["node"], "local")
+check("the probe is an OpenAI listing, not Ollama's /api/tags",
+      [_s["path"] for _s in _seen][:1], ["/v1/models"])
+check("the ask is the OpenAI chat route",
+      [_s["path"] for _s in _seen][1:], ["/v1/chat/completions"])
+check("the model came from that listing rather than being defaulted",
+      _seen[1]["body"]["model"], "qwen3-1.7b")
+check("the answer is requested as a stream", _seen[1]["body"]["stream"], True)
+check("no keep_alive -- that field is Ollama's, and llama.cpp ignores it",
+      "keep_alive" in _seen[1]["body"], False)
+check("and neither request identifies the caller to the gateway",
+      ["x-common-client" in _s["headers"] for _s in _seen], [False, False])
 
 
 print()

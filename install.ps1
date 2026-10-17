@@ -1,5 +1,5 @@
 # Install the Common Network CLI tools (Windows).
-# The Common Network Alpha (v0.1.8).
+# The Common Network Alpha (v0.1.9).
 #
 #   irm https://commonai.com.au/install.ps1 | iex
 #
@@ -31,16 +31,43 @@ $InstallDir = "$env:USERPROFILE\.common-network"
 $BinDir = "$InstallDir\bin"
 $Raw = "https://raw.githubusercontent.com/$Repo/main"
 
-Write-Host "Installing the Common Network Alpha (v0.1.8)..."
+Write-Host "Installing the Common Network Alpha (v0.1.9)..."
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
 # --- python ---
-$python = Get-Command python -ErrorAction SilentlyContinue
-if (-not $python) {
-    Write-Host "Python 3 is required but wasn't found."
+# A Python that can actually run this, and not merely a Python -- the same
+# distinction install.sh draws, for the same reason: common.py annotates with
+# `X | None` in 49 places and does not defer them, so it raises on import at
+# 3.9 while join.py and runtime.py, which do defer them, import fine.
+#
+# There are two Windows-specific ways to be wrong here, and both pass a bare
+# existence check: `python` may be the App Execution Alias, a stub with no
+# interpreter behind it that opens the Store when run, and an old python.org
+# install left on PATH answers cheerfully and is too old.
+#
+# The app's fetched interpreter comes first, so a machine with the desktop app
+# has one Python rather than two. Unlike install.sh this is resolved here and
+# written into the wrappers as an absolute path: a .cmd file cannot ask an
+# interpreter its version without a temporary file per candidate, and Windows
+# installs Python per-version rather than swapping one `python3` in place.
+$PythonExe = $null
+$candidates = @("$InstallDir\runtime\python\python.exe") +
+              @(Get-Command python, python3 -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty Source)
+foreach ($candidate in $candidates) {
+    if (-not $candidate -or -not (Test-Path $candidate)) { continue }
+    # Skipped by path, and not by trying it: running the alias is what opens the
+    # Store, so probing it to find out what it is would be the pop-up itself.
+    if ($candidate -like "*\WindowsApps\*") { continue }
+    & $candidate -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>$null
+    if ($LASTEXITCODE -eq 0) { $PythonExe = $candidate; break }
+}
+if (-not $PythonExe) {
+    Write-Host "Common needs Python 3.10 or newer, and none was found."
     Write-Host "Install it from https://www.python.org/downloads/ (check 'Add python.exe to PATH'), then re-run this installer."
     exit 1
 }
+Write-Host "Using Python: $PythonExe"
 
 # --- common-chat (always) ---
 Write-Host "Downloading the chat client..."
@@ -48,7 +75,7 @@ Invoke-WebRequest -Uri "$Raw/chat/chat.py" -OutFile "$InstallDir\chat.py"
 
 $chatWrapper = @"
 @echo off
-python -u "$InstallDir\chat.py" %*
+"$PythonExe" -u "$InstallDir\chat.py" %*
 "@
 Set-Content -Path "$BinDir\common-chat.cmd" -Value $chatWrapper
 
@@ -59,7 +86,7 @@ Invoke-WebRequest -Uri "$Raw/common/common.py" -OutFile "$InstallDir\common.py"
 $commonWrapper = @"
 @echo off
 set PATH=$BinDir;%PATH%
-python -u "$InstallDir\common.py" %*
+"$PythonExe" -u "$InstallDir\common.py" %*
 "@
 Set-Content -Path "$BinDir\common.cmd" -Value $commonWrapper
 Set-Content -Path "$BinDir\cmn.cmd" -Value $commonWrapper
@@ -90,7 +117,7 @@ if ($cloudflared -or (Test-Path "$BinDir\cloudflared.exe")) {
     $joinWrapper = @"
 @echo off
 set PATH=$BinDir;%PATH%
-python -u "$InstallDir\join.py" %*
+"$PythonExe" -u "$InstallDir\join.py" %*
 "@
     Set-Content -Path "$BinDir\common-join.cmd" -Value $joinWrapper
     $joinInstalled = $true

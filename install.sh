@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the Common Network CLI tools (macOS / Linux).
-# The Common Network Alpha (v0.1.8).
+# The Common Network Alpha (v0.1.9).
 #
 #   curl -fsSL https://commonai.com.au/install.sh | sh
 #
@@ -26,45 +26,97 @@ INSTALL_DIR="$HOME/.common-network"
 BIN_DIR="$INSTALL_DIR/bin"
 RAW="https://raw.githubusercontent.com/$REPO/main"
 
-echo "Installing the Common Network Alpha (v0.1.8)..."
+echo "Installing the Common Network Alpha (v0.1.9)..."
 mkdir -p "$BIN_DIR"
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
 # --- python3 ---
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "Python 3 is required but wasn't found."
+# A Python that can actually run this, and not merely a Python. That distinction
+# is the whole of this block. `python3` on a stock macOS is Xcode's 3.9, and
+# common/common.py annotates with `X | None` in 49 places and does not defer
+# them -- join.py and runtime.py both carry `from __future__ import annotations`
+# and import fine at 3.9, but this one raises on import. So an installer that
+# checked only that a `python3` existed would say "Done!" and leave behind a CLI
+# that cannot start, which is the same failure this project has already spent a
+# release on once.
+#
+# The ladder starts with the interpreter the desktop app fetches for itself, so
+# a machine that has the app gets one Python rather than two, and it is written
+# into the wrappers too rather than used only here -- see `write_wrapper`.
+PY=""
+for _p in "$INSTALL_DIR/runtime/python/bin/python3" \
+          /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+  if [ -x "$_p" ] && "$_p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+    PY="$_p"
+    break
+  fi
+done
+if [ -z "$PY" ]; then
+  # PATH last, and only as a fallback: PATH is the thing that differs between a
+  # terminal and a .app started from Finder, so it is the least reliable answer
+  # rather than the most.
+  for _p in python3 python; do
+    if command -v "$_p" >/dev/null 2>&1 && \
+       "$_p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+      PY="$(command -v "$_p")"
+      break
+    fi
+  done
+fi
+if [ -z "$PY" ]; then
+  echo "Common needs Python 3.10 or newer, and none was found."
   if [ "$OS" = "Darwin" ]; then
-    echo "  Install it with: xcode-select --install"
+    echo "  A stock macOS ships 3.9, which is too old for this. Install a newer one:"
+    echo "    brew install python@3.12"
   else
     echo "  Install it with your package manager, e.g.: sudo apt install python3"
   fi
   exit 1
 fi
 
+# Each wrapper resolves its own interpreter when it runs, instead of having the
+# one found above written into it. Two reasons, and the second is the honest
+# one: a Python can be upgraded, moved or removed after this script finishes,
+# and a wrapper holding an absolute path to it would break with no way back --
+# and the ladder is short enough that the cost is a few milliseconds on a
+# command that is about to load a model. The fall-through is the message the
+# probe above prints, so a machine that loses its Python says the same thing at
+# run time as it would have at install time.
+write_wrapper() {
+  cat > "$2" <<WRAPPER
+#!/usr/bin/env bash
+export PATH="$BIN_DIR:\$PATH"
+for p in "$INSTALL_DIR/runtime/python/bin/python3" /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+  if [ -x "\$p" ] && "\$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+    exec "\$p" "$1" "\$@"
+  fi
+done
+for p in python3 python; do
+  if command -v "\$p" >/dev/null 2>&1 && "\$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+    exec "\$p" "$1" "\$@"
+  fi
+done
+echo "Common needs Python 3.10 or newer. Install one, then try again." >&2
+exit 1
+WRAPPER
+  chmod +x "$2"
+}
+
 # --- common-chat (always) ---
 echo "Downloading the chat client..."
 curl -fsSL "$RAW/chat/chat.py" -o "$INSTALL_DIR/chat.py"
 chmod +x "$INSTALL_DIR/chat.py"
 
-cat > "$BIN_DIR/common-chat" <<WRAPPER
-#!/usr/bin/env bash
-exec python3 "$INSTALL_DIR/chat.py" "\$@"
-WRAPPER
-chmod +x "$BIN_DIR/common-chat"
+write_wrapper "$INSTALL_DIR/chat.py" "$BIN_DIR/common-chat"
 
 # --- common (the unified CLI: ask/join/serve/leave/status/demand/peers/...) ---
 echo "Downloading the common CLI..."
 curl -fsSL "$RAW/common/common.py" -o "$INSTALL_DIR/common.py"
 chmod +x "$INSTALL_DIR/common.py"
 
-cat > "$BIN_DIR/common" <<WRAPPER
-#!/usr/bin/env bash
-export PATH="$BIN_DIR:\$PATH"
-exec python3 "$INSTALL_DIR/common.py" "\$@"
-WRAPPER
-chmod +x "$BIN_DIR/common"
+write_wrapper "$INSTALL_DIR/common.py" "$BIN_DIR/common"
 ln -sf "$BIN_DIR/common" "$BIN_DIR/cmn"
 
 # --- common-join (needs cloudflared; fetches its own runtime and weights) ---
@@ -112,12 +164,7 @@ if command -v cloudflared >/dev/null 2>&1 || [ -x "$BIN_DIR/cloudflared" ]; then
   curl -fsSL "$RAW/join/worker.py" -o "$INSTALL_DIR/worker.py"
   curl -fsSL "$RAW/join/runtime.py" -o "$INSTALL_DIR/runtime.py"
 
-  cat > "$BIN_DIR/common-join" <<WRAPPER
-#!/usr/bin/env bash
-export PATH="$BIN_DIR:\$PATH"
-exec python3 "$INSTALL_DIR/join.py" "\$@"
-WRAPPER
-  chmod +x "$BIN_DIR/common-join"
+  write_wrapper "$INSTALL_DIR/join.py" "$BIN_DIR/common-join"
   JOIN_INSTALLED=1
 fi
 

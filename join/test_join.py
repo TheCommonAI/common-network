@@ -25,7 +25,9 @@ sequences observed in the real catalogue's registry entries rather than whole
 templates. `import runtime` must therefore stay free of import-time side
 effects, which is why the module does all of its work inside functions.
 """
+import contextlib
 import importlib
+import io
 import shutil
 import sys
 import tempfile
@@ -377,6 +379,50 @@ finally:
 
 check("the module the rest of this file uses is still the real one",
       join._import_runtime() is runtime, True)
+
+
+section("a redirected download says how far along it is, and how big")
+
+# The other half of what changed when the model download moved into the join.
+# The desktop app used to get byte-level progress from Ollama's pull stream; it
+# now follows `join.log` by byte offset, and this line is the only thing in that
+# log that says the download is moving. A bare percentage -- which is what the
+# redirected branch used to write -- leaves a multi-gigabyte wait readable as
+# ten numbers with no idea what is being waited for, so the sizes are the load-
+# bearing part and not decoration.
+#
+# Forced to non-tty rather than left to wherever this test is run from: the
+# branch under test is the one a pipe, launchd and join.log all take, and a
+# terminal would exercise the other one.
+_total = 100 * 1024 * 1024
+_sink = io.StringIO()
+with contextlib.redirect_stderr(_sink):
+    prog = runtime._Progress("model", _total)
+    prog.tty = False
+    for _pct in (0, 9, 10, 25, 100):
+        prog.update(_total * _pct // 100)
+    prog.close()
+_marks = [line.split() for line in _sink.getvalue().splitlines() if line.strip()]
+
+check("one line per 10% mark, and not one per update", len(_marks), 3)
+check("each line names the download, the percentage and both sizes",
+      _marks[0], ["model", "10%", "10", "MB", "of", "100", "MB"])
+check("the last mark is the whole file, not a rounded-off 99%",
+      _marks[-1], ["model", "100%", "100", "MB", "of", "100", "MB"])
+
+# And the terminal branch has to stay what the docstring says it is: one line
+# repainted, never a series. A newline here is what would turn join.log into a
+# file of thousands of lines, which is the reason the two shapes exist at all.
+_tty_sink = io.StringIO()
+with contextlib.redirect_stderr(_tty_sink):
+    prog = runtime._Progress("model", _total)
+    prog.tty = True
+    prog.update(0)
+    prog.update(_total)
+    prog.close()
+_tty_out = _tty_sink.getvalue()
+check("a terminal still gets one repainted line and no newlines",
+      (_tty_out.count("\n"), _tty_out.count("\r") > 1), (0, True))
 
 
 print()
