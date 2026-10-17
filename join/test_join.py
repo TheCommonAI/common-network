@@ -31,6 +31,7 @@ import io
 import shutil
 import sys
 import tempfile
+import urllib.error
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -423,6 +424,79 @@ with contextlib.redirect_stderr(_tty_sink):
 _tty_out = _tty_sink.getvalue()
 check("a terminal still gets one repainted line and no newlines",
       (_tty_out.count("\n"), _tty_out.count("\r") > 1), (0, True))
+
+
+section("a stale address is re-announced, and one failed attempt is not the end of it")
+
+# What goes stale is the gateway's copy of our address, and nothing local can
+# see it: the tunnel answers, the worker answers, and the network routes to a
+# hostname that stopped existing hours ago. So the decision has to be a
+# comparison of two addresses, never a health check -- which is exactly the
+# mistake that kept this outage invisible for a day.
+check("the same address is not worth re-announcing",
+      join.reannounce_target("https://a.trycloudflare.com", "https://a.trycloudflare.com/v1"), None)
+check("a rotated quick-tunnel hostname is",
+      join.reannounce_target("https://b.trycloudflare.com", "https://a.trycloudflare.com/v1"),
+      "https://b.trycloudflare.com/v1")
+check("a LAN node that renewed its lease is, the same way",
+      join.reannounce_target("http://192.168.1.44:11435", "http://192.168.1.9:11435/v1"),
+      "http://192.168.1.44:11435/v1")
+check("a node the gateway has never been told about is",
+      join.reannounce_target("https://a.trycloudflare.com", None),
+      "https://a.trycloudflare.com/v1")
+
+# The retry. A restarted quick tunnel is NXDOMAIN for a while and the first
+# attempt lands squarely in that window, which is how a node comes to sit
+# registered against a dead address while its heartbeats keep arriving.
+_asked = []
+
+
+def _flaky(method, url, body=None, headers=None, timeout=10.0):
+    _asked.append(body["endpoint_url"])
+    if len(_asked) < 3:
+        raise urllib.error.HTTPError(
+            url, 400, "Bad Request", None,
+            io.BytesIO(b'{"detail":"endpoint_url host does not resolve"}'))
+    return {"id": "node-1", "node_token": "token-1"}
+
+
+_node, _detail = join.reannounce(
+    "https://gw", {"name": "x", "endpoint_url": "https://old.trycloudflare.com/v1"},
+    "tok", "https://new.trycloudflare.com/v1", attempts=3, backoff=0, poster=_flaky)
+
+check("a 400 on the first attempt does not end the re-announce",
+      _node, {"id": "node-1", "node_token": "token-1"})
+check("it keeps asking until the gateway takes it", len(_asked), 3)
+check("and it never falls back to the address that stopped working",
+      set(_asked), {"https://new.trycloudflare.com/v1"})
+check("nothing to report when it worked", _detail, None)
+
+# Giving up is bounded, and reported rather than fatal: the caller retries on
+# its next pass, and the disagreement it exists to fix is still true either way.
+_tries = []
+
+
+def _dead(method, url, body=None, headers=None, timeout=10.0):
+    _tries.append(1)
+    raise urllib.error.URLError("nodename nor servname provided, or not known")
+
+
+_none, _why = join.reannounce(
+    "https://gw", {"name": "x", "endpoint_url": "https://old.trycloudflare.com/v1"},
+    "tok", "https://new.trycloudflare.com/v1", attempts=3, backoff=0, poster=_dead)
+
+check("it stops after the bounded number of attempts", len(_tries), 3)
+check("and says why it stopped", _why, "nodename nor servname provided, or not known")
+
+# The mutation that caused the outage: a failed attempt must not leave the loop
+# convinced the gateway holds an address it was never told about. That is what
+# made the disagreement permanent -- every health check afterwards saw a
+# perfectly healthy tunnel and had no reason to look at the gateway's copy.
+_stale = {"name": "x", "endpoint_url": "https://old.trycloudflare.com/v1"}
+join.reannounce("https://gw", _stale, "tok", "https://new.trycloudflare.com/v1",
+                attempts=2, backoff=0, poster=_dead)
+check("a failed re-announce leaves the payload on the address the gateway actually has",
+      _stale["endpoint_url"], "https://old.trycloudflare.com/v1")
 
 
 print()
