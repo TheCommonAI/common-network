@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The model runtime: fetch llama.cpp, and fetch the weights it serves.
 
-The Common Network Alpha (v0.1.8).
+The Common Network Alpha (v0.1.9).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -218,6 +218,15 @@ class _Progress:
     the other two. A progress bar written with carriage returns would fill those
     logs with one enormous line, and a node's log is read afterwards, by someone
     trying to work out why it did not come up.
+
+    That line carries `done of total` and not only a percentage, which is the
+    one thing the two shapes now share. Ten numbers on their own do not say
+    what is being waited for: a reader of the log -- the person above, or the
+    desktop app, which follows join.log rather than the node's streams --
+    cannot tell 60% of 1.3GB from 60% of 4GB, or see that anything is moving at
+    all between one mark and the next. The sizes are what make a several-minute
+    wait legible in a file. The terminal line prints them already; there was no
+    reason for the redirected one to keep less.
     """
 
     def __init__(self, what: str, total: int | None):
@@ -245,7 +254,9 @@ class _Progress:
             return
         if self.total and percent >= self._next_emit:
             self._next_emit = percent - (percent % 10) + 10
-            sys.stderr.write(f"  {self.what}  {percent:3d}%\n")
+            sys.stderr.write(
+                f"  {self.what}  {percent:3d}%  {_size(done)} of {_size(self.total)}\n"
+            )
             sys.stderr.flush()
 
     def close(self) -> None:

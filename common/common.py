@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """COMMON. — the commons, belonging to everyone and no one.
 
-The Common Network Alpha (v0.1.8).
+The Common Network Alpha (v0.1.9).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -111,13 +111,31 @@ except ImportError:  # pragma: no cover - Windows
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/common/common.py"
 JOIN_SCRIPT_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
 INSTALL_DIR = Path.home() / ".common-network"
+
+# The model backend a machine serves from. join.py binds llama-server to this
+# port on 127.0.0.1 (`--host 127.0.0.1`), and worker.py sits in front of it on
+# WORKER_PORT (11435) and forwards here.
+#
+# 127.0.0.1 and not `localhost`, which is what this path used to say back when
+# it spoke to Ollama. On Windows `localhost` resolves to ::1 first, and the
+# backend binds IPv4 only -- so the name reaches a socket nobody is listening
+# on. join.py and worker.py both spell the address out for that reason, and this
+# is the third place it has to be got right.
+#
+# Written out again rather than imported from join/, deliberately: an installed
+# copy has common.py, join.py and runtime.py flat in one directory, so an import
+# would resolve on a user's machine -- but this repo keeps them in sibling
+# folders, so the same import would fail in this file's own tests. Restating one
+# integer is the smaller cost, and all three files that name it live here.
+LLAMA_PORT = 11436
+LLAMA_URL = f"http://127.0.0.1:{LLAMA_PORT}"
 
 # Which program is speaking, reported to the gateway as X-Common-Client.
 #
@@ -150,8 +168,8 @@ def gateway_headers(extra: dict | None = None) -> dict:
     gatewayHeaders(), so an app user and a terminal user are told apart by one
     string in one place.
 
-    Deliberately not applied to local requests (Ollama, or a node's own worker):
-    those leave this machine and have no business carrying it.
+    Deliberately not applied to local requests (the model backend, or a node's
+    own worker): those leave this machine and have no business carrying it.
     """
     return {"X-Common-Client": CLIENT, **(extra or {})}
 
@@ -302,7 +320,7 @@ def print_banner_box(subtitle: str) -> None:
 
 def http_json(method: str, url: str, body: dict | None = None, headers: dict | None = None, timeout: float = 20.0, *, client: bool = True):
     data = json.dumps(body).encode() if body is not None else None
-    # Every caller of this is either a gateway request or a local Ollama one,
+    # Every caller of this is either a gateway request or a local model one,
     # so the client string goes on by default and the local calls opt out with
     # client=False. Stamping it here rather than at each of the dozen call
     # sites is what makes "every gateway request carries it" true by
@@ -1311,7 +1329,7 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
         if e.code == 401:
             print(comment("this gateway answers its contributors — join a machine first:"), file=sys.stderr)
             print(dim("  → common join            (donate this machine, then ask from it)"), file=sys.stderr)
-            print(dim("  → common ask \"...\" --local  (ask a local Ollama instead)"), file=sys.stderr)
+            print(dim("  → common ask \"...\" --local  (ask the model on this machine)"), file=sys.stderr)
         if e.code == 429:
             print(comment("you're asking faster than a contributor's machine can serve — wait a moment and retry."), file=sys.stderr)
         sys.exit(1)
@@ -1327,7 +1345,7 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
     #
     # Note what the client cannot separate on its own: time-to-response-headers
     # is the gateway's routing PLUS the node accepting the connection, and a
-    # cold Ollama sends no headers until it has loaded the weights. So the
+    # cold model sends no headers until it has loaded the weights. So the
     # gateway reports its own share in a header, and the client takes the rest
     # from its own clock:
     #
@@ -1562,16 +1580,34 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
 
 
 def _ask_local(question: str, model: str | None, as_json: bool, quiet: bool) -> None:
-    ollama_url = "http://localhost:11434"
+    """Ask the model on this machine.
+
+    Against the model backend, and not the worker sitting in front of it. The
+    worker demands the gateway's worker token -- a credential issued for talking
+    to the network -- and this is the one path whose entire promise is that the
+    network is not involved. The backend binds 127.0.0.1 and asks for no
+    credential, which makes it both the honest target and the reachable one.
+
+    This used to talk to Ollama on 11434. Common no longer installs Ollama: the
+    model a machine serves is a .gguf file that join.py fetched, served by
+    llama.cpp. "Ask locally" still means "ask the model on this machine" -- only
+    the thing answering has changed.
+
+    Both routes being OpenAI-shaped is why this is a port and a listing and not
+    a rewrite: /v1/models and /v1/chat/completions are the same two endpoints
+    the worker and the gateway speak.
+    """
     try:
-        tags = http_json("GET", f"{ollama_url}/api/tags", timeout=5, client=False)
+        listing = http_json("GET", f"{LLAMA_URL}/v1/models", timeout=5, client=False)
     except (urllib.error.URLError, socket.timeout):
-        print(red("✗ can't reach Ollama on this machine."), file=sys.stderr)
-        print(comment("is it installed and running? https://ollama.com/download"), file=sys.stderr)
+        print(red("✗ this machine isn't serving a model."), file=sys.stderr)
+        print(comment("a model is up only while `common serve` or `common join` is running."), file=sys.stderr)
+        print(dim("  → start serving:   common serve"), file=sys.stderr)
         sys.exit(1)
-    names = [m["name"] for m in tags.get("models", [])]
+    names = [m["id"] for m in listing.get("data", []) if m.get("id")]
     if not names:
-        print(red("✗ no local models available. pull one first: ollama pull llama3.2:3b"), file=sys.stderr)
+        print(red("✗ the model backend is up but has no model loaded."), file=sys.stderr)
+        print(comment("start serving again so it loads one."), file=sys.stderr)
         sys.exit(1)
     chosen = model or names[0]
     if not quiet:
@@ -1581,29 +1617,27 @@ def _ask_local(question: str, model: str | None, as_json: bool, quiet: bool) -> 
     # finished answer in one go, which on a 16GB laptop meant a blank screen
     # for the entire generation -- and this is the path `ask` *recommends* when
     # the network can't be reached ("run local only: common ask --local"), so
-    # the slowest route through the tool was also the silent one. Ollama
-    # streams natively; there was never a reason to wait for the last token
+    # the slowest route through the tool was also the silent one. The backend
+    # streams SSE natively; there was never a reason to wait for the last token
     # before showing the first.
     #
     # No gateway_headers here, deliberately: --local promises the prompt never
     # leaves this machine, so nothing about the network is attached to it.
-    body = {"model": chosen, "messages": [{"role": "user", "content": question}], "stream": True,
-            # Ollama's default is five minutes, so a question asked after a
-            # longer pause pays the full cold load -- ~57s for a 7B on this
-            # laptop, against about a second warm. This path talks to Ollama
-            # directly rather than through the worker (which stamps its own
-            # value), so it has to say so itself. --local is a single-shot
-            # command, so half an hour also means the next `--local` in this
-            # session is warm.
-            "keep_alive": "30m"}
+    #
+    # And no keep_alive, which Ollama needed and this does not. Ollama's idle
+    # unload was a per-request instruction; llama.cpp's is a property of the
+    # process, set once at launch (`--sleep-idle-seconds 1800` in join.py), so
+    # there is nothing for a single request to ask for. Sending the field here
+    # would not error -- it would be silently ignored, which is worse.
+    body = {"model": chosen, "messages": [{"role": "user", "content": question}], "stream": True}
     req = urllib.request.Request(
-        f"{ollama_url}/v1/chat/completions",
+        f"{LLAMA_URL}/v1/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     # Same headroom as `ask` (see REQUEST_TIMEOUT_SECONDS), minus the gateway
-    # reasoning: a local call has nothing in front of it but Ollama.
+    # reasoning: a local call has nothing in front of it but the model backend.
     start = time.monotonic()
     try:
         resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS)
@@ -1661,8 +1695,9 @@ def _ask_local(question: str, model: str | None, as_json: bool, quiet: bool) -> 
     if as_json:
         print(json.dumps({
             "answer": answer, "node": "local", "model": chosen,
-            # No routing_ms: nothing was routed. The whole wait here is Ollama
-            # loading the model and generating, and ttft_ms is where it shows.
+            # No routing_ms: nothing was routed. The whole wait here is the
+            # backend loading the model and generating, and ttft_ms is where it
+            # shows.
             "routing_ms": None, "ttft_ms": ttft_ms, "total_ms": total_ms,
             "latency_ms": total_ms,
         }))
@@ -2290,9 +2325,9 @@ def _probe_once(gateway: str, prompt: str, node: str | None = None, timeout: flo
         "score": score,
         "ttft_ms": ttft_ms,
         "total_ms": total_ms,
-        # One SSE content delta is ~1 token for Ollama and OpenAI-compatible
-        # servers, but it is an approximation -- the gateway does not yet
-        # forward usage counts (TODO: add tokens_in/tokens_out to decisions).
+        # One SSE content delta is ~1 token for an OpenAI-compatible server,
+        # but it is an approximation -- the gateway does not yet forward usage
+        # counts (TODO: add tokens_in/tokens_out to decisions).
         "out_tokens_approx": chunks,
         "tok_s_approx": round(chunks / (gen_ms / 1000.0), 2) if gen_ms > 0 else None,
         "gap_p50_ms": _pct(gaps, 50),
