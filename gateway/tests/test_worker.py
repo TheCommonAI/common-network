@@ -362,6 +362,47 @@ try:
     check("the warm-up leaves no residue either",
           UPSTREAM_HITS[0]["body"].get("cache_prompt"), False)
 
+    # The catalogue's Bonsai 2 models default to thinking mode, which at this
+    # network's token ceiling can spend the entire answer budget on the
+    # preamble. The node stamps the cards' non-thinking configuration on every
+    # request -- as defaults, so a caller that sets things deliberately keeps
+    # them. Forced, like cache_prompt, would break a caller who wants thinking;
+    # absent entirely, an unstamped request is the broken default.
+    print("\nnon-thinking sampling (stamped as defaults, not overrides)")
+    UPSTREAM_HITS.clear()
+    request("POST", "/v1/chat/completions", TOKEN,
+            {"messages": [{"role": "user", "content": "hi"}]})
+    check("thinking is off by default",
+          UPSTREAM_HITS[0]["body"].get("chat_template_kwargs"),
+          {"enable_thinking": False})
+    check("the card's sampling rides along",
+          {k: UPSTREAM_HITS[0]["body"].get(k) for k in
+           ("temperature", "top_p", "top_k", "presence_penalty")},
+          {k: v for k, v in worker.DEFAULT_SAMPLING.items()})
+
+    UPSTREAM_HITS.clear()
+    request("POST", "/v1/chat/completions", TOKEN,
+            {"messages": [{"role": "user", "content": "hi"}],
+             "temperature": 0.1, "chat_template_kwargs": {"enable_thinking": True}})
+    check("a caller's explicit sampling is kept",
+          UPSTREAM_HITS[0]["body"].get("temperature"), 0.1)
+    check("a caller's explicit template kwargs are kept",
+          UPSTREAM_HITS[0]["body"].get("chat_template_kwargs"),
+          {"enable_thinking": True})
+    check("and untouched fields still take the node's defaults",
+          UPSTREAM_HITS[0]["body"].get("presence_penalty"),
+          worker.DEFAULT_SAMPLING["presence_penalty"])
+
+    # The body is a stranger's JSON: a chat_template_kwargs that is not a dict
+    # must not raise inside the request path -- it is replaced by the default.
+    UPSTREAM_HITS.clear()
+    status, _ = request("POST", "/v1/chat/completions", TOKEN,
+                        {"messages": [{"role": "user", "content": "hi"}],
+                         "chat_template_kwargs": "junk"})
+    check("junk template kwargs -> the default, not a 500",
+          (status, UPSTREAM_HITS[0]["body"].get("chat_template_kwargs")),
+          (200, {"enable_thinking": False}))
+
     # Run for a second, not for the full interval: the point under test is that
     # the loop keeps asking the backend for one token, not where the interval
     # sits inside the sleep window -- that derivation is an argument to
