@@ -15,7 +15,10 @@ was wrong -- a caller must not be able to make a contributor's machine slow for
 everyone after them -- but because llama-server decides residency itself, from
 `--sleep-idle-seconds` given at start-up, which is a better owner for that
 decision than a hint repeated on every request by a process that does not own
-the memory.
+the memory. What keeps a *joined* node warm meanwhile is not a per-request hint
+either: the worker pings the backend on an interval inside the sleep window
+(pinned below), so the idle timer never runs out mid-session -- and the caller
+still has no say in any of it.
 """
 import json
 import sys
@@ -28,6 +31,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "join"))
 
 import worker  # noqa: E402
+
+import time  # noqa: E402
 
 FAILURES = []
 TOKEN = "test-worker-token-0123456789"
@@ -336,6 +341,42 @@ try:
     # existed. A raise here would turn a slow start into no node at all.
     worker.warm_model(MODEL, "http://127.0.0.1:1")
     check("an unreachable backend is not fatal", True, True)
+
+    print("\nrequest isolation (one slot never passes one user's context to the next)")
+    UPSTREAM_HITS.clear()
+    request("POST", "/v1/chat/completions", TOKEN,
+            {"messages": [{"role": "user", "content": "hi"}]})
+    check("prompt caching is stamped off", UPSTREAM_HITS[0]["body"].get("cache_prompt"), False)
+
+    # Forced, like the model pin: a caller that asks for the cache is asking
+    # for everyone who shares this node's one slot, and does not get to.
+    UPSTREAM_HITS.clear()
+    request("POST", "/v1/chat/completions", TOKEN,
+            {"messages": [{"role": "user", "content": "hi"}], "cache_prompt": True})
+    check("a caller cannot switch it back on", UPSTREAM_HITS[0]["body"].get("cache_prompt"), False)
+
+    # The warm-up bypasses do_POST and talks to the backend directly, so it
+    # has to carry the same stamp itself.
+    UPSTREAM_HITS.clear()
+    worker.warm_model(MODEL, STUB_URL)
+    check("the warm-up leaves no residue either",
+          UPSTREAM_HITS[0]["body"].get("cache_prompt"), False)
+
+    # Run for a second, not for the full interval: the point under test is that
+    # the loop keeps asking the backend for one token, not where the interval
+    # sits inside the sleep window -- that derivation is an argument to
+    # serve(), exercised by eye in join.py's call.
+    print("\nkeep-warm (a joined node is never woken by a user paying the reload)")
+    UPSTREAM_HITS.clear()
+    threading.Thread(target=worker._keep_warm, args=(MODEL, STUB_URL, 0.2),
+                     daemon=True).start()
+    deadline = time.monotonic() + 5
+    while len(UPSTREAM_HITS) < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    check("the backend is pinged repeatedly", len(UPSTREAM_HITS) >= 2, True)
+    check("one non-streamed token at a time, like the warm-up",
+          all(h["body"].get("max_tokens") == 1 and h["body"].get("stream") is False
+              for h in UPSTREAM_HITS), True)
 
     # On Windows, "localhost" may resolve to ::1 (IPv6) while services bind to
     # IPv4 only, causing silent failures. The default upstream must use the
