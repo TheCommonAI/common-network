@@ -100,9 +100,14 @@ DEFAULT_CTX = 4096
 # successor to the `keep_alive: "30m"` hint worker.py used to stamp on every
 # request, and it is a better mechanism for the same intent: the process that
 # owns the weights decides when to release them, instead of another process being
-# asked nicely each time. 30 minutes because a node that has run `common join`
-# has already decided its hardware is for this, and half an hour of quiet is
-# still a laptop's worth of courtesy before the RAM goes back.
+# asked nicely each time.
+#
+# While a node is joined, this window never actually arrives: the worker pings
+# the backend well inside it (see _keep_warm in worker.py), because a sleeping
+# server is woken by the next user, who then pays the reload. Half an hour of
+# quiet as a laptop's worth of courtesy is the right trade for the case that
+# remains -- the node has left, or the worker died and the backend is lingering
+# -- which is exactly when the keep-warm pings stop too.
 DEFAULT_SLEEP_IDLE_SECONDS = 1800
 
 # Streaming a 3-9GB model over a home connection, where the socket is idle far

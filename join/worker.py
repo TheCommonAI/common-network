@@ -42,6 +42,7 @@ import os
 import secrets
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -65,8 +66,8 @@ UPSTREAM_TIMEOUT = 120
 # The ceiling on one generation, and the value used when the caller names none.
 #
 # Nothing upstream sets one. The client sends {model, messages, stream}; the
-# gateway rewrites the model name and nothing else; this file stamps this field
-# and nothing else. So every request runs on the backend's own default, and both
+# gateway rewrites the model name and nothing else; this file stamps the fields
+# below and nothing else. So every request runs on the backend's own default, and both
 # backends this has served have the same one -- Ollama's num_predict and
 # llama-server's n_predict both default to -1, "generate until the model emits
 # EOS" -- so a model that does not emit EOS has nothing stopping it but the
@@ -93,6 +94,13 @@ UPSTREAM_TIMEOUT = 120
 #
 # Overridable per node with COMMON_MAX_TOKENS (see main()).
 DEFAULT_MAX_TOKENS = 1024
+
+# A mirror of runtime.DEFAULT_SLEEP_IDLE_SECONDS, duplicated on purpose: this
+# file is the one piece of a node that must run stdlib-only with no sibling
+# imports, and a standalone worker (see main()) still wants keep-warm behaviour
+# against whatever backend it fronts. Overridable with the same
+# COMMON_SLEEP_IDLE_SECONDS join.py reads, so one env var steers both layers.
+DEFAULT_SLEEP_IDLE_SECONDS = 1800
 
 
 def bounded_max_tokens(requested, ceiling: int = DEFAULT_MAX_TOKENS) -> int:
@@ -260,9 +268,27 @@ class Handler(BaseHTTPRequestHandler):
         # the model in memory for half an hour. That intent has not gone away, but
         # the mechanism has: llama-server is started with --sleep-idle-seconds and
         # decides for itself, which is strictly better than a hint repeated on
-        # every request by a process that does not own the memory.
+        # every request by a process that does not own the memory. The process
+        # that does own it keeps the model warm instead -- see _keep_warm, which
+        # makes sure the sleep of an idle server is only ever reached after this
+        # node has stopped serving, not in the middle of a session.
         body["max_tokens"] = bounded_max_tokens(body.get("max_tokens"),
                                                 self.config.max_tokens)
+
+        # One user's exchange must not be context for the next user's request.
+        # This node runs one inference slot (llama-server is started -np 1 -- a
+        # memory decision, like the context size: every parallel slot allocates
+        # its own KV cache), and a slot outlives the request that filled it: the
+        # server prefix-matches each new prompt against whatever the slot last
+        # held, generated tokens included, and reuses what matches. On a machine
+        # one person uses that is a free speed-up; on a machine a network shares
+        # it is one user's conversation sitting in the context the next user's
+        # request is processed against, and whatever survives the matching shows
+        # up as an answer to a question this user never asked. Forced rather than
+        # honoured, for the same reason the model name is rewritten above: it is
+        # this node's rule, and not a caller's optimisation to trade everyone
+        # else's isolation for.
+        body["cache_prompt"] = False
 
         self._proxy_chat(body)
 
@@ -352,6 +378,10 @@ def warm_model(model: str, upstream_url: str) -> None:
             "messages": [{"role": "user", "content": "hi"}],
             "stream": False,
             "max_tokens": 1,
+            # Keep the warm-up off the slot's cache too -- see the stamp in
+            # do_POST. A warm model with someone else's residue in it would be
+            # the warm-up unmaking the isolation the next real request expects.
+            "cache_prompt": False,
         }).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -363,10 +393,37 @@ def warm_model(model: str, upstream_url: str) -> None:
         return
 
 
+def _keep_warm(model: str, upstream_url: str, interval_seconds: float) -> None:
+    """Never let the model sleep while this node is serving.
+
+    llama-server unloads the weights after --sleep-idle-seconds of quiet, and
+    what wakes a slept server is the next request to arrive -- which is to say,
+    a user, who pays the reload: tens of seconds on a laptop, the cold start
+    the warm-up above exists to keep off the *first* request and which would
+    otherwise land on every thirty-minutes-quiet first request after it. That
+    trade is right for a node that has gone home and wrong for one in the
+    middle of a session; a node running this process has already said its
+    hardware is for this.
+
+    So the interval is derived from the sleep window the server was started
+    with (three quarters of it, floored at a minute) rather than being a second
+    setting to drift out of step, and the ping is the warm-up itself: one
+    token, straight to the backend, never through the token-checked route. Each
+    ping resets the idle timer, so the window never closes while this thread
+    lives -- and this thread is a daemon, so when the node leaves, both die
+    together and --sleep-idle-seconds goes back to doing exactly what it is
+    for: a lingering backend nobody pinged gives the RAM back.
+    """
+    while True:
+        time.sleep(interval_seconds)
+        warm_model(model, upstream_url)
+
+
 def serve(token: str, model: str, port: int = 11435,
           upstream_url: str = DEFAULT_UPSTREAM,
           max_tokens: int = DEFAULT_MAX_TOKENS,
-          warm: bool = True) -> ThreadingHTTPServer:
+          warm: bool = True,
+          sleep_idle_seconds: int | None = None) -> ThreadingHTTPServer:
     """Start the worker on a background thread and return the server.
 
     Bound to 0.0.0.0 because the whole point is to be reachable -- by the
@@ -377,7 +434,16 @@ def serve(token: str, model: str, port: int = 11435,
     really serving, and cannot afford an unannounced inference against whatever
     happens to be behind `upstream_url`. The test suite is the caller that
     matters -- a warm-up thread firing mid-suite would land an extra request in
-    the stub's hit log and turn a real assertion into a coin toss.
+    the stub's hit log and turn a real assertion into a coin toss. Keep-warm is
+    gated the same way, for the same reason: a caller that does not want one
+    background inference does not want a repeating one either.
+
+    `sleep_idle_seconds` is the window the backend was started with
+    (--sleep-idle-seconds). Given once, keep-warm derives its interval from it
+    and there is no second knob to keep in step with a flag that lives in
+    another process's argv. Omitted or zero, no keep-warm thread runs: a
+    backend that never sleeps needs no alarm clock, and a caller that says
+    nothing gets exactly the old behaviour.
     """
     handler = type("BoundHandler", (Handler,), {
         "config": WorkerConfig(token, model, upstream_url, max_tokens),
@@ -388,6 +454,12 @@ def serve(token: str, model: str, port: int = 11435,
     if warm:
         threading.Thread(target=warm_model, args=(model, upstream_url),
                          daemon=True).start()
+        if sleep_idle_seconds:
+            threading.Thread(
+                target=_keep_warm,
+                args=(model, upstream_url, max(60.0, sleep_idle_seconds * 0.75)),
+                daemon=True,
+            ).start()
     return httpd
 
 
@@ -424,7 +496,17 @@ def main() -> int:
                         "(default: %(default)s)")
     args = p.parse_args()
 
-    serve(args.token, args.model, args.port, args.upstream, args.max_tokens)
+    # Standalone use manages its own backend, so it reads the same
+    # COMMON_SLEEP_IDLE_SECONDS join.py passes and derives keep-warm from it;
+    # see DEFAULT_SLEEP_IDLE_SECONDS above for why the constant is mirrored
+    # here instead of imported.
+    sleep_idle = os.environ.get("COMMON_SLEEP_IDLE_SECONDS")
+    try:
+        sleep_idle = int(sleep_idle) if sleep_idle else DEFAULT_SLEEP_IDLE_SECONDS
+    except ValueError:
+        sleep_idle = DEFAULT_SLEEP_IDLE_SECONDS
+    serve(args.token, args.model, args.port, args.upstream, args.max_tokens,
+          sleep_idle_seconds=sleep_idle)
     print(f"common-worker on :{args.port} → {args.upstream} (model: {args.model})")
     print("the backend unloads the model itself, once idle for longer than the "
           "sleep timeout it was started with.")

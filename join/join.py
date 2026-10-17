@@ -649,6 +649,21 @@ def stop_process(proc: subprocess.Popen | None, timeout: float = 5.0) -> None:
             pass
 
 
+def sleep_idle_seconds(mod) -> int:
+    """How long the model stays resident with no traffic, env or runtime default.
+
+    One reading for two consumers: llama-server is started with it, and the
+    worker needs the same number to schedule its keep-warm pings inside the
+    window. Both sides reading the env separately would be two parses to let
+    drift apart.
+    """
+    raw = os.environ.get("COMMON_SLEEP_IDLE_SECONDS")
+    try:
+        return int(raw) if raw else mod.DEFAULT_SLEEP_IDLE_SECONDS
+    except ValueError:
+        return mod.DEFAULT_SLEEP_IDLE_SECONDS
+
+
 def start_llama_server(gguf: Path, wire_name: str) -> subprocess.Popen:
     """Start llama-server on `gguf`, and block until it is actually serving.
 
@@ -674,11 +689,7 @@ def start_llama_server(gguf: Path, wire_name: str) -> subprocess.Popen:
                      f"Nothing was changed on this machine. Run this again to retry,\n"
                      f"  or fetch a build by hand from https://github.com/{mod.LLAMA_REPO}/releases")
 
-    sleep_idle = os.environ.get("COMMON_SLEEP_IDLE_SECONDS")
-    try:
-        sleep_idle = int(sleep_idle) if sleep_idle else mod.DEFAULT_SLEEP_IDLE_SECONDS
-    except ValueError:
-        sleep_idle = mod.DEFAULT_SLEEP_IDLE_SECONDS
+    sleep_idle = sleep_idle_seconds(mod)
 
     argv = mod.llama_server_argv(binary, gguf, LLAMA_PORT, alias=wire_name,
                                  sleep_idle_seconds=sleep_idle)
@@ -1577,7 +1588,12 @@ def main() -> None:
     # itself never has to be reachable from outside, on either path.
     worker_token = secrets.token_urlsafe(24)
     try:
-        worker.serve(worker_token, wire_name, port=WORKER_PORT, upstream_url=LLAMA_URL)
+        # The sleep window goes in too, so the worker can keep the model
+        # resident for as long as this node is serving rather than letting the
+        # next user after a quiet half hour pay the reload. See _keep_warm in
+        # worker.py; the same number is llama-server's --sleep-idle-seconds.
+        worker.serve(worker_token, wire_name, port=WORKER_PORT, upstream_url=LLAMA_URL,
+                     sleep_idle_seconds=sleep_idle_seconds(_require_runtime()))
     except OSError as e:
         stop_process(llama_proc)
         die_with_fix(
