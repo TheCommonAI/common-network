@@ -24,10 +24,13 @@
 #
 # --- WHAT CHANGED IN 2026-10, AND WHY ------------------------------------
 #
-# The catalogue is now ONE model family at three footprints: prism-ml's
-# Ternary Bonsai 2 (1.58-bit ternary weights, Apache-2.0, 262K-token cards,
-# derived from the Qwen3.5 line). The v0.1.1 specialist mix below was retired
-# in favour of it.
+# The catalogue is now the Bonsai ternary family at four footprints:
+# prism-ml's Ternary Bonsai 2 (1.58-bit ternary weights, Apache-2.0,
+# 262K-token cards, derived from the Qwen3.5 line) at 2B/4B/9B, plus the
+# first-generation Bonsai 8B (Qwen3-8B derived) — included because it
+# measured ~15% faster at generation than the 9B on an M3 Air under the
+# stock runtime (30 vs 26 tok/s, 2026-10-17). The v0.1.1 specialist mix
+# below was retired in favour of these.
 #
 # Two hard constraints chose exactly these three entries, recorded so nobody
 # has to re-litigate them:
@@ -40,7 +43,11 @@
 #      unknown types — those need PrismML's fork, which this network does
 #      not ship. common-join always fetches the latest llama.cpp release,
 #      so the b11555 floor needs no enforcement here, but DO NOT add a
-#      catalogue entry in a non-Q2_0 packing.
+#      catalogue entry in a non-Q2_0 packing. The trap of the same shape in
+#      the first-generation repos: `Ternary-Bonsai-8B-Q2_0.gguf` is a
+#      fork-only layout that stock llama.cpp rejects with a tensor-offset
+#      error; the upstream-compatible file is the `_g64` one, and is the
+#      one pinned below.
 #
 #   2. The 27B Bonsai 2 ships no Q2_0 file at all, so the ladder stops at
 #      9B. An 8GB-free machine can hold every entry here.
@@ -121,6 +128,26 @@ models:
       right answer for a machine that can spare a few GB but not 5.
     params_b: 4.0
     min_ram_gb: 3
+    min_vram_gb: 0
+    needs_gpu: false
+    verified_in_lane: false
+    lane_benchmark: null
+    licence: apache-2.0
+
+  - id: bonsai-8b
+    display_name: Bonsai 8B (1st gen)
+    source: "gguf:https://huggingface.co/prism-ml/Ternary-Bonsai-8B-gguf/resolve/main/Ternary-Bonsai-8B-Q2_0_g64.gguf#e17b298d84ee78797916ae5c2ecc8211469cc65cccfe3080cd9a9bb503fbc55e"
+    domain_tags: [general, conversation, writing, reasoning]
+    capability_text: >
+      Bonsai 8B by prism-ml, the first-generation ternary model (Qwen3-8B
+      derived) — conversation, writing, summarisation and general reasoning.
+      Measured a faster generator than Bonsai 2 9B on Apple Silicon under
+      this network's stock runtime (~30 vs ~26 tok/s on an M3 Air,
+      2026-10-17). The Q2_0_g64 file specifically: without the _g64 suffix
+      the packing is a fork-only layout that stock llama.cpp refuses to
+      load, and the difference is invisible until the failure.
+    params_b: 8.2
+    min_ram_gb: 4
     min_vram_gb: 0
     needs_gpu: false
     verified_in_lane: false
