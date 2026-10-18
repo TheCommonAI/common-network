@@ -379,6 +379,17 @@ def die(msg: str, code: int = 1) -> None:
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
 
+def default_node_name() -> str:
+    """A fresh node name: `common-node` and nine random digits.
+
+    Not the hostname. A machine whose hostname is its LAN address, or a laptop
+    named after its owner, would publish that to the whole network, and the
+    gateway's node list is public. Nine digits is enough that two nodes picking
+    one by chance is unlikely, and registration already refuses a name in use.
+    """
+    return f"common-node{secrets.randbelow(10 ** 9):09d}"
+
+
 def write_identity(gateway: str, name: str, node_id: str, catalogue_id: str | None, domain_tags: list[str] | None, node_token: str | None = None) -> None:
     """Local record of the most recent node this machine registered -- read by
     `common status` / `common whoami` / `common contrib`. Not a cryptographic
@@ -1580,7 +1591,7 @@ def main() -> None:
     # often share a hostname) from colliding.
     # Default is None here; resolved below to either the persisted identity's
     # name (for stable node IDs across restarts) or a fresh hostname + suffix.
-    parser.add_argument("--name", default=None, help="Node name, published to the network (default: reuse previous name, or hostname + short random suffix)")
+    parser.add_argument("--name", default=None, help="Node name, published to the network (default: reuse previous name, or common-node + nine random digits)")
     parser.add_argument("--operator", default="friend", help="Name shown publicly as this node's operator (default: 'friend')")
     parser.add_argument("--region", default=None, help="Optional region hint, e.g. au-adelaide")
     parser.add_argument("--cost", type=float, default=0, help="Declared cost per 1k tokens (default: 0, it's free)")
@@ -1613,7 +1624,7 @@ def main() -> None:
         if identity and identity.get("gateway") == gateway and identity.get("name"):
             args.name = identity["name"]
         else:
-            args.name = f"{socket.gethostname()}-{os.urandom(2).hex()}"
+            args.name = default_node_name()
 
     if args.list_catalogue:
         hw = probe_hardware()
