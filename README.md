@@ -2,7 +2,7 @@
 
 ![Common.](assets/common-banner.png)
 
-**The Common Network Alpha — v0.1.10**
+**The Common Network Alpha — v0.1.12**
 
 A South Australian nonprofit building decentralised AI.
 Small models on participants' devices, routed and combined. No single company owns the gate.
