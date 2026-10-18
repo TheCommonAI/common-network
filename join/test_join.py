@@ -547,6 +547,181 @@ join.reannounce("https://gw", _stale, "tok", "https://new.trycloudflare.com/v1",
 check("a failed re-announce leaves the payload on the address the gateway actually has",
       _stale["endpoint_url"], "https://old.trycloudflare.com/v1")
 
+check("the schedule runs to about a minute, not six seconds",
+      join.REANNOUNCE_ATTEMPTS * join.REANNOUNCE_MAX_BACKOFF_SECONDS >= 60, True)
+
+
+# --- The worker hands tokens on as they arrive ----------------------------
+# A backend that writes a token every 0.6s. read(8192) on the worker's side of
+# the hop waits for 8 KB or the end of the stream, so the first token used to
+# reach the caller only when the answer was finished. This pins the opposite:
+# the first token is forwarded while the backend is still writing.
+import http.client as _hc
+import json as _json
+import socket as _so
+import threading as _th
+import time as _t
+from http.server import BaseHTTPRequestHandler as _BaseHandler
+from http.server import ThreadingHTTPServer as _Server
+
+
+class _SlowBackend(_BaseHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for i in range(3):
+            event = _json.dumps({"choices": [{"delta": {"content": f"t{i}"}}]})
+            data = f"data: {event}\n\n".encode()
+            self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+            self.wfile.flush()
+            _t.sleep(0.6)
+        self.wfile.write(b"0\r\n\r\n")
+
+
+def _free_port():
+    with _so.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+_backend_port = _free_port()
+_backend = _Server(("127.0.0.1", _backend_port), _SlowBackend)
+_th.Thread(target=_backend.serve_forever, daemon=True).start()
+_worker_port = _free_port()
+_front = worker.serve("tok-stream", "m-stream", port=_worker_port,
+                      upstream_url=f"http://127.0.0.1:{_backend_port}", warm=False)
+_conn = _hc.HTTPConnection("127.0.0.1", _worker_port, timeout=10)
+_conn.request("POST", "/v1/chat/completions",
+              body=_json.dumps({"model": "m-stream", "stream": True,
+                                "messages": [{"role": "user", "content": "hi"}]}),
+              headers={"Authorization": "Bearer tok-stream",
+                       "Content-Type": "application/json"})
+_reply = _conn.getresponse()
+_started = _t.monotonic()
+_first = _reply.read1(4096)
+_first_after = _t.monotonic() - _started
+_rest = _reply.read()
+_conn.close()
+_front.shutdown()
+_backend.shutdown()
+
+check("the first token is forwarded while the backend is still writing",
+      _first_after < 1.0, True)
+check("and the whole answer still arrives intact",
+      all(tok in _first + _rest for tok in (b"t0", b"t1", b"t2")), True)
+
+
+# --- A dropped download is said as one, and keeps what it had ---------------
+# A first-run download that loses its connection mid-file used to raise a raw
+# socket error, which the caller does not handle, so the join died with a
+# traceback. It must come out as FetchFailed, with the partial file kept so the
+# next run resumes from it.
+class _DroppingBody:
+    status = 200
+    headers = {}
+
+    def __init__(self):
+        self._sent = False
+
+    def read(self, n=-1):
+        if not self._sent:
+            self._sent = True
+            return b"x" * 1024
+        raise TimeoutError("timed out")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+_real_urlopen_rt = runtime.urllib.request.urlopen
+_real_retry_rt = runtime.DOWNLOAD_RETRY_SECONDS
+runtime.DOWNLOAD_RETRY_SECONDS = 0  # the drop is retried now; keep the test quick
+runtime.urllib.request.urlopen = lambda req, timeout=None: _DroppingBody()
+with tempfile.TemporaryDirectory() as _rt_tmp:
+    _dest = Path(_rt_tmp) / "model.gguf"
+    try:
+        runtime._download("https://example.invalid/blob", _dest, expected_size=10 * 1024 * 1024,
+                          what="test-model")
+        _dropped_as, _kept = None, None
+    except runtime.FetchFailed as e:
+        _dropped_as = str(e)
+        _kept = _dest.with_name(_dest.name + ".part").stat().st_size
+    finally:
+        runtime.urllib.request.urlopen = _real_urlopen_rt
+        runtime.DOWNLOAD_RETRY_SECONDS = _real_retry_rt
+
+check("a dropped connection is a FetchFailed, not a raw error",
+      _dropped_as is not None and "interrupted" in _dropped_as, True)
+check("the partial file is kept for the next run to resume", _kept, 1024)
+
+
+# --- An interrupted download retries from where it stopped -----------------
+# The join gave up on the first dropped connection, and the whole join then had to
+# be started again. The fetch now tries again in-process, and only for a failure
+# that a resume can get past.
+_real_download_once = runtime._download_once
+_real_retry_seconds = runtime.DOWNLOAD_RETRY_SECONDS
+runtime.DOWNLOAD_RETRY_SECONDS = 0
+_calls = []
+
+
+def _interrupt_then_succeed(url, dest, expected_sha=None, expected_size=None, what=""):
+    _calls.append(url)
+    if len(_calls) == 1:
+        raise runtime.FetchFailed(f"the download of {what} was interrupted at 1 KB (timed out)")
+
+
+runtime._download_once = _interrupt_then_succeed
+runtime._download("https://example.invalid/blob", Path("unused"), what="test-model")
+check("an interrupted fetch is tried again without the join restarting", len(_calls), 2)
+
+_calls.clear()
+
+
+def _checksum_mismatch(url, dest, expected_sha=None, expected_size=None, what=""):
+    _calls.append(url)
+    raise runtime.FetchFailed(f"{what} did not match its recorded checksum")
+
+
+runtime._download_once = _checksum_mismatch
+try:
+    runtime._download("https://example.invalid/blob", Path("unused"), what="test-model")
+    _mismatch_raised = False
+except runtime.FetchFailed:
+    _mismatch_raised = True
+check("a checksum mismatch is not retried, since a resume cannot fix it", len(_calls), 1)
+check("and it still reaches the caller", _mismatch_raised, True)
+
+_calls.clear()
+
+
+def _always_interrupted(url, dest, expected_sha=None, expected_size=None, what=""):
+    _calls.append(url)
+    raise runtime.FetchFailed(f"the download of {what} was interrupted at 1 KB (timed out)")
+
+
+runtime._download_once = _always_interrupted
+try:
+    runtime._download("https://example.invalid/blob", Path("unused"), what="test-model")
+    _gave_up = False
+except runtime.FetchFailed:
+    _gave_up = True
+check("a fetch that keeps failing gives up after the set number of tries",
+      len(_calls), runtime.DOWNLOAD_ATTEMPTS)
+check("and says so to the caller", _gave_up, True)
+
+runtime._download_once = _real_download_once
+runtime.DOWNLOAD_RETRY_SECONDS = _real_retry_seconds
+
 
 # --- The default node name ------------------------------------------------
 # The node list is public, so the default must not be a hostname: a machine

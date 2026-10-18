@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The Common worker: the only thing that should ever face the network.
 
-The Common Network Alpha (v0.1.12).
+The Common Network Alpha (v0.1.13).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -368,7 +368,11 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 while True:
-                    chunk = upstream.read(8192)
+                    # read1, not read: read(n) blocks until n bytes or the end of
+                    # the stream, so a short answer arrives in one piece at the
+                    # end and a long one in 8 KB lumps. read1 returns whatever has
+                    # arrived, so each token is forwarded as the model writes it.
+                    chunk = upstream.read1(8192)
                     if not chunk:
                         break
                     self.wfile.write(f"{len(chunk):X}\r\n".encode())
