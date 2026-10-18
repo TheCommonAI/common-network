@@ -341,7 +341,18 @@ def _download(url: str, dest: Path, expected_sha: str | None = None,
         try:
             with open(part, mode) as out:
                 while True:
-                    chunk = resp.read(1024 * 256)
+                    try:
+                        chunk = resp.read(1024 * 256)
+                    except OSError as e:
+                        # A stalled or dropped connection is the common way a
+                        # first-run download on a slow network fails, and it must
+                        # be said as a FetchFailed: the caller only handles that,
+                        # so anything else ends the join with a traceback. The
+                        # partial file is kept, so running again resumes from it.
+                        raise FetchFailed(
+                            f"the download of {what or url} was interrupted at "
+                            f"{_size(have)} ({e}); run this again and it resumes"
+                        ) from None
                     if not chunk:
                         break
                     out.write(chunk)

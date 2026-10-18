@@ -617,6 +617,50 @@ check("and the whole answer still arrives intact",
       all(tok in _first + _rest for tok in (b"t0", b"t1", b"t2")), True)
 
 
+# --- A dropped download is said as one, and keeps what it had ---------------
+# A first-run download that loses its connection mid-file used to raise a raw
+# socket error, which the caller does not handle, so the join died with a
+# traceback. It must come out as FetchFailed, with the partial file kept so the
+# next run resumes from it.
+class _DroppingBody:
+    status = 200
+    headers = {}
+
+    def __init__(self):
+        self._sent = False
+
+    def read(self, n=-1):
+        if not self._sent:
+            self._sent = True
+            return b"x" * 1024
+        raise TimeoutError("timed out")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+_real_urlopen_rt = runtime.urllib.request.urlopen
+runtime.urllib.request.urlopen = lambda req, timeout=None: _DroppingBody()
+with tempfile.TemporaryDirectory() as _rt_tmp:
+    _dest = Path(_rt_tmp) / "model.gguf"
+    try:
+        runtime._download("https://example.invalid/blob", _dest, expected_size=10 * 1024 * 1024,
+                          what="test-model")
+        _dropped_as, _kept = None, None
+    except runtime.FetchFailed as e:
+        _dropped_as = str(e)
+        _kept = _dest.with_name(_dest.name + ".part").stat().st_size
+    finally:
+        runtime.urllib.request.urlopen = _real_urlopen_rt
+
+check("a dropped connection is a FetchFailed, not a raw error",
+      _dropped_as is not None and "interrupted" in _dropped_as, True)
+check("the partial file is kept for the next run to resume", _kept, 1024)
+
+
 # --- The default node name ------------------------------------------------
 # The node list is public, so the default must not be a hostname: a machine
 # named after its LAN address published that address to the whole network.
