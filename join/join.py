@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join the Common Network as a node operator.
 
-The Common Network Alpha (v0.1.10).
+The Common Network Alpha (v0.1.12).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -129,7 +129,7 @@ TUNNEL_RATE_LIMITED_PATTERN = re.compile(r"\b1015\b|\b429\b|too many requests", 
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.1.10"
+VERSION = "0.1.12"
 RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
@@ -521,14 +521,16 @@ def fetch_update() -> bytes | None:
     return remote if remote != local else None
 
 
-def refresh_siblings() -> None:
+def refresh_siblings() -> bool:
     """Bring every sibling module join.py drives up to date with this script.
 
     join.py imports the worker and the runtime as siblings, so a self-update
     that replaced only join.py would leave a new joiner driving an old worker or
     an old runtime -- exactly the kind of version skew that shows up as a
-    security fix silently not applying. Best effort throughout: a failure here
-    must not block the join, because a working old sibling beats no node at all.
+    security fix silently not applying. A failure here must not block the join,
+    because a working old sibling beats no node at all. It is reported through
+    the return value, though, because the caller about to replace join.py has to
+    hold off when it cannot be sure the siblings match it.
 
     Writes only what differs, so the common case is two small GETs per run. Note
     that this compares contents and nothing else -- there is no checksum or
@@ -536,17 +538,22 @@ def refresh_siblings() -> None:
     oversight introduced here, and is worth knowing when reasoning about what a
     compromised raw.githubusercontent.com would be able to do.
 
-    Called from two places, deliberately: before join.py overwrites itself, so
-    the next process starts with siblings that match it, and from
-    _require_runtime() when runtime.py turns out not to be here at all. The second
-    is what makes a version that predates runtime.py able to upgrade onto it.
+    Called from three places: at startup, so a node left with a stale worker.py
+    recovers; before join.py overwrites itself, so the next process starts with
+    siblings that match it; and from _require_runtime() when runtime.py turns out
+    not to be here at all. The last is what makes a version that predates
+    runtime.py able to upgrade onto it.
+
+    Returns True only when every sibling was confirmed current.
     """
     here = os.path.dirname(os.path.abspath(__file__))
+    current = True
     for name in SIBLING_MODULES:
         try:
             with urllib.request.urlopen(SIBLING_UPDATE_URL.format(name), timeout=5) as resp:
                 remote = resp.read()
             if not remote.strip():
+                current = False
                 continue
             path = os.path.join(here, name)
             try:
@@ -558,12 +565,16 @@ def refresh_siblings() -> None:
             with open(path, "wb") as f:
                 f.write(remote)
         except (urllib.error.URLError, socket.timeout, OSError):
-            continue
+            current = False
+    return current
 
 
 def apply_update_and_restart(remote: bytes) -> None:
-    """Overwrite this script with `remote` and re-exec. Never returns on success."""
-    refresh_siblings()
+    """Overwrite this script with `remote` and re-exec. Never returns on success.
+
+    The caller has already brought the siblings up to date and seen
+    refresh_siblings() return True; see the update checks in main().
+    """
     local_path = os.path.abspath(__file__)
     try:
         with open(local_path, "wb") as f:
@@ -1592,8 +1603,14 @@ def main() -> None:
     args = parser.parse_args()
 
     if not args.no_update:
+        # A node can be left running a join.py that expects a newer worker.py than
+        # the one beside it, and every start after that fails at serve() with a
+        # TypeError. Refreshing here, and reloading worker in this process, is what
+        # lets such a node recover without waiting for join.py itself to change.
+        if refresh_siblings():
+            importlib.reload(worker)
         remote = fetch_update()
-        if remote:
+        if remote and refresh_siblings():
             print(f"{GLYPH_WORK} {dim('updating to the latest version...')}")
             apply_update_and_restart(remote)
 
@@ -1932,7 +1949,7 @@ def main() -> None:
         if not args.no_update and time.monotonic() - last_update_check > UPDATE_CHECK_INTERVAL_SECONDS:
             last_update_check = time.monotonic()
             remote = fetch_update()
-            if remote:
+            if remote and refresh_siblings():
                 print(f"\n{GLYPH_WORK} {dim('a new version is available — restarting to update...')}")
                 deregister_and_stop()
                 apply_update_and_restart(remote)

@@ -260,6 +260,55 @@ check("runtime.py is in the self-update list",
 check("worker.py still is", "worker.py" in join.SIBLING_MODULES, True)
 
 
+section("a sibling that could not be fetched is reported, not swallowed")
+
+
+class _Body:
+    def __init__(self, body):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def _fake_fetch(bodies):
+    def urlopen(url, timeout=None):
+        body = bodies[url.rsplit("/", 1)[-1]]
+        if isinstance(body, Exception):
+            raise body
+        return _Body(body)
+    return urlopen
+
+
+_real_urlopen = urllib.request.urlopen
+with tempfile.TemporaryDirectory() as _tmp:
+    _saved_file = join.__file__
+    join.__file__ = str(Path(_tmp) / "join.py")
+    try:
+        urllib.request.urlopen = _fake_fetch({"worker.py": b"new worker\n", "runtime.py": b"new runtime\n"})
+        check("both siblings fetched -> True", join.refresh_siblings(), True)
+        check("worker.py is written beside join.py",
+              (Path(_tmp) / "worker.py").read_bytes(), b"new worker\n")
+
+        urllib.request.urlopen = _fake_fetch({"worker.py": urllib.error.URLError("offline"),
+                                              "runtime.py": b"new runtime\n"})
+        check("a failed worker.py fetch -> False", join.refresh_siblings(), False)
+        check("the runtime is still refreshed past the failure",
+              (Path(_tmp) / "runtime.py").read_bytes(), b"new runtime\n")
+
+        urllib.request.urlopen = _fake_fetch({"worker.py": b"", "runtime.py": b"new runtime\n"})
+        check("an empty sibling response -> False", join.refresh_siblings(), False)
+    finally:
+        urllib.request.urlopen = _real_urlopen
+        join.__file__ = _saved_file
+
+
 # --- what a failed tunnel is allowed to say ---------------------------------
 
 section("a rate-limited quick tunnel is named as one")
