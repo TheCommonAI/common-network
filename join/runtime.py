@@ -273,8 +273,44 @@ class _Progress:
 
 # --- fetching ---------------------------------------------------------------
 
+# How many times one fetch tries before giving up, and how long it waits before
+# each retry (multiplied by the attempt number). Every try resumes from the partial
+# file, so a retry costs only the bytes that did not arrive. The join used to give
+# up on the first dropped connection, and the whole join then had to be started
+# again by hand.
+DOWNLOAD_ATTEMPTS = 4
+DOWNLOAD_RETRY_SECONDS = 5
+
+
+def _interrupted(e: FetchFailed) -> bool:
+    """True for a failure the next try can resume past, and False for one it cannot.
+
+    A dropped or stalled connection is worth another try. A checksum or size that
+    does not match is not: the file was complete and wrong, and a resume would
+    only append to the wrong thing.
+    """
+    text = str(e)
+    return "was interrupted" in text or "could not reach" in text
+
+
 def _download(url: str, dest: Path, expected_sha: str | None = None,
               expected_size: int | None = None, what: str = "") -> None:
+    """Fetch `url` to `dest`, retrying an interrupted attempt from where it stopped."""
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            _download_once(url, dest, expected_sha, expected_size, what)
+            return
+        except FetchFailed as e:
+            if attempt == DOWNLOAD_ATTEMPTS or not _interrupted(e):
+                raise
+            print(f"  the download of {what or url} was interrupted; trying again "
+                  f"from where it stopped ({attempt} of {DOWNLOAD_ATTEMPTS})",
+                  file=sys.stderr)
+            time.sleep(DOWNLOAD_RETRY_SECONDS * attempt)
+
+
+def _download_once(url: str, dest: Path, expected_sha: str | None = None,
+                   expected_size: int | None = None, what: str = "") -> None:
     """Fetch `url` to `dest`, resuming an interrupted attempt and verifying it.
 
     The registry answers a blob GET with a 307 to a pre-signed object-storage URL

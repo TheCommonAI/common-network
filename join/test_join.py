@@ -643,6 +643,8 @@ class _DroppingBody:
 
 
 _real_urlopen_rt = runtime.urllib.request.urlopen
+_real_retry_rt = runtime.DOWNLOAD_RETRY_SECONDS
+runtime.DOWNLOAD_RETRY_SECONDS = 0  # the drop is retried now; keep the test quick
 runtime.urllib.request.urlopen = lambda req, timeout=None: _DroppingBody()
 with tempfile.TemporaryDirectory() as _rt_tmp:
     _dest = Path(_rt_tmp) / "model.gguf"
@@ -655,10 +657,70 @@ with tempfile.TemporaryDirectory() as _rt_tmp:
         _kept = _dest.with_name(_dest.name + ".part").stat().st_size
     finally:
         runtime.urllib.request.urlopen = _real_urlopen_rt
+        runtime.DOWNLOAD_RETRY_SECONDS = _real_retry_rt
 
 check("a dropped connection is a FetchFailed, not a raw error",
       _dropped_as is not None and "interrupted" in _dropped_as, True)
 check("the partial file is kept for the next run to resume", _kept, 1024)
+
+
+# --- An interrupted download retries from where it stopped -----------------
+# The join gave up on the first dropped connection, and the whole join then had to
+# be started again. The fetch now tries again in-process, and only for a failure
+# that a resume can get past.
+_real_download_once = runtime._download_once
+_real_retry_seconds = runtime.DOWNLOAD_RETRY_SECONDS
+runtime.DOWNLOAD_RETRY_SECONDS = 0
+_calls = []
+
+
+def _interrupt_then_succeed(url, dest, expected_sha=None, expected_size=None, what=""):
+    _calls.append(url)
+    if len(_calls) == 1:
+        raise runtime.FetchFailed(f"the download of {what} was interrupted at 1 KB (timed out)")
+
+
+runtime._download_once = _interrupt_then_succeed
+runtime._download("https://example.invalid/blob", Path("unused"), what="test-model")
+check("an interrupted fetch is tried again without the join restarting", len(_calls), 2)
+
+_calls.clear()
+
+
+def _checksum_mismatch(url, dest, expected_sha=None, expected_size=None, what=""):
+    _calls.append(url)
+    raise runtime.FetchFailed(f"{what} did not match its recorded checksum")
+
+
+runtime._download_once = _checksum_mismatch
+try:
+    runtime._download("https://example.invalid/blob", Path("unused"), what="test-model")
+    _mismatch_raised = False
+except runtime.FetchFailed:
+    _mismatch_raised = True
+check("a checksum mismatch is not retried, since a resume cannot fix it", len(_calls), 1)
+check("and it still reaches the caller", _mismatch_raised, True)
+
+_calls.clear()
+
+
+def _always_interrupted(url, dest, expected_sha=None, expected_size=None, what=""):
+    _calls.append(url)
+    raise runtime.FetchFailed(f"the download of {what} was interrupted at 1 KB (timed out)")
+
+
+runtime._download_once = _always_interrupted
+try:
+    runtime._download("https://example.invalid/blob", Path("unused"), what="test-model")
+    _gave_up = False
+except runtime.FetchFailed:
+    _gave_up = True
+check("a fetch that keeps failing gives up after the set number of tries",
+      len(_calls), runtime.DOWNLOAD_ATTEMPTS)
+check("and says so to the caller", _gave_up, True)
+
+runtime._download_once = _real_download_once
+runtime.DOWNLOAD_RETRY_SECONDS = _real_retry_seconds
 
 
 # --- The default node name ------------------------------------------------
