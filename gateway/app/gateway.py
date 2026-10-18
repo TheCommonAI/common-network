@@ -337,6 +337,7 @@ async def _handle_composed(
             node_id=node["id"], node_name=node["name"], model_name=node["model_name"],
             client=node.get("client"), topology=topology, stream=stream, route_ms=route_ms,
             ttft_ms=ttft_ms, total_ms=total_ms, ok=ok, error=error,
+            prompt_chars=metrics.prompt_chars(body),
         )
 
     if not answers:
@@ -466,6 +467,7 @@ async def _handle_composed(
         # exactly why a composed request needs to be separable from a single one
         # when the p95 moves.
         "ttft_ms": latency_ms if stream else None,
+        "prompt_chars": metrics.prompt_chars(body),
     }
 
     streamed = _proxy_response(
@@ -694,6 +696,7 @@ async def chat_completions(request: Request):
                 # the time to headers would put a whole generation into a
                 # distribution of first tokens. See migrations/012.
                 "ttft_ms": latency_ms if stream else None,
+                "prompt_chars": metrics.prompt_chars(body),
                 **metrics.node_report(resp.headers),
             }
 
@@ -786,6 +789,7 @@ async def chat_completions(request: Request):
                     total_ms=int((time.monotonic() - t0) * 1000),
                     ok=False,
                     error=f"{type(exc).__name__}: {exc}",
+                    prompt_chars=metrics.prompt_chars(body),
                 )
 
     raise HTTPException(status_code=502, detail=f"all candidate nodes failed: {last_error}")
