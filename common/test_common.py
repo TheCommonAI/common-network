@@ -623,6 +623,73 @@ check("and neither request identifies the caller to the gateway",
       ["x-common-client" in _s["headers"] for _s in _seen], [False, False])
 
 
+# --- ask --json streams a single node's answer, never a panel's -------------
+#
+# The desktop app runs `common ask --json` for every question and has nothing
+# to show until this process exits, which on a cold model is tens of seconds
+# of a blank bubble. The fix is NDJSON: one `{"delta": "..."}` line per token as
+# it arrives from the gateway, flushed immediately, so a reader of the pipe
+# sees each word the moment this process does -- followed by the one `{"answer":
+# ...}` summary line this always ended on, unchanged, so a caller that only
+# reads the last line still gets exactly what it got before.
+#
+# Deliberately not for a panel or a composed answer: the gateway's own
+# `_sse_from_text` synthesises that text whole before the first byte goes out
+# (see its docstring), so there is no real generation to narrate -- chunking a
+# complete string into fake deltas here would be theatre, reporting a stream
+# that never happened. `X-Common-Topology` is what tells this file which case
+# it is in, and the two bodies below exist to prove both sides of that branch.
+def _sse_server(topology: str, panel: str | None = None):
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("X-Common-Node", "friends-mac")
+            self.send_header("X-Common-Topology", topology)
+            self.send_header("X-Common-Candidates", "1")
+            if panel is not None:
+                self.send_header("X-Common-Panel", panel)
+            self.end_headers()
+            self.wfile.write(b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n')
+            self.wfile.write(b'data: {"choices":[{"delta":{"content":"b"}}]}\n\n')
+            self.wfile.write(b"data: [DONE]\n\n")
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _run_ask(server) -> list[str]:
+    gateway = f"http://127.0.0.1:{server.server_address[1]}"
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            common.cmd_ask(gateway, "what is a node?", None, None, False, True, False, False)
+    finally:
+        server.shutdown()
+    return [line for line in out.getvalue().splitlines() if line.strip().startswith("{")]
+
+
+_single_lines = _run_ask(_sse_server("single"))
+_deltas = [json.loads(line) for line in _single_lines[:-1]]
+_summary = json.loads(_single_lines[-1])
+check("a single-node answer streams one line per delta",
+      [d.get("delta") for d in _deltas], ["a", "b"])
+check("and ends on the one summary line this always ended on",
+      _summary["answer"], "ab")
+
+_panel_lines = _run_ask(_sse_server("panel", panel="friends-mac, guzzler"))
+check("a panel's answer is not streamed as deltas -- it was never generated as one",
+      len(_panel_lines), 1)
+check("the panel's one line is still the complete summary",
+      json.loads(_panel_lines[0])["answer"], "ab")
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} of {CHECKS[0]} FAILED\n")
