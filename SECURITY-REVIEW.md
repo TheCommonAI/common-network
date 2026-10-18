@@ -57,6 +57,11 @@ LAN can automatically read unicast traffic.
 only on a trusted network or through a protected tunnel/VPN. Avoid LAN mode on
 networks where traffic may be observed.
 
+The gateway now offers the opt-in `REQUIRE_HTTPS_NODE_ENDPOINTS=true` policy
+for this purpose. It rejects non-loopback HTTP endpoints while preserving
+loopback HTTP for same-machine development. The default remains off for
+compatibility with existing HTTP/LAN deployments.
+
 ## Scope and limitations
 
 Bundled clients default to an HTTPS gateway, which protects the client-to-

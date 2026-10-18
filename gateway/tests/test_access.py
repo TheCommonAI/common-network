@@ -35,6 +35,8 @@ print("\nshipped posture is pinned")
 code_defaults = Settings(_env_file=None)
 check("contribution gate on by default", code_defaults.require_contribution, True)
 check("rate limit on by default (req/min)", code_defaults.rate_limit_requests_per_minute, 20)
+check("HTTPS endpoint enforcement preserves existing defaults",
+      code_defaults.require_https_node_endpoints, False)
 
 print("\ncredential parsing (what the gate trusts)")
 check("X-Common-Node-Token (the CLI spelling)",

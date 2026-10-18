@@ -25,6 +25,13 @@ strangers from bypassing the gateway's gate and rate limit to reach a
 contributor's worker directly — and the worker itself requires a bearer token
 they do not have.
 
+- **Read prompts sent to their node.** The gateway forwards the complete
+  request body to the selected node, whose operator can read the prompt. Anyone
+  can register a node, so users should not send confidential prompts to the
+  shared network unless they trust the nodes that may receive them. This is not
+  passive access to every request; it applies when routing selects their node
+  (including panel or fallback use).
+
 ## What a stranger cannot do
 
 - **Use the network without contributing to it.** With
@@ -59,8 +66,9 @@ they do not have.
   registering an endpoint you controlled with `api_key_ref=OPENROUTER_API_KEY`
   made the gateway send that key to you on its next health check. Fixed
   2026-09-08; see History.)
-- **Read other people's requests.** The decisions log records topology, nodes,
-  scores and latencies. It does not expose request text or embeddings.
+- **Read request text from the public decisions log.** The decisions log
+  records topology, nodes, scores and latencies, not request text. This does
+  not prevent the gateway or a selected node from processing the prompt.
 - **Read a reported exchange.** `POST /client/reports` accepts an `exchange` —
   the question and the answer a user is complaining about — and `GET
   /admin/client-reports` returns it to whoever holds `ADMIN_TOKEN`. This is the
@@ -82,16 +90,22 @@ to a public deployment**. On a public gateway:
 
 1. **Set `ALLOW_LOOPBACK_NODE_ENDPOINTS=false`** so a stranger can't point the
    network at services only visible from the gateway's own machine.
-2. **Leave `REQUIRE_CONTRIBUTION=true`** unless you deliberately want to give
+2. **Set `REQUIRE_HTTPS_NODE_ENDPOINTS=true`** to require TLS between the
+   gateway and non-loopback node endpoints. The default remains `false` to
+   preserve existing HTTP/LAN deployments; when enabled, non-loopback HTTP
+   nodes (including LAN nodes) cannot register. Loopback HTTP remains available
+   for same-machine development. This protects traffic in transit, not prompts
+   from the gateway or the node that processes them.
+3. **Leave `REQUIRE_CONTRIBUTION=true`** unless you deliberately want to give
    compute away to anonymous traffic.
-3. **Keep the database private.** Request embeddings live in the `decisions`
+4. **Keep the database private.** Request embeddings live in the `decisions`
    table; the API doesn't expose them, but a public Postgres would.
-4. **Set `ADMIN_TOKEN`** if you want the operators view at `/admin` (failing
+5. **Set `ADMIN_TOKEN`** if you want the operators view at `/admin` (failing
    nodes, error rates, client rate-limit state). Left empty — the default —
    those routes 404 as though the feature did not exist. Use a long random
    value (`openssl rand -hex 24`); it is a password, and it appears in the URL
    when you open the page in a browser, so it will be in your history.
-5. **Pin the CLI install to a tag** if you fork this. `install.sh` and the
+6. **Pin the CLI install to a tag** if you fork this. `install.sh` and the
    CLI's self-update fetch from `main` by default; `main` is fine while it is
    this repository, but it means whoever controls the repo controls every
    installed machine's CLI. The short install URL (`commonai.com.au/install.sh`)

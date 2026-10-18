@@ -136,7 +136,15 @@ async def validate_endpoint_url(url: str, *, wait_seconds: float | None = None) 
             status_code=400,
             detail="endpoint_url must be an http:// or https:// URL the gateway can POST to.",
         )
-    for addr in await _resolved_addresses(parsed.hostname, wait_seconds=wait_seconds):
+    addresses = await _resolved_addresses(parsed.hostname, wait_seconds=wait_seconds)
+    if (parsed.scheme == "http" and settings.require_https_node_endpoints
+            and any(not addr.is_loopback for addr in addresses)):
+        raise HTTPException(
+            status_code=400,
+            detail="non-loopback endpoint_url must use https:// "
+                   "(REQUIRE_HTTPS_NODE_ENDPOINTS=true).",
+        )
+    for addr in addresses:
         if addr.is_link_local:
             raise HTTPException(
                 status_code=400,

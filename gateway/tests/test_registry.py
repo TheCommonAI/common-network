@@ -92,6 +92,21 @@ print("\nreal nodes are unaffected")
 accepted("private LAN address (school lab --lan)", "http://192.168.1.42:11434/v1")
 accepted("public IP literal", "http://8.8.8.8:11434/v1")
 
+print("\nHTTPS endpoint policy is opt-in and preserves loopback development")
+original_require_https = settings.require_https_node_endpoints
+try:
+    settings.require_https_node_endpoints = True
+    rejected("remote HTTP endpoint when HTTPS is required",
+             "http://192.168.1.42:11434/v1")
+    accepted("remote HTTPS endpoint when HTTPS is required",
+             "https://192.168.1.42:11434/v1")
+    if settings.allow_loopback_node_endpoints:
+        accepted("loopback HTTP endpoint when HTTPS is required",
+                 "http://127.0.0.1:11434/v1")
+finally:
+    settings.require_https_node_endpoints = original_require_https
+    del original_require_https
+
 # Hostname path, stubbed so the suite needs no DNS: a public tunnel/API
 # hostname resolving to a public address is a legitimate node.
 real_getaddrinfo = registry.socket.getaddrinfo
