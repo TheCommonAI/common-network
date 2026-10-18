@@ -13,7 +13,7 @@ from pathlib import Path
 # Order is not meaningful; roughly cheap-and-pure first, anything touching a
 # live node last.
 TESTS = ["test_verify.py", "test_compose.py", "test_metrics.py", "test_routing.py",
-         "test_timeouts.py", "test_decision_id.py",
+         "test_timeouts.py", "test_decision_id.py", "test_route_clock.py",
          "test_panel_flow.py", "test_registry.py", "test_health_loop.py",
          "test_access.py", "test_admin.py", "test_client.py",
          "test_client_observability.py", "test_node_url_exposure.py",

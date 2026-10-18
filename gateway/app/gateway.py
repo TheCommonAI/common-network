@@ -583,8 +583,15 @@ async def chat_completions(request: Request):
     if not nodes:
         raise HTTPException(status_code=503, detail="no healthy nodes available")
 
+    # Stage marks for the log line below, so a slow request says which step
+    # it spent its time in rather than only that it was slow.
+    t_access = route_ms()
+
     routing_text = _extract_routing_text(body)
-    request_embed = embedder.embed(routing_text)
+    # Off the event loop. The encode is CPU-bound, and run inline it stalls
+    # every other request in flight for as long as it takes.
+    request_embed = await embedder.embed_async(routing_text)
+    t_embed = route_ms()
     region_hint = request.headers.get("X-Common-Region")
     forced_node_name = request.headers.get("X-Common-Node")
     matched_domain = best_matched_domain(nodes, request_embed)
@@ -613,27 +620,16 @@ async def chat_completions(request: Request):
             request_text=routing_text,
         )
 
-        if plan.compose:
-            start = time.monotonic()
-            composed = await _handle_composed(
-                plan, body, stream, request_embed, matched_domain, scored, start,
-                route_ms=route_ms(), t0=t0,
-            )
-            if composed is not None:
-                return composed
-            # Every panel member failed. Fall through to single-node routing
-            # rather than failing the request.
-            plan = PanelPlan(compose=False,
-                             reason="panel selected but no member answered — fell back to single routing")
-
         primary, backup = choose_primary(scored, routing_text)
         candidates = [primary] + ([backup] if backup else [])
 
-    last_error: Exception | None = None
-
-    # Sampled HERE, before any node is contacted, and deliberately not at the
-    # point the header is assembled. It was called down there, after
-    # `await upstream.forward(...)` had already returned -- and for a streaming
+    # Sampled HERE, before any node is contacted, and before the panel. A panel
+    # that fails and falls back to single routing has already spent its budget
+    # on its members; sampling after it counted that as routing, and made the
+    # gateway look slow for work it never did.
+    #
+    # Also deliberately not sampled at the point the header is assembled. That
+    # is after `await upstream.forward(...)` has returned, and for a streaming
     # request that return happens when the *node's* response headers arrive,
     # which is after it has loaded its model. So the number labelled "routing"
     # contained the node's model load, and the client then subtracted the two
@@ -644,6 +640,24 @@ async def chat_completions(request: Request):
     # This is the number worth watching if routing ever feels slow: access
     # control, the node list, the embedding and the score. Tens of milliseconds.
     route_ms_at_decision = route_ms()
+    print(f"route {route_ms_at_decision}ms: access and nodes {t_access}ms, "
+          f"embed {t_embed - t_access}ms, score {route_ms_at_decision - t_embed}ms",
+          flush=True)
+
+    if plan.compose:
+        start = time.monotonic()
+        composed = await _handle_composed(
+            plan, body, stream, request_embed, matched_domain, scored, start,
+            route_ms=route_ms_at_decision, t0=t0,
+        )
+        if composed is not None:
+            return composed
+        # Every panel member failed. Fall through to single-node routing
+        # rather than failing the request.
+        plan = PanelPlan(compose=False,
+                         reason="panel selected but no member answered — fell back to single routing")
+
+    last_error: Exception | None = None
 
     for attempt, candidate in enumerate(candidates):
         start = time.monotonic()
