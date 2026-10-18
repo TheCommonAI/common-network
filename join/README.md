@@ -127,6 +127,10 @@ so removing that directory is a complete uninstall.
   them.
 - The tunnel URL changes every time you run the script, which is fine — the
   gateway is told your endpoint at registration time.
+- While running, quick-tunnel reachability is checked every 30 seconds. If a
+  tunnel rotates or drops, the replacement is checked before the gateway is
+  re-registered, avoiding a fresh unhealthy entry while Cloudflare propagates
+  the new hostname.
 - If your laptop goes to sleep or loses internet, the gateway's health check
   will just mark your node unhealthy and stop routing to it until you're
   back.

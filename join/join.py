@@ -1148,7 +1148,7 @@ def _best_local_fallback(gateway: str, hw: dict, exclude_id: str | None) -> dict
     return candidates[0]
 
 
-TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS = 120  # quick tunnels can silently reconnect with a new hostname without the process dying
+TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS = 30  # quick tunnels can silently reconnect with a new hostname without the process dying
 
 # Registration can block while the gateway retries DNS resolution (up to ~30s).
 # This timeout must exceed that window, otherwise the client aborts mid-retry.
@@ -1171,18 +1171,15 @@ REANNOUNCE_MAX_BACKOFF_SECONDS = 10
 def tunnel_is_healthy(tunnel_url: str, worker_token: str) -> bool:
     """Is the tunnel still carrying traffic to our worker?
 
-    Needs the token now: the worker 401s an unauthenticated /v1/models, and a
-    401 travelling back through the tunnel would prove the tunnel is fine
-    while reading as a failure -- so send the credential and treat only a
-    transport error as unhealthy.
+    The worker requires its bearer token. A successful authenticated response
+    proves the request reached the worker; HTTP errors from the tunnel edge
+    (for example Cloudflare 502/530) mean it did not.
     """
     try:
         http_json("GET", f"{tunnel_url}/v1/models", timeout=8,
                   headers={"Authorization": f"Bearer {worker_token}"})
         return True
-    except urllib.error.HTTPError:
-        return True  # reached the worker; a status code is not a dead tunnel
-    except (urllib.error.URLError, socket.timeout):
+    except (urllib.error.HTTPError, urllib.error.URLError, socket.timeout, ValueError):
         return False
 
 
@@ -1218,7 +1215,9 @@ def wait_for_tunnel(tunnel_url: str, worker_token: str) -> bool:
     return False
 
 
-def reannounce_target(tunnel_url: str, registered_url: str | None) -> str | None:
+def reannounce_target(
+    tunnel_url: str, registered_url: str | None, *, tunnel_ready: bool = True,
+) -> str | None:
     """The address the gateway should have for us, or None if it already has it.
 
     A serving node has two addresses and they can disagree: the one it is
@@ -1233,6 +1232,8 @@ def reannounce_target(tunnel_url: str, registered_url: str | None) -> str | None
     cannot observe: a quick tunnel rotates its hostname without the cloudflared
     process dying, and a DHCP lease renewal reassigns a LAN address.
     """
+    if not tunnel_ready:
+        return None
     wanted = f"{tunnel_url}/v1"
     return None if wanted == registered_url else wanted
 
@@ -1804,18 +1805,24 @@ def main() -> None:
     # returning 400, so registration requests can block for a while.
     # REGISTRATION_TIMEOUT (module constant) exceeds the gateway's DNS retry
     # window so the client doesn't abort mid-retry.
-    RETRY_MAX_WAIT = 60  # seconds
+    RETRY_MAX_WAIT = 60  # seconds, including time spent waiting on the gateway
     RETRY_INITIAL_BACKOFF = 2  # seconds
     RETRY_MAX_BACKOFF = 10  # seconds
 
     node = None
-    retry_elapsed = 0.0
+    retry_deadline = time.monotonic() + RETRY_MAX_WAIT
     retry_backoff = RETRY_INITIAL_BACKOFF
 
     while node is None:
+        retry_remaining = retry_deadline - time.monotonic()
+        if retry_remaining <= 0:
+            stop_children()
+            die(f"registration failed after {RETRY_MAX_WAIT}s of retries. "
+                f"The gateway may be slow to respond (DNS propagation) or unreachable.\n"
+                f"  {comment('Try again in a minute.')}")
         try:
             node = http_json("POST", f"{gateway}/nodes", body=payload, headers=reg_headers,
-                             timeout=REGISTRATION_TIMEOUT)
+                             timeout=min(REGISTRATION_TIMEOUT, retry_remaining))
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="ignore")
 
@@ -1824,16 +1831,17 @@ def main() -> None:
             # on its side, but client-side retry with the same URL helps if
             # the gateway gave up before our DNS propagated.
             if e.code == 400 and "does not resolve" in detail:
-                if retry_elapsed >= RETRY_MAX_WAIT:
+                retry_remaining = retry_deadline - time.monotonic()
+                if retry_remaining <= 0:
                     stop_children()
                     die(f"registration failed: the gateway still cannot resolve our tunnel "
                         f"hostname after {RETRY_MAX_WAIT}s. This can happen when DNS "
                         f"propagation is unusually slow.\n"
                         f"  {comment('Try again in a minute; the same hostname may work then.')}")
 
-                print(f"{GLYPH_FORMING} {dim(f'gateway cannot resolve our hostname yet — retrying in {retry_backoff}s (waited {retry_elapsed:.0f}s / {RETRY_MAX_WAIT}s)...')}")
-                time.sleep(retry_backoff)
-                retry_elapsed += retry_backoff
+                wait = min(retry_backoff, retry_remaining)
+                print(f"{GLYPH_FORMING} {dim(f'gateway cannot resolve our hostname yet — retrying in {wait}s (up to {RETRY_MAX_WAIT}s total)...')}")
+                time.sleep(wait)
                 retry_backoff = min(retry_backoff * 2, RETRY_MAX_BACKOFF)
                 continue
 
@@ -1849,7 +1857,8 @@ def main() -> None:
             # Timeout or network error during registration. The gateway may be
             # mid-DNS-retry (blocking), or there may be transient network issues.
             # Treat like a soft failure and retry with the same tunnel URL.
-            if retry_elapsed >= RETRY_MAX_WAIT:
+            retry_remaining = retry_deadline - time.monotonic()
+            if retry_remaining <= 0:
                 stop_children()
                 die(f"registration failed: request timed out or network error after "
                     f"{RETRY_MAX_WAIT}s of retries. The gateway may be slow to respond "
@@ -1857,9 +1866,9 @@ def main() -> None:
                     f"  {comment('Try again in a minute.')}")
 
             err_desc = "timed out" if isinstance(e, (socket.timeout, TimeoutError)) else str(e.reason if hasattr(e, 'reason') else e)
-            print(f"{GLYPH_FORMING} {dim(f'registration {err_desc} — retrying in {retry_backoff}s (waited {retry_elapsed:.0f}s / {RETRY_MAX_WAIT}s)...')}")
-            time.sleep(retry_backoff)
-            retry_elapsed += retry_backoff
+            wait = min(retry_backoff, retry_remaining)
+            print(f"{GLYPH_FORMING} {dim(f'registration {err_desc} — retrying in {wait}s (up to {RETRY_MAX_WAIT}s total)...')}")
+            time.sleep(wait)
             retry_backoff = min(retry_backoff * 2, RETRY_MAX_BACKOFF)
             continue
 
@@ -1898,6 +1907,7 @@ def main() -> None:
 
     last_update_check = time.monotonic()
     last_tunnel_check = time.monotonic()
+    tunnel_pending_reachability = False
     while True:
         if tunnel_proc is not None and tunnel_proc.poll() is not None:
             print(f"{GLYPH_FORMING} {red('tunnel dropped unexpectedly.')}")
@@ -1915,6 +1925,7 @@ def main() -> None:
 
         if time.monotonic() - last_tunnel_check > TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS:
             last_tunnel_check = time.monotonic()
+            replacement_tunnel_ready = True
 
             # Where are we serving from now? Two things can move that, and
             # neither is visible from the far end.
@@ -1927,11 +1938,19 @@ def main() -> None:
                 current = lan_ip()
                 if current and f"http://{current}:{WORKER_PORT}" != tunnel_url:
                     tunnel_url = f"http://{current}:{WORKER_PORT}"
+            elif tunnel_pending_reachability:
+                replacement_tunnel_ready = tunnel_is_healthy(tunnel_url, worker_token)
+                if replacement_tunnel_ready:
+                    tunnel_pending_reachability = False
             elif not tunnel_is_healthy(tunnel_url, worker_token):
                 print(f"{GLYPH_FORMING} {red('tunnel is no longer reachable')} (quick tunnels can silently rotate hostnames) — restarting it...")
                 stop_process(tunnel_proc)
                 tunnel_proc, tunnel_url = start_tunnel()
                 print(f"{GLYPH_DONE} tunnel live at {blue(tunnel_url)}")
+                if not wait_for_tunnel(tunnel_url, worker_token):
+                    print(f"{GLYPH_FORMING} {red('replacement tunnel is not reachable yet')} — will retry before re-registering.")
+                    replacement_tunnel_ready = False
+                    tunnel_pending_reachability = True
 
             # Then tell the gateway, rather than only testing ourselves.
             # Restarting the tunnel is half the job: the gateway still holds the
@@ -1943,7 +1962,9 @@ def main() -> None:
             #
             # A failed attempt leaves them disagreeing on purpose, so the next
             # pass tries again; see `reannounce` for why that is the shape.
-            wanted = reannounce_target(tunnel_url, registered_url)
+            wanted = reannounce_target(
+                tunnel_url, registered_url, tunnel_ready=replacement_tunnel_ready
+            )
             if wanted is not None:
                 # The wording is the pre-existing wording for each case, kept
                 # exactly: the desktop app reads these lines.

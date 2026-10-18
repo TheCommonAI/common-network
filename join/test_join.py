@@ -70,6 +70,40 @@ check("the model backend and the worker are on different ports",
 section("tunnel health check timeout is reasonable")
 check("TUNNEL_WARMUP_TIMEOUT_SECONDS is ~30s",
       25 <= join.TUNNEL_WARMUP_TIMEOUT_SECONDS <= 35, True)
+check("silent tunnel rotations are checked at most every 30 seconds",
+      join.TUNNEL_HEALTH_CHECK_INTERVAL_SECONDS <= 30, True)
+
+section("tunnel health distinguishes worker responses from edge failures")
+
+_real_http_json = join.http_json
+_probe_requests = []
+
+
+def _healthy_tunnel_probe(method, url, body=None, headers=None, timeout=10.0):
+    _probe_requests.append((method, url, headers, timeout))
+    return {"data": []}
+
+
+join.http_json = _healthy_tunnel_probe
+check("an authenticated worker response is healthy",
+      join.tunnel_is_healthy("https://node.trycloudflare.com", "worker-secret"), True)
+check("the tunnel probe supplies the worker credential",
+      _probe_requests[0][2]["Authorization"] == "Bearer worker-secret", True)
+
+
+def _edge_error(status):
+    def probe(method, url, body=None, headers=None, timeout=10.0):
+        raise urllib.error.HTTPError(
+            url, status, "edge failure", None, io.BytesIO(b"unavailable"))
+    return probe
+
+
+for _status in (401, 502, 530):
+    join.http_json = _edge_error(_status)
+    check(f"HTTP {_status} is not a healthy tunnel",
+          join.tunnel_is_healthy("https://node.trycloudflare.com", "worker-secret"), False)
+
+join.http_json = _real_http_json
 
 
 # --- the wire name, which the gateway routes on ------------------------------
@@ -490,6 +524,10 @@ check("a rotated quick-tunnel hostname is",
 check("a LAN node that renewed its lease is, the same way",
       join.reannounce_target("http://192.168.1.44:11435", "http://192.168.1.9:11435/v1"),
       "http://192.168.1.44:11435/v1")
+check("a replacement tunnel is not re-announced before it is reachable",
+      join.reannounce_target("https://b.trycloudflare.com",
+                             "https://a.trycloudflare.com/v1", tunnel_ready=False),
+      None)
 check("a node the gateway has never been told about is",
       join.reannounce_target("https://a.trycloudflare.com", None),
       "https://a.trycloudflare.com/v1")
