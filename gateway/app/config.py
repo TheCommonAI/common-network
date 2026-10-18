@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     # visible from the gateway's own machine.
     allow_loopback_node_endpoints: bool = True
 
+    # Require HTTPS for node endpoints outside loopback. Off by default to
+    # preserve existing HTTP/LAN deployments; public gateways should enable it
+    # to prevent on-path observers from reading prompts and worker tokens.
+    require_https_node_endpoints: bool = False
+
     # Environment-variable names a node may reference via api_key_ref, comma
     # separated. Empty (the default) means NO node may reference one.
     #
