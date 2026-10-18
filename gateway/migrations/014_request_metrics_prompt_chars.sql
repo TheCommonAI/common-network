@@ -1,0 +1,16 @@
+-- How much text the request asked the node to read, in characters.
+--
+-- Added to test a specific guess about the first-token slowdown: a node serving
+-- a conversation re-reads the whole history on each turn, so the prompt grows
+-- with the session and so does the wait for the first token. Recording the size
+-- here, on the gateway's own side, lets that be checked against ttft_ms without
+-- waiting for the node to report prompt_tokens, which no node does yet.
+--
+-- The sum of the text in `messages` (string content, or the text parts of list
+-- content). Characters rather than tokens because the gateway has no tokenizer
+-- and a length is enough to show whether the prompt grows. Nullable: null means
+-- the request had no messages to measure, and rows written before this
+-- migration are null too.
+--
+-- Only the length is stored, never the content.
+alter table request_metrics add column if not exists prompt_chars integer;

@@ -170,6 +170,31 @@ def node_report(headers: httpx.Headers | dict | None) -> dict[str, Any]:
     }
 
 
+def prompt_chars(body: Any) -> int | None:
+    """How many characters of message text a request carried.
+
+    Counts the string content of each message, and the text parts when content
+    is a list. Anything else is ignored rather than guessed at, so an unusual
+    shape under-counts instead of raising inside a request. None when the body
+    has no `messages` list at all, which is different from an empty list.
+
+    Only the length leaves this function. The text itself is never stored.
+    """
+    messages = body.get("messages") if isinstance(body, dict) else None
+    if not isinstance(messages, list):
+        return None
+    total = 0
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    total += len(part["text"])
+    return total
+
+
 async def _record(row: dict[str, Any]) -> None:
     """Insert one metrics row. Never raises into anything.
 
@@ -189,9 +214,9 @@ async def _record(row: dict[str, Any]) -> None:
                      route_ms, ttft_ms, total_ms,
                      node_reported, load_ms, prompt_eval_ms, eval_ms,
                      prompt_tokens, prompt_cached_tokens, completion_tokens, cold,
-                     ok, error, client)
+                     ok, error, client, prompt_chars)
                 values ($1, $2, $3, $4, $5, $6, $7, $8,
-                        $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                        $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
                 """,
                 row.get("node_id"),
                 row.get("node_name"),
@@ -212,6 +237,7 @@ async def _record(row: dict[str, Any]) -> None:
                 bool(row.get("ok", True)),
                 (row.get("error") or None) and str(row["error"])[:200],
                 row.get("client") or None,
+                row.get("prompt_chars"),
             )
     except Exception as exc:  # noqa: BLE001 -- see docstring
         print(f"metrics: could not record request metrics "
