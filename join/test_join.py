@@ -548,6 +548,19 @@ check("a failed re-announce leaves the payload on the address the gateway actual
       _stale["endpoint_url"], "https://old.trycloudflare.com/v1")
 
 
+# --- The default node name ------------------------------------------------
+# The node list is public, so the default must not be a hostname: a machine
+# named after its LAN address published that address to the whole network.
+import re as _re
+_names = [join.default_node_name() for _ in range(200)]
+check("the default name is common-node and nine digits",
+      all(_re.fullmatch(r"common-node\d{9}", n) for n in _names), True)
+check("the default name contains no dot, so it cannot be an address",
+      any("." in n for n in _names), False)
+check("default names are not all the same",
+      len(set(_names)) > 1, True)
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} of {CHECKS[0]} FAILED\n")
