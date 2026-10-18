@@ -547,6 +547,75 @@ join.reannounce("https://gw", _stale, "tok", "https://new.trycloudflare.com/v1",
 check("a failed re-announce leaves the payload on the address the gateway actually has",
       _stale["endpoint_url"], "https://old.trycloudflare.com/v1")
 
+check("the schedule runs to about a minute, not six seconds",
+      join.REANNOUNCE_ATTEMPTS * join.REANNOUNCE_MAX_BACKOFF_SECONDS >= 60, True)
+
+
+# --- The worker hands tokens on as they arrive ----------------------------
+# A backend that writes a token every 0.6s. read(8192) on the worker's side of
+# the hop waits for 8 KB or the end of the stream, so the first token used to
+# reach the caller only when the answer was finished. This pins the opposite:
+# the first token is forwarded while the backend is still writing.
+import http.client as _hc
+import json as _json
+import socket as _so
+import threading as _th
+import time as _t
+from http.server import BaseHTTPRequestHandler as _BaseHandler
+from http.server import ThreadingHTTPServer as _Server
+
+
+class _SlowBackend(_BaseHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for i in range(3):
+            event = _json.dumps({"choices": [{"delta": {"content": f"t{i}"}}]})
+            data = f"data: {event}\n\n".encode()
+            self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+            self.wfile.flush()
+            _t.sleep(0.6)
+        self.wfile.write(b"0\r\n\r\n")
+
+
+def _free_port():
+    with _so.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+_backend_port = _free_port()
+_backend = _Server(("127.0.0.1", _backend_port), _SlowBackend)
+_th.Thread(target=_backend.serve_forever, daemon=True).start()
+_worker_port = _free_port()
+_front = worker.serve("tok-stream", "m-stream", port=_worker_port,
+                      upstream_url=f"http://127.0.0.1:{_backend_port}", warm=False)
+_conn = _hc.HTTPConnection("127.0.0.1", _worker_port, timeout=10)
+_conn.request("POST", "/v1/chat/completions",
+              body=_json.dumps({"model": "m-stream", "stream": True,
+                                "messages": [{"role": "user", "content": "hi"}]}),
+              headers={"Authorization": "Bearer tok-stream",
+                       "Content-Type": "application/json"})
+_reply = _conn.getresponse()
+_started = _t.monotonic()
+_first = _reply.read1(4096)
+_first_after = _t.monotonic() - _started
+_rest = _reply.read()
+_conn.close()
+_front.shutdown()
+_backend.shutdown()
+
+check("the first token is forwarded while the backend is still writing",
+      _first_after < 1.0, True)
+check("and the whole answer still arrives intact",
+      all(tok in _first + _rest for tok in (b"t0", b"t1", b"t2")), True)
+
 
 # --- The default node name ------------------------------------------------
 # The node list is public, so the default must not be a hostname: a machine

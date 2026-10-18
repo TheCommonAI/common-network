@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join the Common Network as a node operator.
 
-The Common Network Alpha (v0.1.12).
+The Common Network Alpha (v0.1.13).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -129,7 +129,7 @@ TUNNEL_RATE_LIMITED_PATTERN = re.compile(r"\b1015\b|\b429\b|too many requests", 
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.1.12"
+VERSION = "0.1.13"
 RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
@@ -1160,8 +1160,12 @@ REGISTRATION_TIMEOUT = 90  # seconds — comfortably above gateway's 30s DNS ret
 # dead model, and that must not sit in a retry while it does. Giving up here is
 # safe in a way it is not there: the disagreement this exists to fix outlives
 # the attempt, so the next pass simply tries again.
-REANNOUNCE_ATTEMPTS = 3
+# A restarted quick tunnel's hostname can take well over the old three attempts
+# (about six seconds) to resolve, and the gateway only waits about 30s itself. So
+# the schedule runs to roughly a minute: 2, 4, 8, then 10s between the rest.
+REANNOUNCE_ATTEMPTS = 8
 REANNOUNCE_BACKOFF_SECONDS = 2
+REANNOUNCE_MAX_BACKOFF_SECONDS = 10
 
 
 def tunnel_is_healthy(tunnel_url: str, worker_token: str) -> bool:
@@ -1272,7 +1276,7 @@ def reannounce(gateway: str, payload: dict, node_token: str, wanted: str,
         except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
             detail = str(getattr(e, "reason", e))
         if attempt + 1 < tries:
-            time.sleep(backoff * (2 ** attempt))
+            time.sleep(min(backoff * (2 ** attempt), REANNOUNCE_MAX_BACKOFF_SECONDS))
     return None, detail
 
 
