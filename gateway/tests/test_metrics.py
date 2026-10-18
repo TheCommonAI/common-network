@@ -285,7 +285,7 @@ class WritePathTests(unittest.IsolatedAsyncioTestCase):
             metrics.record_request(node_name='n', total_ms=5, ttft_ms=4)
             await asyncio.gather(*list(metrics._pending))
         self.assertEqual(len(conn.executed), 1)
-        self.assertEqual(len(conn.executed[0]), 19, 'all columns are bound')
+        self.assertEqual(len(conn.executed[0]), 20, 'all columns are bound')
 
     async def test_the_client_is_snapshotted_onto_the_row(self):
         # The node's client string at request time, not a join to nodes later:
@@ -304,8 +304,73 @@ class WritePathTests(unittest.IsolatedAsyncioTestCase):
             metrics.record_request(node_name='n', client='common-cli/0.1.5', total_ms=5)
             await asyncio.gather(*list(metrics._pending))
         sql, args = conn.executed[0]
-        self.assertIn('client)', sql)
-        self.assertEqual(args[-1], 'common-cli/0.1.5')
+        self.assertIn('client, prompt_chars)', sql)
+        self.assertIn('common-cli/0.1.5', args)
+
+
+class PromptCharsTests(unittest.IsolatedAsyncioTestCase):
+    """The prompt size a conversation carried, measured on the gateway's side.
+
+    The point is to see whether first-token time grows with history, so the
+    count has to grow with history: every turn resends everything before it.
+    """
+
+    def test_counts_the_text_of_every_message(self):
+        body = {'messages': [
+            {'role': 'system', 'content': 'be brief'},        # 8
+            {'role': 'user', 'content': 'hello'},             # 5
+        ]}
+        self.assertEqual(metrics.prompt_chars(body), 13)
+
+    def test_a_longer_history_is_a_larger_prompt(self):
+        turn_one = {'messages': [{'role': 'user', 'content': 'a' * 100}]}
+        turn_two = {'messages': [
+            {'role': 'user', 'content': 'a' * 100},
+            {'role': 'assistant', 'content': 'b' * 300},
+            {'role': 'user', 'content': 'c' * 50},
+        ]}
+        self.assertLess(metrics.prompt_chars(turn_one), metrics.prompt_chars(turn_two))
+
+    def test_list_content_counts_its_text_parts_only(self):
+        body = {'messages': [{'role': 'user', 'content': [
+            {'type': 'text', 'text': 'abcd'},                           # 4
+            {'type': 'image_url', 'image_url': {'url': 'x' * 1000}},    # not text
+        ]}]}
+        self.assertEqual(metrics.prompt_chars(body), 4)
+
+    def test_no_messages_list_is_none_not_zero(self):
+        # Null means the body had nothing to measure. Zero would say the prompt
+        # was empty, which is a claim about the request that is not true.
+        self.assertIsNone(metrics.prompt_chars({'model': 'auto'}))
+        self.assertIsNone(metrics.prompt_chars({'messages': 'hello'}))
+        self.assertEqual(metrics.prompt_chars({'messages': []}), 0)
+
+    def test_malformed_parts_are_skipped_not_raised(self):
+        body = {'messages': ['not a dict', {'content': None}, {'content': 42},
+                             {'content': [None, {'text': 7}]}]}
+        self.assertEqual(metrics.prompt_chars(body), 0)
+
+    async def test_the_length_is_written_and_the_text_is_not(self):
+        class Recording(Conn):
+            def __init__(self):
+                super().__init__()
+                self.executed = []
+
+            async def execute(self, sql, *args):
+                self.executed.append((sql, args))
+                return 'INSERT 0 1'
+
+        conn = Recording()
+        secret = 'the user asked about their medical history'
+        with patch.object(metrics.db, 'pool', return_value=_Pool(conn)):
+            metrics.record_request(node_name='n', total_ms=5,
+                                   prompt_chars=metrics.prompt_chars(
+                                       {'messages': [{'content': secret}]}))
+            await asyncio.gather(*list(metrics._pending))
+        sql, args = conn.executed[0]
+        self.assertIn('prompt_chars', sql)
+        self.assertEqual(args[-1], len(secret))
+        self.assertNotIn(secret, repr(args), 'only the length is stored, never the text')
 
 
 # --- The read path --------------------------------------------------------
