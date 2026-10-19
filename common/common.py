@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """COMMON. — the commons, belonging to everyone and no one.
 
-The Common Network Alpha (v0.1.13).
+The Common Network Alpha (v0.2.0-dev).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -12,6 +12,7 @@ Usage:
     common ask "<prompt>"          route one question through the network
     common join                    put this machine on the commons as a node
     common serve <model>           contribute a specific model
+    common rpc <runtime flags>     launch a private RPC worker or inspect a v0.2 group
     common leave                   take this machine off the commons
     common status                  this node: health, position, requests served
     common demand                  live domain coverage gaps
@@ -120,7 +121,7 @@ except ImportError:  # pragma: no cover - Windows
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
-VERSION = "0.1.13"
+VERSION = "0.2.0-dev"
 RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
@@ -2172,10 +2173,14 @@ def cmd_leave(gateway: str) -> None:
 
 def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_model: str | None = None) -> None:
     join_py = INSTALL_DIR / "join.py"
-    # The join script ships next to this file in every installed copy. With
-    # --no-update (which the desktop always passes) it is used as installed and
-    # nothing is fetched; a first run installs the bundled copy instead.
-    if args.no_update:
+    checkout_join = Path(__file__).resolve().parent.parent / "join" / "join.py"
+    if (Path(__file__).resolve().parent.parent / ".git").exists() and checkout_join.is_file():
+        # A checkout runs its own join.py, which matches this CLI. Nothing is fetched.
+        join_py = checkout_join
+    elif args.no_update:
+        # The join script ships next to this file in every installed copy. With
+        # --no-update (which the desktop always passes) it is used as installed and
+        # nothing is fetched; a first run installs the bundled copy instead.
         bundled = Path(__file__).resolve().parent / "join.py"
         if not join_py.exists():
             if not bundled.exists():
@@ -2202,7 +2207,11 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
     if verb == "serve":
         print(dim(f"putting {extra_model} out to graze on the commons.\n"))
 
-    argv = [sys.executable, str(join_py), "--gateway", gateway]
+    argv = [sys.executable, str(join_py)]
+    if "--local-only" not in (args.rest or []):
+        argv += ["--gateway", gateway]
+    if args.no_update or join_py == checkout_join:
+        argv += ["--no-update"]
     if extra_model:
         argv += ["--model", extra_model, "--auto"]
     elif args.auto:
@@ -4050,6 +4059,10 @@ def main() -> None:
     parser.add_argument("--version", action="store_true")
     args = parser.parse_args()
 
+    if args.verb == "join" and "--local-only" in args.rest:
+        # Local experiments must not download/execute a different join script.
+        args.no_update = True
+
     _ARGS_NO_COLOR[0] = args.no_color
 
     if not args.no_update:
@@ -4115,6 +4128,11 @@ def main() -> None:
         cmd_test(args.gateway.rstrip("/"), args)
     elif args.verb == "join":
         cmd_join_or_serve("join", gateway, args)
+    elif args.verb == "rpc":
+        runtime_py = Path(__file__).resolve().parent.parent / "join" / "runtime.py"
+        if not runtime_py.is_file():
+            runtime_py = INSTALL_DIR / "runtime.py"
+        os.execv(sys.executable, [sys.executable, str(runtime_py), *args.rest])
     elif args.verb == "serve":
         model = args.rest[0] if args.rest else args.model
         if not model:
