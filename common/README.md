@@ -1,5 +1,9 @@
 # common — the COMMON. CLI
 
+The v0.2 development backend supports a configured distributed target model and
+local speculative drafting while preserving the existing desktop-facing API.
+See [distributed setup and release gates](../join/DISTRIBUTED.md).
+
 The full network client: ask questions, contribute a node, watch demand,
 see who's on the commons. Installed by the same one-liner as everything
 else — see the [top-level README](../README.md#contributing-a-node-for-friends).

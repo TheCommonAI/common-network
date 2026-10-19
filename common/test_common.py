@@ -353,6 +353,9 @@ check("with no attempts recorded", _record["send"]["attempts"], 0)
 check("and no error", _record["send"]["last_error"], None)
 
 _sent = build()
+# Reports store second-resolution creation times; make this fixture explicitly
+# newer instead of relying on execution crossing a wall-clock second boundary.
+_sent["created_unix"] = max(r.get("created_unix", 0) for _, r in common._list_reports()) + 1
 _sent["send"].update({"sent": True, "attempts": 1})
 common._write_json_atomic(common._report_path(_sent["id"]), _sent)
 check("a sent report reads back as sent",

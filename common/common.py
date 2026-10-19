@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """COMMON. — the commons, belonging to everyone and no one.
 
-The Common Network Alpha (v0.1.13).
+The Common Network Alpha (v0.2.0-dev).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -12,6 +12,7 @@ Usage:
     common ask "<prompt>"          route one question through the network
     common join                    put this machine on the commons as a node
     common serve <model>           contribute a specific model
+    common rpc <runtime flags>     launch a private RPC worker or inspect a v0.2 group
     common leave                   take this machine off the commons
     common status                  this node: health, position, requests served
     common demand                  live domain coverage gaps
@@ -111,7 +112,7 @@ except ImportError:  # pragma: no cover - Windows
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
-VERSION = "0.1.13"
+VERSION = "0.2.0-dev"
 RELEASE = "The Common Network Alpha"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
@@ -1460,6 +1461,7 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
     stream_json = as_json and topology == "single"
     full = []
     ttft_ms: int | None = None
+    stream_done = False
     with resp:
         for raw_line in resp:
             line = raw_line.decode("utf-8", errors="ignore").strip()
@@ -1467,6 +1469,7 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
                 continue
             payload = line[len("data:"):].strip()
             if payload == "[DONE]":
+                stream_done = True
                 break
             try:
                 chunk = json.loads(payload)
@@ -1484,6 +1487,15 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
                 else:
                     print(paper(delta), end="", flush=True)
                     full.append(delta)
+    if not stream_done:
+        # EOF is not a successful completion. In particular, a contributor
+        # process can disappear mid-generation and leave a plausible-looking
+        # partial answer on stdout. The desktop treats a nonzero CLI exit as
+        # an interrupted request and discards those streamed deltas.
+        print(red("✗ the answer stream ended before it was complete."), file=sys.stderr)
+        print(comment("the contributing runtime or network connection may have stopped; retry the question."),
+              file=sys.stderr)
+        sys.exit(1)
     if not as_json:
         print()
 
@@ -2132,15 +2144,21 @@ def cmd_leave(gateway: str) -> None:
 
 def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_model: str | None = None) -> None:
     join_py = INSTALL_DIR / "join.py"
-    # Always fetch the current version before delegating -- a stale local
+    checkout_join = Path(__file__).resolve().parent.parent / "join" / "join.py"
+    if (Path(__file__).resolve().parent.parent / ".git").exists() and checkout_join.is_file():
+        join_py = checkout_join
+    # Installed copies fetch the current version before delegating unless
+    # --no-update was requested. Checkouts use their own matching join.py.
+    # A stale local
     # copy's own self-update runs *after* argparse, so a new flag this CLI
     # relies on (e.g. --auto) would crash before join.py ever got the chance
     # to update itself. Found exactly this bug in testing.
     try:
-        with urllib.request.urlopen(JOIN_SCRIPT_URL, timeout=10) as resp:
-            remote = resp.read()
-        join_py.parent.mkdir(parents=True, exist_ok=True)
-        join_py.write_bytes(remote)
+        if join_py != checkout_join and not args.no_update:
+            with urllib.request.urlopen(JOIN_SCRIPT_URL, timeout=10) as resp:
+                remote = resp.read()
+            join_py.parent.mkdir(parents=True, exist_ok=True)
+            join_py.write_bytes(remote)
     except (urllib.error.URLError, socket.timeout) as e:
         if not join_py.exists():
             print(red(f"✗ couldn't fetch the join script: {e}"), file=sys.stderr)
@@ -2150,7 +2168,11 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
     if verb == "serve":
         print(dim(f"putting {extra_model} out to graze on the commons.\n"))
 
-    argv = [sys.executable, str(join_py), "--gateway", gateway]
+    argv = [sys.executable, str(join_py)]
+    if "--local-only" not in (args.rest or []):
+        argv += ["--gateway", gateway]
+    if args.no_update or join_py == checkout_join:
+        argv += ["--no-update"]
     if extra_model:
         argv += ["--model", extra_model, "--auto"]
     elif args.auto:
@@ -3998,6 +4020,10 @@ def main() -> None:
     parser.add_argument("--version", action="store_true")
     args = parser.parse_args()
 
+    if args.verb == "join" and "--local-only" in args.rest:
+        # Local experiments must not download/execute a different join script.
+        args.no_update = True
+
     _ARGS_NO_COLOR[0] = args.no_color
 
     if not args.no_update:
@@ -4063,6 +4089,11 @@ def main() -> None:
         cmd_test(args.gateway.rstrip("/"), args)
     elif args.verb == "join":
         cmd_join_or_serve("join", gateway, args)
+    elif args.verb == "rpc":
+        runtime_py = Path(__file__).resolve().parent.parent / "join" / "runtime.py"
+        if not runtime_py.is_file():
+            runtime_py = INSTALL_DIR / "runtime.py"
+        os.execv(sys.executable, [sys.executable, str(runtime_py), *args.rest])
     elif args.verb == "serve":
         model = args.rest[0] if args.rest else args.model
         if not model:
