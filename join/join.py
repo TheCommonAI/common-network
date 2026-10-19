@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join the Common Network as a node operator.
 
-The Common Network Alpha (v0.1.13).
+The Common Network Alpha (v0.2.0-dev).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -129,7 +129,7 @@ TUNNEL_RATE_LIMITED_PATTERN = re.compile(r"\b1015\b|\b429\b|too many requests", 
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.1.13"
+VERSION = "0.2.0-dev"
 RELEASE = "The Common Network Alpha"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
@@ -686,7 +686,7 @@ def sleep_idle_seconds(mod) -> int:
         return mod.DEFAULT_SLEEP_IDLE_SECONDS
 
 
-def start_llama_server(gguf: Path, wire_name: str) -> subprocess.Popen:
+def start_llama_server(gguf: Path, wire_name: str, distributed=None) -> subprocess.Popen:
     """Start llama-server on `gguf`, and block until it is actually serving.
 
     Returns the process, which the main loop watches and cleanup() stops.
@@ -705,7 +705,9 @@ def start_llama_server(gguf: Path, wire_name: str) -> subprocess.Popen:
     """
     mod = _require_runtime()
     try:
-        binary = mod.ensure_llama_server()
+        if distributed:
+            distributed.preflight()
+        binary = distributed.binary if distributed else mod.ensure_llama_server()
     except mod.FetchFailed as e:
         die_with_fix(f"could not set up the model runtime: {e}",
                      f"Nothing was changed on this machine. Run this again to retry,\n"
@@ -715,9 +717,14 @@ def start_llama_server(gguf: Path, wire_name: str) -> subprocess.Popen:
 
     argv = mod.llama_server_argv(binary, gguf, LLAMA_PORT, alias=wire_name,
                                  sleep_idle_seconds=sleep_idle)
+    if distributed:
+        argv = distributed.argv(LLAMA_PORT, sleep_idle_seconds=sleep_idle)
     print(f"{GLYPH_ROUTE} {dim('starting the model runtime...')}")
+    log_path = Path.home() / ".common-network" / "runtime.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with log_path.open("ab") as log:
+            proc = subprocess.Popen(argv, stdout=log, stderr=log)
     except OSError as e:
         die_with_fix(f"couldn't start llama-server: {e}", "Run `common join` again to retry the fetch.")
 
@@ -752,9 +759,7 @@ def wait_for_llama(proc: subprocess.Popen, gguf: Path) -> bool:
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             die_with_fix(f"the model runtime exited with code {proc.returncode}.",
-                         "It usually prints the reason to stderr, which this hides while\n"
-                         "  joining. Run it by hand to see it:\n"
-                         f"  {LLAMA_URL}")
+                         "See ~/.common-network/runtime.log for the runtime error.")
         try:
             http_json("GET", f"{LLAMA_URL}/health", timeout=5)
         except urllib.error.HTTPError as e:
@@ -1436,7 +1441,7 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
     argv = [
         sys.executable, os.path.abspath(__file__),
         "--gateway", args.gateway,
-        "--model", args.model,
+        *([] if getattr(args, "distributed_config", None) else ["--model", args.model]),
         "--name", args.name,
         "--operator", args.operator,
         "--cost", str(args.cost),
@@ -1452,6 +1457,8 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
     # network blocks -- and silently drops out of the lab.
     if args.lan:
         argv += ["--lan"]
+    if getattr(args, "distributed_config", None):
+        argv += ["--distributed-config", str(Path(args.distributed_config).expanduser().resolve())]
     return argv
 
 
@@ -1590,6 +1597,70 @@ def remove_permanent() -> None:
         die(f"--permanent isn't supported on {system}")
 
 
+# Backoff between restarts of the local coordinator's runtime, and how long a
+# runtime must stay up before its restart budget is restored.
+LOCAL_RESTART_DELAYS_SECONDS = (5, 15, 30, 60, 120)
+LOCAL_RESTART_RESET_SECONDS = 600
+
+
+def run_local_coordinator(config_path: str) -> None:
+    """Run only the loopback model API, without gateway or identity side effects.
+
+    Deliberately bypass the Common worker: it binds on all interfaces and runs
+    background warm-up inference. Local benchmarks should only run explicit
+    requests and must never publish a node or replace its contribution identity.
+    """
+    mod = _require_runtime()
+    try:
+        distributed = mod.DistributedConfig(config_path)
+    except mod.FetchFailed as e:
+        die(str(e))
+    proc = None
+    previous_handlers = {}
+    restarts = 0
+
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt
+
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, interrupted)
+        # A dropped RPC worker takes the runtime down with it. Restart it with
+        # backoff so the coordinator recovers once the worker is back, and give
+        # up only after the restarts stop helping: a runtime that stays up for
+        # LOCAL_RESTART_RESET_SECONDS earns its restart budget back.
+        while True:
+            started = time.monotonic()
+            proc = start_llama_server(distributed.target, distributed.name, distributed=distributed)
+            if wait_for_llama(proc, distributed.target):
+                print(f"{GLYPH_DONE} local coordinator ready at {LLAMA_URL}/v1")
+                print(comment("no gateway registration, tunnel, identity changes, or background inference"))
+                print(comment("ctrl+c stops this coordinator; existing RPC workers stay running"))
+                code = proc.wait()
+                reason = f"the local model runtime exited with code {code}"
+            else:
+                code = proc.poll()
+                reason = "the local coordinator never became ready"
+                stop_process(proc)
+            down = mod.unreachable_rpc_servers(distributed.peers)
+            if down:
+                reason = f"{reason}; RPC worker not accepting connections at {', '.join(down)}"
+            if time.monotonic() - started >= LOCAL_RESTART_RESET_SECONDS:
+                restarts = 0
+            if restarts >= len(LOCAL_RESTART_DELAYS_SECONDS):
+                die(f"{reason}; giving up after {restarts} restarts. See ~/.common-network/runtime.log")
+            delay = LOCAL_RESTART_DELAYS_SECONDS[restarts]
+            restarts += 1
+            print(f"{GLYPH_FORMING} {red(reason)}; restart {restarts} of {len(LOCAL_RESTART_DELAYS_SECONDS)} in {delay}s")
+            time.sleep(delay)
+    except KeyboardInterrupt:
+        print(f"\n{GLYPH_WORK} {dim('stopping the local coordinator...')}")
+    finally:
+        stop_process(proc)
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+
 def main() -> None:
     _force_utf8_output()
     sys.stdout.reconfigure(line_buffering=True)
@@ -1597,6 +1668,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--gateway", default=os.environ.get("COMMON_GATEWAY_URL", DEFAULT_GATEWAY), help="Gateway base URL (default: the shared Common Network gateway)")
     parser.add_argument("--model", default=None, help="Catalogue id (e.g. qwen2.5-coder-14b) or a raw model tag (e.g. mathstral:7b). Default: probe hardware and ask the network what it needs most (see --auto, --list-catalogue)")
+    parser.add_argument("--distributed-config", help="v0.2 distributed model group JSON; bypasses specialist model assignment")
+    parser.add_argument("--local-only", action="store_true", help="Run only the distributed model API on loopback; no gateway, worker, warm-up, tunnel, or identity changes")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
     # The name and operator are published to the whole network (`GET /nodes`
@@ -1612,10 +1685,19 @@ def main() -> None:
     parser.add_argument("--cost", type=float, default=0, help="Declared cost per 1k tokens (default: 0, it's free)")
     parser.add_argument("--capability", default=None, help="Override the auto-generated capability description")
     parser.add_argument("--no-update", action="store_true", default=bool(os.environ.get("COMMON_NO_UPDATE")), help="Skip the self-update check (useful when hacking on this script locally)")
-    parser.add_argument("--lan", action="store_true", help="Join over the local network instead of a Cloudflare tunnel. For a computer lab or anywhere the gateway is on the same network — no tunnel, nothing exposed to the internet")
+    parser.add_argument("--lan", action="store_true", help="Use a LAN worker address instead of a Cloudflare tunnel; still registers with --gateway (production by default). For isolated tests use --local-only")
     parser.add_argument("--permanent", action="store_true", help="Install as a background service that starts at login/boot and restarts if it crashes, then exit")
     parser.add_argument("--remove-permanent", action="store_true", help="Remove the background service installed by --permanent, then exit")
     args = parser.parse_args()
+
+    # Before updates, catalogue lookup, identity reads, tunnel creation or any
+    # registration path. A local test must not contact the public gateway.
+    if args.local_only:
+        if (not args.distributed_config or args.model or args.lan or args.permanent
+                or args.remove_permanent or args.list_catalogue):
+            parser.error("--local-only requires --distributed-config and cannot be combined with --model, --lan, service installation/removal, or --list-catalogue")
+        run_local_coordinator(args.distributed_config)
+        return
 
     if not args.no_update:
         # A node can be left running a join.py that expects a newer worker.py than
@@ -1652,12 +1734,23 @@ def main() -> None:
         print_catalogue(gateway, hw)
         return
 
-    model_source, domain_tags, catalogue_id, capability_text_default = resolve_model(gateway, args)
+    distributed = None
+    if args.distributed_config:
+        if args.model:
+            parser.error("--model and --distributed-config are mutually exclusive")
+        try:
+            distributed = _require_runtime().DistributedConfig(args.distributed_config)
+        except _require_runtime().FetchFailed as e:
+            parser.error(str(e))
+        model_source, domain_tags, catalogue_id = None, ["general"], None
+        capability_text_default = f"General-purpose language model {distributed.name}, served across a distributed model group."
+    else:
+        model_source, domain_tags, catalogue_id, capability_text_default = resolve_model(gateway, args)
     # Bake the resolution into args.model so --permanent's saved service
     # invocation re-resolves the same way on every restart -- the catalogue
     # id round-trips back through resolve_model()'s lookup branch, and a source
     # string re-resolves through its own branch without being rewritten.
-    args.model = catalogue_id or model_source
+    args.model = catalogue_id or model_source or ""
 
     if args.permanent:
         install_permanent(args)
@@ -1666,8 +1759,8 @@ def main() -> None:
     # LAN mode skips cloudflared entirely, so don't demand it be installed.
     check_binaries(need_tunnel=not args.lan)
 
-    spec = resolve_source(model_source)
-    if spec is None:
+    spec = resolve_source(model_source) if not distributed else None
+    if spec is None and not distributed:
         die(f"can't run '{model_source}' locally (unrecognised source).")
 
     # The single string that is both this node's public model name and the id the
@@ -1675,10 +1768,11 @@ def main() -> None:
     # against the `model_name` registered below, so these two uses must stay the
     # same string -- for an `ollama:` source it is the tag with the scheme
     # stripped, which is exactly what every existing node already registers.
-    wire_name = spec.wire_name
+    wire_name = distributed.name if distributed else spec.wire_name
 
-    gguf = fetch_model(spec)
-    llama_proc = start_llama_server(gguf, wire_name)
+    gguf = distributed.target if distributed else fetch_model(spec)
+    llama_proc = (start_llama_server(gguf, wire_name, distributed=distributed)
+                  if distributed else start_llama_server(gguf, wire_name))
     if not wait_for_llama(llama_proc, gguf):
         stop_process(llama_proc)
         die_with_fix("the model runtime never started serving.",
