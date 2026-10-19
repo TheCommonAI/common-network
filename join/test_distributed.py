@@ -256,7 +256,7 @@ class DistributedTests(unittest.TestCase):
                 patch.object(join.worker, "serve", side_effect=AssertionError("worker")), \
                 patch.object(join.urllib.request, "urlopen", side_effect=AssertionError("gateway")):
             join.main()
-        run.assert_called_once_with(str(config.path))
+        run.assert_called_once_with(str(config.path), 11436)
 
     def test_local_only_rejects_registration_related_flags(self):
         for extra in (["--lan"], ["--permanent"], ["--list-catalogue"], ["--model", "other"]):
@@ -278,6 +278,20 @@ class DistributedTests(unittest.TestCase):
                 patch.object(join.signal, "signal"), patch.object(join.sys, "stdout"):
             join.run_local_coordinator(str(config.path))
         stop.assert_called_once_with(child)
+
+    def test_local_only_port_reaches_runtime_and_health_check(self):
+        child = MagicMock()
+        child.poll.return_value = None
+        child.wait.return_value = 0
+        with patch.object(join, "start_llama_server", return_value=child) as start, \
+                patch.object(join, "wait_for_llama", return_value=True) as wait, \
+                patch.object(join, "LOCAL_RESTART_DELAYS_SECONDS", (0,)), \
+                patch.object(join, "die", side_effect=SystemExit), \
+                patch.object(join, "stop_process"):
+            with self.assertRaises(SystemExit):
+                join.run_local_coordinator(str(self.config().path), 11437)
+        self.assertEqual(start.call_args_list[0].kwargs["port"], 11437)
+        self.assertEqual(wait.call_args_list[0].kwargs["port"], 11437)
 
     def test_local_only_startup_failure_stops_child(self):
         config = self.config()

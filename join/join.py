@@ -686,7 +686,7 @@ def sleep_idle_seconds(mod) -> int:
         return mod.DEFAULT_SLEEP_IDLE_SECONDS
 
 
-def start_llama_server(gguf: Path, wire_name: str, distributed=None) -> subprocess.Popen:
+def start_llama_server(gguf: Path, wire_name: str, distributed=None, port: int = LLAMA_PORT) -> subprocess.Popen:
     """Start llama-server on `gguf`, and block until it is actually serving.
 
     Returns the process, which the main loop watches and cleanup() stops.
@@ -715,10 +715,10 @@ def start_llama_server(gguf: Path, wire_name: str, distributed=None) -> subproce
 
     sleep_idle = sleep_idle_seconds(mod)
 
-    argv = mod.llama_server_argv(binary, gguf, LLAMA_PORT, alias=wire_name,
+    argv = mod.llama_server_argv(binary, gguf, port, alias=wire_name,
                                  sleep_idle_seconds=sleep_idle)
     if distributed:
-        argv = distributed.argv(LLAMA_PORT, sleep_idle_seconds=sleep_idle)
+        argv = distributed.argv(port, sleep_idle_seconds=sleep_idle)
     print(f"{GLYPH_ROUTE} {dim('starting the model runtime...')}")
     log_path = Path.home() / ".common-network" / "runtime.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -737,7 +737,7 @@ def start_llama_server(gguf: Path, wire_name: str, distributed=None) -> subproce
     return proc
 
 
-def wait_for_llama(proc: subprocess.Popen, gguf: Path) -> bool:
+def wait_for_llama(proc: subprocess.Popen, gguf: Path, port: int = LLAMA_PORT) -> bool:
     """Wait for llama-server to answer its health endpoint. True if it did.
 
     `/health` is deliberately public and needs no API key, so this is a plain
@@ -754,6 +754,7 @@ def wait_for_llama(proc: subprocess.Popen, gguf: Path) -> bool:
     200 is confirmed against /props' model_path, and a mismatch is fatal and
     says why.
     """
+    url = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + LLAMA_STARTUP_TIMEOUT_SECONDS
     last_detail = "no response"
     while time.monotonic() < deadline:
@@ -761,14 +762,14 @@ def wait_for_llama(proc: subprocess.Popen, gguf: Path) -> bool:
             die_with_fix(f"the model runtime exited with code {proc.returncode}.",
                          "See ~/.common-network/runtime.log for the runtime error.")
         try:
-            http_json("GET", f"{LLAMA_URL}/health", timeout=5)
+            http_json("GET", f"{url}/health", timeout=5)
         except urllib.error.HTTPError as e:
             last_detail = f"{e.code} {e.read().decode(errors='ignore').strip()}"
         except (urllib.error.URLError, socket.timeout, OSError) as e:
             last_detail = str(e)
         else:
             try:
-                props = http_json("GET", f"{LLAMA_URL}/props", timeout=5)
+                props = http_json("GET", f"{url}/props", timeout=5)
             except (urllib.error.HTTPError, urllib.error.URLError, socket.timeout, OSError):
                 # /props went away between the two calls; ask again next tick.
                 last_detail = "health answered but /props did not"
@@ -776,7 +777,7 @@ def wait_for_llama(proc: subprocess.Popen, gguf: Path) -> bool:
                 serving = str(props.get("model_path") or "")
                 if serving and Path(serving).resolve() != Path(gguf).resolve():
                     die_with_fix(
-                        f"another model server is already using port {LLAMA_PORT}.",
+                        f"another model server is already using port {port}.",
                         f"It is serving:\n"
                         f"    {serving}\n"
                         f"  but this node is set up for:\n"
@@ -1603,7 +1604,7 @@ LOCAL_RESTART_DELAYS_SECONDS = (5, 15, 30, 60, 120)
 LOCAL_RESTART_RESET_SECONDS = 600
 
 
-def run_local_coordinator(config_path: str) -> None:
+def run_local_coordinator(config_path: str, port: int = LLAMA_PORT) -> None:
     """Run only the loopback model API, without gateway or identity side effects.
 
     Deliberately bypass the Common worker: it binds on all interfaces and runs
@@ -1631,9 +1632,9 @@ def run_local_coordinator(config_path: str) -> None:
         # LOCAL_RESTART_RESET_SECONDS earns its restart budget back.
         while True:
             started = time.monotonic()
-            proc = start_llama_server(distributed.target, distributed.name, distributed=distributed)
-            if wait_for_llama(proc, distributed.target):
-                print(f"{GLYPH_DONE} local coordinator ready at {LLAMA_URL}/v1")
+            proc = start_llama_server(distributed.target, distributed.name, distributed=distributed, port=port)
+            if wait_for_llama(proc, distributed.target, port=port):
+                print(f"{GLYPH_DONE} local coordinator ready at http://127.0.0.1:{port}/v1")
                 print(comment("no gateway registration, tunnel, identity changes, or background inference"))
                 print(comment("ctrl+c stops this coordinator; existing RPC workers stay running"))
                 code = proc.wait()
@@ -1670,6 +1671,7 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="Catalogue id (e.g. qwen2.5-coder-14b) or a raw model tag (e.g. mathstral:7b). Default: probe hardware and ask the network what it needs most (see --auto, --list-catalogue)")
     parser.add_argument("--distributed-config", help="v0.2 distributed model group JSON; bypasses specialist model assignment")
     parser.add_argument("--local-only", action="store_true", help="Run only the distributed model API on loopback; no gateway, worker, warm-up, tunnel, or identity changes")
+    parser.add_argument("--port", type=int, default=None, help="With --local-only: the loopback port for the model API (default 11436)")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
     # The name and operator are published to the whole network (`GET /nodes`
@@ -1692,11 +1694,15 @@ def main() -> None:
 
     # Before updates, catalogue lookup, identity reads, tunnel creation or any
     # registration path. A local test must not contact the public gateway.
+    if args.port is not None and not (1 <= args.port <= 65535):
+        parser.error("--port must be between 1 and 65535")
+    if args.port is not None and not args.local_only:
+        parser.error("--port is only used with --local-only")
     if args.local_only:
         if (not args.distributed_config or args.model or args.lan or args.permanent
                 or args.remove_permanent or args.list_catalogue):
             parser.error("--local-only requires --distributed-config and cannot be combined with --model, --lan, service installation/removal, or --list-catalogue")
-        run_local_coordinator(args.distributed_config)
+        run_local_coordinator(args.distributed_config, args.port or LLAMA_PORT)
         return
 
     if not args.no_update:
