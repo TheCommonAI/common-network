@@ -639,7 +639,7 @@ check("and neither request identifies the caller to the gateway",
 # complete string into fake deltas here would be theatre, reporting a stream
 # that never happened. `X-Common-Topology` is what tells this file which case
 # it is in, and the two bodies below exist to prove both sides of that branch.
-def _sse_server(topology: str, panel: str | None = None):
+def _sse_server(topology: str, panel: str | None = None, done: bool = True):
     class _Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -657,7 +657,8 @@ def _sse_server(topology: str, panel: str | None = None):
             self.end_headers()
             self.wfile.write(b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n')
             self.wfile.write(b'data: {"choices":[{"delta":{"content":"b"}}]}\n\n')
-            self.wfile.write(b"data: [DONE]\n\n")
+            if done:
+                self.wfile.write(b"data: [DONE]\n\n")
 
     server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -688,6 +689,23 @@ check("a panel's answer is not streamed as deltas -- it was never generated as o
       len(_panel_lines), 1)
 check("the panel's one line is still the complete summary",
       json.loads(_panel_lines[0])["answer"], "ab")
+
+
+# --- a stream cut before [DONE] is an interrupted answer, never a complete one ---
+_cut = _sse_server("single", done=False)
+_cut_out = io.StringIO()
+_cut_exit = None
+try:
+    with contextlib.redirect_stdout(_cut_out), contextlib.redirect_stderr(io.StringIO()):
+        common.cmd_ask(f"http://127.0.0.1:{_cut.server_address[1]}", "what is a node?", None, None, False, True, False, False)
+except SystemExit as e:
+    _cut_exit = e.code
+finally:
+    _cut.shutdown()
+check("a stream cut before [DONE] exits nonzero, so callers treat it as failed",
+      _cut_exit, 1)
+check("and never prints the complete summary line",
+      any(l.strip().startswith('{"answer"') for l in _cut_out.getvalue().splitlines()), False)
 
 
 print()

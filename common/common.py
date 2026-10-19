@@ -1489,6 +1489,7 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
     stream_json = as_json and topology == "single"
     full = []
     ttft_ms: int | None = None
+    stream_done = False
     with resp:
         for raw_line in resp:
             line = raw_line.decode("utf-8", errors="ignore").strip()
@@ -1496,6 +1497,7 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
                 continue
             payload = line[len("data:"):].strip()
             if payload == "[DONE]":
+                stream_done = True
                 break
             try:
                 chunk = json.loads(payload)
@@ -1513,6 +1515,15 @@ def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
                 else:
                     print(paper(delta), end="", flush=True)
                     full.append(delta)
+    if not stream_done:
+        # EOF is not a successful completion. In particular, a contributor
+        # process can disappear mid-generation and leave a plausible-looking
+        # partial answer on stdout. The desktop treats a nonzero CLI exit as
+        # an interrupted request and discards those streamed deltas.
+        print(red("✗ the answer stream ended before it was complete."), file=sys.stderr)
+        print(comment("the contributing runtime or network connection may have stopped; retry the question."),
+              file=sys.stderr)
+        sys.exit(1)
     if not as_json:
         print()
 
