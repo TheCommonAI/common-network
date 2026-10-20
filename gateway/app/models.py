@@ -1,7 +1,7 @@
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # --- Registry ---
@@ -33,6 +33,22 @@ class NodeCreate(BaseModel):
     # since an unrecognised client is data, not an error.
     client: str | None = Field(default=None, max_length=64)
 
+    # Distributed model groups (migration 015). Sent by a group's coordinator
+    # and nobody else; omitted by every single node. Self-reported, so display
+    # only: the one routing consequence is that a `restarting` group is not
+    # marked healthy and gets a 503 when it has no other candidate. Omitted
+    # values leave what an earlier registration said in place (see registry.py).
+    group_status: Literal["ready", "restarting"] | None = None
+    group_members_total: int | None = Field(default=None, ge=0)
+    group_members_up: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _members_up_within_total(self):
+        if (self.group_members_up is not None and self.group_members_total is not None
+                and self.group_members_up > self.group_members_total):
+            raise ValueError("group_members_up cannot exceed group_members_total")
+        return self
+
 
 class NodePublicOut(BaseModel):
     """Public node info returned by GET /nodes. No endpoint_url — that is
@@ -51,6 +67,11 @@ class NodePublicOut(BaseModel):
     capability_text: str
     domain_tags: list[str] | None = None
     catalogue_id: str | None = None
+    # Distributed model groups, display only (migration 015). Null for every
+    # single node.
+    group_status: str | None = None
+    group_members_total: int | None = None
+    group_members_up: int | None = None
 
 
 class NodeOut(NodePublicOut):

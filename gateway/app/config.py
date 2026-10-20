@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     health_check_interval_seconds: int = 30
     health_check_timeout_seconds: float = 5.0
 
+    # Retry-After on the 503 a distributed model group returns while it is
+    # restarting and no other node can answer (gateway.py). A fixed hint, not a
+    # measurement: the coordinator does not report an ETA, and a restart includes
+    # a full weight transfer, so this is deliberately not small.
+    group_restart_retry_after_seconds: int = 60
+
     # How long to wait on a node, split in two, because a single number could
     # not express a cold start and got the important case wrong.
     #

@@ -180,6 +180,9 @@ def _row_to_node_public_out(row) -> NodePublicOut:
         capability_text=row["capability_text"],
         domain_tags=row["domain_tags"],
         catalogue_id=row["catalogue_id"],
+        group_status=row["group_status"],
+        group_members_total=row["group_members_total"],
+        group_members_up=row["group_members_up"],
     )
 
 
@@ -203,6 +206,9 @@ def _row_to_node_out(row) -> NodeOut:
         capability_text=row["capability_text"],
         domain_tags=row["domain_tags"],
         catalogue_id=row["catalogue_id"],
+        group_status=row["group_status"],
+        group_members_total=row["group_members_total"],
+        group_members_up=row["group_members_up"],
     )
 
 
@@ -275,13 +281,20 @@ async def register_node(
                     worker_token = $13,
                     -- coalesce, not overwrite: a client that does not send the
                     -- field must not erase what an earlier registration said.
-                    client = coalesce($14, client)
+                    client = coalesce($14, client),
+                    -- Same rule for the group fields. A coordinator that does
+                    -- not send group_status does not clear a `restarting`
+                    -- that an earlier registration set.
+                    group_status = coalesce($15, group_status),
+                    group_members_total = coalesce($16, group_members_total),
+                    group_members_up = coalesce($17, group_members_up)
                 where name = $1
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
                 node.capability_text, vec, node.region, node.cost_per_1k,
                 node.domain_tags, node.catalogue_id, new_token, node.worker_token, client,
+                node.group_status, node.group_members_total, node.group_members_up,
             )
         else:
             row = await conn.fetchrow(
@@ -289,13 +302,16 @@ async def register_node(
                 insert into nodes
                     (name, operator, endpoint_url, model_name, api_key_ref,
                      capability_text, capability_embed, region, cost_per_1k,
-                     domain_tags, catalogue_id, node_token, worker_token, client, healthy)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, false)
+                     domain_tags, catalogue_id, node_token, worker_token, client, healthy,
+                     group_status, group_members_total, group_members_up)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, false,
+                        $15, $16, $17)
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
                 node.capability_text, vec, node.region, node.cost_per_1k,
                 node.domain_tags, node.catalogue_id, new_token, node.worker_token, client,
+                node.group_status, node.group_members_total, node.group_members_up,
             )
 
     out = _row_to_node_public_out(row)

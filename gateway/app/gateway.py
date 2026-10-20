@@ -79,6 +79,39 @@ async def _fetch_healthy_nodes() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def _fetch_restarting_groups() -> list[dict]:
+    """Distributed groups currently restarting. Never routable, so they are not
+    in `_fetch_healthy_nodes`; this is only consulted to say why a request got
+    no answer, rather than the generic "no healthy nodes available"."""
+    async with db.pool().acquire() as conn:
+        rows = await conn.fetch(
+            "select name, group_members_total, group_members_up from nodes "
+            "where group_status = 'restarting'"
+        )
+    return [dict(r) for r in rows]
+
+
+def _group_restarting_error(groups: list[dict]) -> HTTPException:
+    """503 for a request whose only candidate is a restarting group.
+
+    Retry-After is a fixed hint from settings (see config.py). The detail names
+    the group status and the member count so a client can tell this apart from a
+    node that is simply down.
+    """
+    names = ", ".join(g["name"] for g in groups)
+    first = groups[0]
+    total, up = first.get("group_members_total"), first.get("group_members_up")
+    members = f" ({up} of {total} members up)" if total is not None and up is not None else ""
+    return HTTPException(
+        status_code=503,
+        detail=(f"group_status=restarting: distributed model group '{names}' is "
+                f"restarting{members} and cannot serve yet. The group reloads its "
+                f"model before it serves again; retry in about "
+                f"{settings.group_restart_retry_after_seconds}s."),
+        headers={"Retry-After": str(settings.group_restart_retry_after_seconds)},
+    )
+
+
 async def _record_decision(
     request_embed: list[float],
     chosen: ScoredNode | None,
@@ -583,6 +616,13 @@ async def chat_completions(request: Request):
 
     nodes = await _fetch_healthy_nodes()
     if not nodes:
+        # Only candidate restarting: say so, with Retry-After, rather than the
+        # generic answer. A healthy node elsewhere in the network is still
+        # preferred to a restarting group, so this is reached only when there
+        # is no other node at all.
+        restarting = await _fetch_restarting_groups()
+        if restarting:
+            raise _group_restarting_error(restarting)
         raise HTTPException(status_code=503, detail="no healthy nodes available")
 
     # Stage marks for the log line below, so a slow request says which step
@@ -606,6 +646,10 @@ async def chat_completions(request: Request):
     if forced_node_name:
         matches = [n for n in nodes if n["name"] == forced_node_name]
         if not matches:
+            restarting = [g for g in await _fetch_restarting_groups()
+                          if g["name"] == forced_node_name]
+            if restarting:
+                raise _group_restarting_error(restarting)
             raise HTTPException(status_code=404, detail=f"node '{forced_node_name}' not found or not currently healthy")
         # No fallback candidate -- if you asked for this node specifically,
         # a failure should surface as a failure, not silently reroute.

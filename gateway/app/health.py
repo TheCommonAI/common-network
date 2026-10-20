@@ -80,7 +80,8 @@ async def _check_one(client: httpx.AsyncClient, node: dict) -> bool:
 async def run_health_checks_once() -> None:
     async with db.pool().acquire() as conn:
         rows = await conn.fetch(
-            "select id, endpoint_url, api_key_ref, worker_token, model_name from nodes where not paused"
+            "select id, endpoint_url, api_key_ref, worker_token, model_name, group_status "
+            "from nodes where not paused"
         )
 
     async with httpx.AsyncClient() as client:
@@ -113,6 +114,13 @@ async def run_health_checks_once() -> None:
                 logger.warning(
                     "health check for node %s raised: %r", row["id"], ok
                 )
+                ok = False
+            # A distributed group that says it is restarting is not healthy,
+            # whatever the probe says. The probe is /v1/models, and a coordinator
+            # whose runtime is down may still answer it; without this a group
+            # would be routed to in the middle of a restart. The group's own
+            # coordinator clears `restarting` by re-registering as ready.
+            if row.get("group_status") == "restarting":
                 ok = False
             await conn.execute(
                 # last_heartbeat records that we asked; last_seen_healthy
