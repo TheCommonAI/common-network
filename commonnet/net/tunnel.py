@@ -144,7 +144,7 @@ def run(server_args: list, out_path: Path, *, token: str | None = None,
         while not stop.wait(health_interval):
             if server.poll() is not None:
                 raise LauncherError(f"the block server exited with code {server.returncode}; see {log_path}")
-            if tunnel.poll() is None and join.tunnel_is_healthy(url, token, HEALTH_PATH):
+            if tunnel.poll() is None and _healthy(join, url, token):
                 healthy_at = time.monotonic()
                 continue
             unreachable_for = time.monotonic() - healthy_at
@@ -165,6 +165,15 @@ def run(server_args: list, out_path: Path, *, token: str | None = None,
         # earlier run must not look live.
         _publish(out_path, None, layers, device)
         log("block server and tunnel stopped")
+
+
+def _healthy(join, url: str, token) -> bool:
+    # The server can die mid-probe (connection reset); that is "unhealthy", and the
+    # next loop iteration reports the dead server instead of this probe raising.
+    try:
+        return join.tunnel_is_healthy(url, token, HEALTH_PATH)
+    except OSError:
+        return False
 
 
 def _interrupted(signum, frame) -> None:
