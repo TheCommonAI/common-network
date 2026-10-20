@@ -168,6 +168,21 @@ class DistributedTests(unittest.TestCase):
             with self.assertRaisesRegex(runtime.FetchFailed, "discovery failed"):
                 config.preflight()
 
+    def test_discovery_rejects_a_configured_device_that_reports_cpu(self):
+        config = self.config()
+        results = [subprocess.CompletedProcess([], 0, " ".join(config.extra_argv()), ""),
+                   subprocess.CompletedProcess([], 0, "RPC0: 127.0.0.1:50051 (123 MiB)\nRPC1: 127.0.0.1:50052 (CPU, 123 MiB)", "")]
+        with patch.object(runtime, "unreachable_rpc_servers", return_value=[]), \
+                patch.object(runtime.subprocess, "run", side_effect=results):
+            with self.assertRaisesRegex(runtime.FetchFailed, "RPC1 report a CPU backend.*GPU-only"):
+                config.preflight()
+
+    def test_cpu_detection_names_only_configured_devices_and_whole_words(self):
+        text = "RPC0: 127.0.0.1:50051 (123 MiB)\nRPC1: CPU0 (123 MiB)\nRPC2: cpu-host (12 MiB)\nRPC3: CPU (1 MiB)"
+        self.assertEqual(runtime.cpu_reporting_devices(text, ["RPC0", "RPC1", "RPC2"]), ["RPC1"])
+        self.assertEqual(runtime.cpu_reporting_devices(text, ["RPC0", "RPC3"]), ["RPC3"])
+        self.assertEqual(runtime.cpu_reporting_devices("RPC0: Metal GPU (1 MiB)", ["RPC0"]), [])
+
     def test_preflight_names_unreachable_worker_before_discovery(self):
         live, dead = listening_endpoint(self), closed_endpoint(self)
         self.data["rpc_servers"] = [live, dead]
