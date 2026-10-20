@@ -74,17 +74,12 @@ RPC-enabled `ggml-rpc-server` for the Metal build. The command binds to loopback
 python3 join/runtime.py --rpc-worker /path/to/ggml-rpc-server --rpc-port 50051
 ```
 
-**4. Create the group, once.** It needs `openssl`:
+**4. Create the group, once.** `init` generates the group secret and keeps it in
+an owner-only file. No address is needed here:
 
 ```bash
-python3 join/group.py init --group qwen3-32b-trial --relay HOST:PORT
+python3 join/group.py init --group qwen3-32b-trial
 ```
-
-`HOST:PORT` is the address Patrick dials. The relay speaks raw TLS over TCP, not
-HTTP, so it cannot go through the Common HTTP tunnel. Give it a host and port that
-Patrick can reach over TCP: a port forward on your router, or a VPN address.
-The relay does not print a tunnel URL. Once it runs, it only prints the address
-it listens on.
 
 **5. Start the relay**, in its own foreground terminal, and leave it running:
 
@@ -92,7 +87,11 @@ it listens on.
 python3 join/group.py relay --group qwen3-32b-trial
 ```
 
-It prints `relay listening on 0.0.0.0:<port>`.
+The relay listens on 127.0.0.1 only, and opens a Cloudflare quick tunnel to it, so
+`cloudflared` must be on your PATH. No router port forward is needed. Wait for the
+line `tunnel URL: https://...`. The tokens you issue name that URL, so issue them
+only after it appears. If the relay restarts, the URL changes and earlier tokens
+stop working.
 
 **6. Issue Patrick's one-time token**, then send it to him over a private channel:
 
