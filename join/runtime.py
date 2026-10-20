@@ -45,11 +45,13 @@ anything to donate a machine.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import importlib
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import stat
@@ -705,9 +707,114 @@ def llama_asset_name(build: str, system: str | None = None,
         arch = {"x86_64": "x64", "AMD64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(machine)
         return f"llama-{build}-bin-ubuntu-{arch}.tar.gz" if arch else None
     if system == "Windows":
+        # The CPU build. A Windows machine with an NVIDIA GPU installs the CUDA
+        # pair from `windows_cuda_assets` instead; see `ensure_llama_server`.
         arch = {"AMD64": "x64", "x86_64": "x64", "ARM64": "arm64", "aarch64": "arm64"}.get(machine)
         return f"llama-{build}-bin-win-cpu-{arch}.zip" if arch else None
     return None
+
+
+# The CUDA builds for Windows x64, newest first. Each line is two archives: the
+# llama.cpp build (llama-server, ggml-rpc-server, ggml-cuda.dll) and the CUDA
+# runtime DLLs it loads. Both are extracted into one directory.
+WINDOWS_CUDA_LINES = ("13.4", "12.4")
+WINDOWS_CUDA_DEFAULT = "12.4"
+
+
+@dataclass(frozen=True)
+class NvidiaGpu:
+    """An NVIDIA GPU that nvidia-smi can see.
+
+    `driver_cuda` is the (major, minor) CUDA version the driver reports -- the
+    newest runtime it can run -- or None when that could not be read.
+    """
+    driver_cuda: tuple[int, int] | None
+
+
+def detect_nvidia_gpu() -> NvidiaGpu | None:
+    """Whether an NVIDIA GPU is present, and what CUDA its driver supports.
+
+    Presence is `nvidia-smi -L` exiting 0 with a `GPU n:` line. The plain report
+    carries the driver's `CUDA Version`. Any failure to run nvidia-smi means no
+    GPU; a report without a readable version means a GPU with an unknown version.
+    """
+    try:
+        listed = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listed.returncode != 0 or not re.search(r"^GPU \d+:", listed.stdout, re.MULTILINE):
+        return None
+
+    found = None
+    try:
+        report = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=15)
+        if report.returncode == 0:
+            found = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", report.stdout)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    driver_cuda = (int(found.group(1)), int(found.group(2))) if found else None
+    return NvidiaGpu(driver_cuda=driver_cuda)
+
+
+def _cuda_version(line: str) -> tuple[int, int]:
+    major, minor = line.split(".")
+    return int(major), int(minor)
+
+
+def windows_cuda_line(gpu: NvidiaGpu) -> str:
+    """The newest CUDA build line this driver supports.
+
+    A driver runs its own CUDA version and every older runtime, so the first line
+    at or below the driver's version is the one to install. A driver whose version
+    cannot be read gets the default line. A driver older than every line is refused
+    rather than given the CPU build: the network is GPU-only, and a CPU worker
+    would join it and be useless.
+    """
+    if gpu.driver_cuda is None:
+        return WINDOWS_CUDA_DEFAULT
+    for line in WINDOWS_CUDA_LINES:
+        if gpu.driver_cuda >= _cuda_version(line):
+            return line
+    major, minor = gpu.driver_cuda
+    raise FetchFailed(
+        f"the NVIDIA driver supports CUDA {major}.{minor}, older than the "
+        f"{WINDOWS_CUDA_LINES[-1]} build llama.cpp ships for Windows. "
+        "Update the NVIDIA driver and run again"
+    )
+
+
+def windows_cuda_assets(build: str, line: str) -> tuple[str, str]:
+    """The CUDA build archive and the CUDA runtime archive for one line."""
+    return (f"llama-{build}-bin-win-cuda-{line}-x64.zip",
+            f"cudart-llama-bin-win-cuda-{line}-x64.zip")
+
+
+def llama_asset_digest(build: str, asset: str) -> str | None:
+    """The sha256 GitHub records for one llama.cpp release asset, or None.
+
+    GitHub computes and stores a digest for every release asset, and this reads
+    it from the same release API that names the build. It is what the archive is
+    checked against: a runtime that cannot be checked is not installed. None means
+    the record is missing or the API could not be reached.
+    """
+    try:
+        release = json.loads(_read_text(f"https://api.github.com/repos/{LLAMA_REPO}/releases/tags/{build}"))
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+        return None
+    for entry in release.get("assets", []) if isinstance(release, dict) else []:
+        if isinstance(entry, dict) and entry.get("name") == asset:
+            digest = str(entry.get("digest") or "")
+            if digest.startswith("sha256:") and re.fullmatch(r"[0-9a-f]{64}", digest[7:]):
+                return digest[7:]
+    return None
+
+
+def _sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def resolve_llama_build(force: bool = False) -> str | None:
@@ -901,16 +1008,69 @@ def _runnable(binary: Path) -> bool:
     return done.returncode == 0
 
 
-def _installed_binary() -> Path | None:
-    """The runtime a previous run installed, if it is still there and still works."""
+def _installed_binary(cuda_line: str | None = None) -> Path | None:
+    """The runtime a previous run installed, if it is still there and still works.
+
+    It must also be the flavour this machine needs now. A Windows machine that
+    gains an NVIDIA GPU, or whose driver moves to a newer CUDA line, has a CPU or
+    older-line install that is not what it should run any more, so it is fetched
+    again rather than trusted.
+    """
     try:
-        build = CURRENT_RUNTIME.read_text().strip()
+        key = CURRENT_RUNTIME.read_text().strip()
     except OSError:
         return None
-    if not build:
+    if not key:
         return None
-    binary = _binary_in(RUNTIME_DIR / build)
+    if cuda_line:
+        if not key.endswith(f"-cuda-{cuda_line}"):
+            return None
+    elif "-cuda-" in key:
+        return None
+    binary = _binary_in(RUNTIME_DIR / key)
     return binary if binary is not None and _runnable(binary) else None
+
+
+def _install_key(build: str, cuda_line: str | None) -> str:
+    """The directory name, and the `current` pointer, for one installed runtime."""
+    return f"{build}-cuda-{cuda_line}" if cuda_line else build
+
+
+def _fetch_verified(build: str, asset: str) -> Path:
+    """The cached or downloaded archive for `asset`, checked against GitHub's digest.
+
+    The archive is checked on the download and on any copy already cached. No
+    digest, no install: an unverified llama-server is the one thing this must
+    never run.
+    """
+    digest = llama_asset_digest(build, asset)
+    if digest is None:
+        raise FetchFailed(f"no checksum for {asset} could be read from GitHub, so the download cannot be verified; try again when GitHub is reachable")
+    archive = DOWNLOAD_CACHE / asset
+    if archive.is_file() and _sha256_file(archive) != digest:
+        _unlink(archive)
+    if not archive.is_file():
+        _download(RELEASE_DOWNLOAD.format(build=build, asset=asset), archive,
+                  expected_sha=digest, what=f"the llama.cpp runtime ({build})")
+    return archive
+
+
+def _install_windows_cuda(archives: list[Path], target: Path) -> None:
+    """Both CUDA archives into one directory: the build, then the runtime DLLs beside it.
+
+    llama.cpp finds its CUDA runtime next to the executable, so the two archives
+    must share a directory. They are extracted into a staging directory and renamed
+    into place, so an extraction interrupted halfway is never mistaken for an install.
+    """
+    if _binary_in(target) is not None and (target / "ggml-cuda.dll").is_file():
+        return
+    staging = target.with_name(target.name + ".partial")
+    shutil.rmtree(staging, ignore_errors=True)
+    for archive in archives:
+        _extract(archive, staging)
+    if target.exists():
+        shutil.rmtree(target)
+    os.replace(staging, target)
 
 
 def ensure_llama_server() -> Path:
@@ -923,16 +1083,24 @@ def ensure_llama_server() -> Path:
     download interrupted halfway does not leave a pointer to a half-built
     directory.
     """
-    installed = _installed_binary()
-    if installed is not None:
-        return installed
-
     system, machine = platform.system(), platform.machine()
     if llama_asset_name("b0", system, machine) is None:
         raise FetchFailed(
             f"llama.cpp publishes no build for {system} on {machine}. "
             f"See https://github.com/{LLAMA_REPO}/releases"
         )
+
+    # Windows with an NVIDIA GPU gets the CUDA build, never the CPU one. Every
+    # other machine keeps the single archive it always had.
+    cuda_line = None
+    if system == "Windows":
+        gpu = detect_nvidia_gpu()
+        if gpu is not None:
+            cuda_line = windows_cuda_line(gpu)
+
+    installed = _installed_binary(cuda_line)
+    if installed is not None:
+        return installed
 
     candidates = []
     for build in (resolve_llama_build(), FALLBACK_BUILD):
@@ -942,32 +1110,57 @@ def ensure_llama_server() -> Path:
     failures = []
     DOWNLOAD_CACHE.mkdir(parents=True, exist_ok=True)
     for build in candidates:
-        asset = llama_asset_name(build, system, machine)
-        archive = DOWNLOAD_CACHE / asset
+        key = _install_key(build, cuda_line)
+        target = RUNTIME_DIR / key
+        names = (windows_cuda_assets(build, cuda_line) if cuda_line
+                 else (llama_asset_name(build, system, machine),))
         try:
-            if not archive.is_file():
-                _download(RELEASE_DOWNLOAD.format(build=build, asset=asset), archive,
-                          what=f"the llama.cpp runtime ({build})")
-            target = RUNTIME_DIR / build
-            if _binary_in(target) is None:
-                _extract(archive, target)
+            archives = [_fetch_verified(build, name) for name in names]
+            if cuda_line:
+                _install_windows_cuda(archives, target)
+            elif _binary_in(target) is None:
+                _extract(archives[0], target)
             binary = _binary_in(target)
             if binary is None:
                 raise FetchFailed(f"the {build} archive contained no llama-server")
             if system != "Windows":
                 os.chmod(binary, 0o755)
             if not _runnable(binary):
-                raise FetchFailed(f"the {build} build of llama-server would not start")
+                raise FetchFailed(f"the {key} build of llama-server would not start")
             CURRENT_RUNTIME.parent.mkdir(parents=True, exist_ok=True)
             # A file rather than a symlink: creating one on Windows needs
             # elevation, and this has to work for everyone.
-            CURRENT_RUNTIME.write_text(build)
+            CURRENT_RUNTIME.write_text(key)
             return binary
         except FetchFailed as e:
-            failures.append(f"{build}: {e}")
-            _unlink(archive)
+            failures.append(f"{key}: {e}")
+            for name in names:
+                _unlink(DOWNLOAD_CACHE / name)
 
     raise FetchFailed("could not fetch a llama.cpp runtime. " + " · ".join(failures))
+
+
+RPC_SERVER_NAME = "ggml-rpc-server.exe" if platform.system() == "Windows" else "ggml-rpc-server"
+
+
+def ensure_rpc_server() -> Path:
+    """The `ggml-rpc-server` that ships beside the installed llama-server.
+
+    llama.cpp's release workflow builds with GGML_RPC=ON and packs the whole build
+    directory, so the RPC worker is in the same archive as llama-server. A group
+    member runs this binary; nothing else is fetched or built.
+    """
+    binary = ensure_llama_server()
+    for candidate in (binary.parent / RPC_SERVER_NAME, binary.parent / "build" / "bin" / RPC_SERVER_NAME):
+        if candidate.is_file():
+            # A CUDA install whose GPU backend is missing would run the worker on
+            # the CPU. This network does not take CPU workers, so refuse it here.
+            if "-cuda-" in binary.parent.name and not (binary.parent / "ggml-cuda.dll").is_file():
+                raise FetchFailed(f"the installed CUDA build in {binary.parent} has no ggml-cuda.dll, "
+                                  f"so {RPC_SERVER_NAME} would run on the CPU. Delete {CURRENT_RUNTIME} and run again")
+            return candidate
+    raise FetchFailed(f"the installed llama.cpp build has no {RPC_SERVER_NAME}; "
+                      f"it was built without RPC support. Delete {CURRENT_RUNTIME} and run again to fetch the current build")
 
 
 def llama_server_argv(binary, gguf, port: int, *,
@@ -1034,6 +1227,14 @@ RPC_REACHABILITY_TIMEOUT_SECONDS = 2.0
 RPC_WORKER_LOST_MARKERS = ("Remote RPC server crashed", "send failed")
 
 
+def split_hostport(endpoint: str) -> tuple[str, int]:
+    """The (host, port) of a host:port endpoint. Pure: raises ValueError if malformed."""
+    host, sep, port = str(endpoint).rpartition(":")
+    if not sep or not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise ValueError(f"expected host:port, got {endpoint!r}")
+    return host, int(port)
+
+
 def unreachable_rpc_servers(endpoints, timeout=RPC_REACHABILITY_TIMEOUT_SECONDS):
     """Return the host:port endpoints that do not accept a TCP connection in time.
 
@@ -1059,6 +1260,20 @@ def missing_worker_in_log(log_tail):
     if isinstance(log_tail, str):
         log_tail = log_tail.splitlines()
     return any(marker in line for line in log_tail for marker in RPC_WORKER_LOST_MARKERS)
+
+
+def cpu_reporting_devices(devices_text, devices):
+    """The configured RPC devices whose discovery line names a CPU backend.
+
+    The network is GPU-only, so a CPU backend behind any configured device is a
+    refusal. A CPU token is matched as a whole word after the device's colon, so
+    a hostname such as cpu-host does not count. Pure: it reads only the text.
+    """
+    reporting = []
+    for name, rest in re.findall(r"^\s*(RPC[0-9]+):(.*)$", devices_text, re.MULTILINE):
+        if name in devices and re.search(r"(?<![A-Za-z0-9])CPU[0-9]*(?![A-Za-z0-9])", rest):
+            reporting.append(name)
+    return reporting
 
 
 class DistributedConfig:
@@ -1165,7 +1380,12 @@ class DistributedConfig:
             if (result.returncode or any(device not in discovered for device in self.devices)
                     or {discovered.get(device) for device in self.devices} != set(self.peers)):
                 raise FetchFailed("RPC device discovery failed or a configured device is unavailable; check peer processes, tunnels, and matching runtime builds")
-            local_devices = set(re.findall(r"^\s*([A-Za-z]+[0-9]+):", devices_text, re.MULTILINE))
+            cpu_devices = cpu_reporting_devices(devices_text, self.devices)
+            if cpu_devices:
+                raise FetchFailed(f"RPC device(s) {', '.join(cpu_devices)} report a CPU backend; this network is GPU-only, so start a GPU RPC server (CUDA, Vulkan or Metal) on that member")
+            # RPC workers are listed too, but they are remote: a draft device must be local.
+            local_devices = {name for name in re.findall(r"^\s*([A-Za-z]+[0-9]+):", devices_text, re.MULTILINE)
+                             if not name.startswith("RPC")}
             if self.draft and self.draft_device != "none" and self.draft_device not in local_devices:
                 raise FetchFailed(f"local draft device {self.draft_device} is unavailable")
         except (OSError, subprocess.SubprocessError) as e:

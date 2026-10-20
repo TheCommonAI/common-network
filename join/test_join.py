@@ -258,6 +258,7 @@ section("the sibling modules that must be refreshed together")
 check("runtime.py is in the self-update list",
       "runtime.py" in join.SIBLING_MODULES, True)
 check("worker.py still is", "worker.py" in join.SIBLING_MODULES, True)
+check("group.py is in the self-update list", "group.py" in join.SIBLING_MODULES, True)
 
 
 section("a sibling that could not be fetched is reported, not swallowed")
@@ -291,18 +292,19 @@ with tempfile.TemporaryDirectory() as _tmp:
     _saved_file = join.__file__
     join.__file__ = str(Path(_tmp) / "join.py")
     try:
-        urllib.request.urlopen = _fake_fetch({"worker.py": b"new worker\n", "runtime.py": b"new runtime\n"})
+        urllib.request.urlopen = _fake_fetch({"worker.py": b"new worker\n", "runtime.py": b"new runtime\n",
+                                              "group.py": b"new group\n"})
         check("both siblings fetched -> True", join.refresh_siblings(), True)
         check("worker.py is written beside join.py",
               (Path(_tmp) / "worker.py").read_bytes(), b"new worker\n")
 
         urllib.request.urlopen = _fake_fetch({"worker.py": urllib.error.URLError("offline"),
-                                              "runtime.py": b"new runtime\n"})
+                                              "runtime.py": b"new runtime\n", "group.py": b"new group\n"})
         check("a failed worker.py fetch -> False", join.refresh_siblings(), False)
         check("the runtime is still refreshed past the failure",
               (Path(_tmp) / "runtime.py").read_bytes(), b"new runtime\n")
 
-        urllib.request.urlopen = _fake_fetch({"worker.py": b"", "runtime.py": b"new runtime\n"})
+        urllib.request.urlopen = _fake_fetch({"worker.py": b"", "runtime.py": b"new runtime\n", "group.py": b"new group\n"})
         check("an empty sibling response -> False", join.refresh_siblings(), False)
     finally:
         urllib.request.urlopen = _real_urlopen

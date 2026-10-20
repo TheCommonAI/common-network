@@ -2184,7 +2184,7 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
         # join.py imports worker and runtime from its own directory, so a first run
         # installs all three from the bundle, not just join.py.
         bundle = Path(__file__).resolve().parent
-        for name in ("join.py", "worker.py", "runtime.py"):
+        for name in ("join.py", "worker.py", "runtime.py", "group.py"):
             target = INSTALL_DIR / name
             if target.exists():
                 continue

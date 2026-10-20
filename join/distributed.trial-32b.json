@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "binary": "/path/to/llama.cpp/build/bin/llama-server",
+  "target_model": "/path/to/Qwen_Qwen3-32B-Q3_K_M.gguf",
+  "draft_model": "/path/to/Qwen3-0.6B-Q8_0.gguf",
+  "model_name": "Qwen3-32B",
+  "draft_device": "MTL0",
+  "draft_tokens": 4,
+  "context": 4096,
+  "parallel": 1
+}

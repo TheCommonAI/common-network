@@ -61,6 +61,48 @@ public Common worker or a Cloudflare HTTP tunnel. Remote workers expose compute
 devices, not independent HTTP model endpoints, and are not registered as complete
 models in the legacy gateway roster.
 
+## Enrol members without SSH (automatic setup)
+
+The RPC build, worker launch and SSH forwards above are the manual route. For
+members running their own machines, a group can enrol them instead. A member
+needs Python and nothing else: its machine listens on nothing, its worker dials
+out to the coordinator over a WebSocket (wss://), and its `ggml-rpc-server`
+stays on 127.0.0.1. The coordinator's relay is reached through a Cloudflare quick
+tunnel, the same one the worker uses, so there is no port to open and no address
+to know. The network is GPU-only: a member serves one GPU device, and a machine
+with no GPU refuses to join before it spends its token. The RPC build is the one
+the runtime already installs. Each archive is checked against the sha256 GitHub
+records for it before it is run.
+
+On the coordinator, once per group and then while the group is up:
+
+```bash
+python3 join/group.py init --group lab                  # once per group
+python3 join/group.py relay --group lab                 # keep running; prints the tunnel URL
+python3 join/group.py issue --group lab --member node-a # prints a one-time token, valid 24 hours
+python3 join/group.py members --group lab               # prints the rpc_servers list
+```
+
+On each member:
+
+```bash
+python3 join/join.py --group-token '<token>'     # or: common join --group-token '<token>'
+```
+
+The member enrols, starts its RPC worker and stays connected in the foreground.
+Ctrl+C or a service stop also stops its RPC server. The member's key is kept in
+`~/.common-network/groups/<group>/member.json`, readable only by its owner.
+
+Still manual: copy the `rpc_servers` list from `members` into the coordinator's
+distributed config and restart the coordinator, because the runtime's split is
+fixed at start. A token works once, and it names the tunnel URL the relay had
+when it was issued. Known gap: if the relay's tunnel gets a new URL (a restart,
+or cloudflared restarting), a member enrolled under the old URL keeps retrying
+it and cannot rejoin, because its name is already enrolled. Revoking a
+member, and adding members to a running coordinator without a restart, are not
+built yet. RPC has no authentication between peers, so admit only members you
+trust with the group's weights and compute.
+
 ## Configure and join
 
 Copy `join/distributed.example.json` to your own configuration file. Set absolute
