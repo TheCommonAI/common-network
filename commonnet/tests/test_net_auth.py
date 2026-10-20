@@ -11,10 +11,10 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
-from pedal.net import auth, protocol, server
-from pedal.net.client import BlockClient, RemoteError
-from pedal.net.server import BlockServer, StubBlock
-from pedal.tests.test_net_server import hidden_tensor
+from commonnet.net import auth, protocol, server
+from commonnet.net.client import BlockClient, RemoteError
+from commonnet.net.server import BlockServer, StubBlock
+from commonnet.tests.test_net_server import hidden_tensor
 
 TOKEN = "test-token-0123456789abcdef"
 WRONG = "wrong-token-0123456789abcdef"
@@ -159,7 +159,7 @@ class TokenSources(unittest.TestCase):
 
     def test_unreadable_file_is_a_token_error(self):
         with self.assertRaises(auth.TokenError):
-            auth.load_token(Path(tempfile.gettempdir()) / "pedal-no-such-token-file", environ={})
+            auth.load_token(Path(tempfile.gettempdir()) / "commonnet-no-such-token-file", environ={})
 
 
 class RefusesWithoutAToken(unittest.TestCase):
@@ -173,7 +173,7 @@ class RefusesWithoutAToken(unittest.TestCase):
             self.assertEqual(server.main(["--block", "nowhere:factory", "--layers", "0", "4"]), 2)
 
     def test_the_launcher_refuses_a_real_block_without_a_token(self):
-        from pedal.net import tunnel
+        from commonnet.net import tunnel
         with without_env_token():
             code = tunnel.main(["--block", "nowhere:factory", "--layers", "0", "4", "--out", os.devnull])
         self.assertEqual(code, 2)

@@ -1,7 +1,7 @@
 """NF4 block refuses to start without CUDA. Runs on the Mac; the CUDA path is untested here.
 
 Run from the repository root:
-    python3 -m unittest pedal.tests.test_nf4_refusal -v
+    python3 -m unittest commonnet.tests.test_nf4_refusal -v
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import torch  # noqa: E402
 
-from pedal.backends.nf4_block import Nf4BlockRange  # noqa: E402
-from pedal.tests.test_split import make_checkpoint  # noqa: E402
+from commonnet.backends.nf4_block import Nf4BlockRange  # noqa: E402
+from commonnet.tests.test_split import make_checkpoint  # noqa: E402
 
 
 class Nf4Refusal(unittest.TestCase):

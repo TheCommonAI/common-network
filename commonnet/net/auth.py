@@ -1,6 +1,6 @@
 """Shared-secret bearer token for the block server.
 
-The token comes from the environment variable PEDAL_BLOCK_TOKEN, or from a file
+The token comes from the environment variable COMMONNET_BLOCK_TOKEN, or from a file
 named with --token-file. Never both. The server and the client read it the same
 way. Every request carries "Authorization: Bearer <token>", and the server compares
 it with hmac.compare_digest. A missing or wrong token gets 401.
@@ -13,7 +13,7 @@ import hmac
 import os
 from pathlib import Path
 
-TOKEN_ENV = "PEDAL_BLOCK_TOKEN"
+TOKEN_ENV = "COMMONNET_BLOCK_TOKEN"
 MIN_TOKEN_CHARS = 16
 
 

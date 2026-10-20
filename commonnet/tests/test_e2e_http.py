@@ -7,21 +7,21 @@ import unittest
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import torch
 
-from pedal import coordinator
-from pedal.client import BlockEndpoint
-from pedal.client4 import Client4
-from pedal.net import factory
-from pedal.net.client import RemoteError
-from pedal.net.server import BlockServer
-from pedal.net.transport import HttpTransport
-from pedal.tests.test_split import NEW_TOKENS, PROMPT, SplitTestBase
+from commonnet import coordinator
+from commonnet.client import BlockEndpoint
+from commonnet.client4 import Client4
+from commonnet.net import factory
+from commonnet.net.client import RemoteError
+from commonnet.net.server import BlockServer
+from commonnet.net.transport import HttpTransport
+from commonnet.tests.test_split import NEW_TOKENS, PROMPT, SplitTestBase
 
 TOKEN = "t" * 32
 
 
 class E2E(SplitTestBase):
     def setUp(self):
-        env = {"PEDAL_CHECKPOINT": self.ckpt}
+        env = {"COMMONNET_CHECKPOINT": self.ckpt}
         self.servers = []
         self.members = []
         for s, e in ((0, 2), (2, 4)):
@@ -82,9 +82,9 @@ class E2E(SplitTestBase):
 
 class Client4Formats(SplitTestBase):
     def test_fp16_client_close_to_fp32(self):
-        from pedal.block import BlockRange
-        from pedal.client import LocalTransport
-        from pedal.tests.test_split import route_for
+        from commonnet.block import BlockRange
+        from commonnet.client import LocalTransport
+        from commonnet.tests.test_split import route_for
         route = route_for([0, 2, 4])
         t = LocalTransport({e.name: BlockRange(self.ckpt, e.start, e.end, dtype=torch.float16) for e in route})
         ids = torch.tensor([PROMPT])
@@ -98,9 +98,9 @@ class Client4Formats(SplitTestBase):
             import mlx.core  # noqa: F401
         except ImportError:
             self.skipTest("no mlx")
-        from pedal.block import BlockRange
-        from pedal.client import LocalTransport
-        from pedal.tests.test_split import route_for
+        from commonnet.block import BlockRange
+        from commonnet.client import LocalTransport
+        from commonnet.tests.test_split import route_for
         route = route_for([0, 2, 4])
         t = LocalTransport({e.name: BlockRange(self.ckpt, e.start, e.end, dtype=torch.float16) for e in route})
         ids = torch.tensor([PROMPT])
@@ -121,11 +121,11 @@ if __name__ == "__main__":
 class FactoryChoices(unittest.TestCase):
     def test_bad_backend_and_missing_checkpoint(self):
         with self.assertRaises(ValueError):
-            factory.build_block(0, 1, environ={"PEDAL_BACKEND": "gguf", "PEDAL_CHECKPOINT": "x"})
+            factory.build_block(0, 1, environ={"COMMONNET_BACKEND": "gguf", "COMMONNET_CHECKPOINT": "x"})
         with self.assertRaises(ValueError):
             factory.build_block(0, 1, environ={})
 
     @unittest.skipIf(torch.cuda.is_available(), "this machine has CUDA")
     def test_nf4_refuses_without_cuda(self):
         with self.assertRaisesRegex(RuntimeError, "no CUDA"):
-            factory.build_block(0, 1, environ={"PEDAL_BACKEND": "nf4", "PEDAL_CHECKPOINT": "x"})
+            factory.build_block(0, 1, environ={"COMMONNET_BACKEND": "nf4", "COMMONNET_CHECKPOINT": "x"})

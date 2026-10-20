@@ -4,7 +4,7 @@ Run it with a real block, given as MODULE:FACTORY and called as FACTORY(start, e
 or with --stub, which serves StubBlock. The stub is an identity block and needs
 no torch:
 
-    python3 -m pedal.net.server --stub --layers 0 4 --port 0
+    python3 -m commonnet.net.server --stub --layers 0 4 --port 0
 
 The block object must provide:
     layers                  (start, end), a half-open range of layer indices
@@ -28,7 +28,7 @@ What the coordinator can rely on:
   body is refused with 411.
 
 The server binds 127.0.0.1 only. It is reached from outside through a tunnel, and
-it has no authentication of its own. See pedal/net/tunnel.py.
+it has no authentication of its own. See commonnet/net/tunnel.py.
 """
 from __future__ import annotations
 
@@ -43,8 +43,8 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from pedal.net import auth, protocol
-from pedal.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
+from commonnet.net import auth, protocol
+from commonnet.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
 
 LOOPBACK = "127.0.0.1"
 HANDLER_TIMEOUT_SECONDS = 60.0
@@ -226,7 +226,7 @@ def _error(message: str) -> dict:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    server_version = "pedal-block/0.1"
+    server_version = "commonnet-block/0.1"
     sys_version = ""
     timeout = HANDLER_TIMEOUT_SECONDS
 

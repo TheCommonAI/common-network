@@ -1,9 +1,9 @@
 """Coordinator: read member endpoints, check coverage, and generate through them.
 
-    python -m pedal.coordinator --endpoints members.json --checkpoint DIR --prompt TEXT
+    python -m commonnet.coordinator --endpoints members.json --checkpoint DIR --prompt TEXT
 
 --endpoints is a JSON file holding a list of {"url", "layers": [start, end], "token_file"},
-or a comma-separated list of URL@START:END (token from PEDAL_BLOCK_TOKEN).
+or a comma-separated list of URL@START:END (token from COMMONNET_BLOCK_TOKEN).
 Prints the generated text only. It never prints the bearer token or token ids.
 """
 from __future__ import annotations
@@ -13,9 +13,9 @@ import json
 import os
 import sys
 
-from pedal.client import BlockEndpoint, Client
-from pedal.net import auth
-from pedal.net.transport import HttpTransport
+from commonnet.client import BlockEndpoint, Client
+from commonnet.net import auth
+from commonnet.net.transport import HttpTransport
 
 
 class EndpointError(ValueError):
@@ -63,7 +63,7 @@ def build_route(members: list[dict], num_layers: int):
 
 
 def generate(members, checkpoint, prompt_ids, max_new_tokens, fmt="fp32", transport_kwargs=None):
-    from pedal.client4 import Client4
+    from commonnet.client4 import Client4
     from transformers import Qwen3Config
     n = Qwen3Config.from_pretrained(checkpoint).num_hidden_layers
     route, urls, tokens = build_route(members, n)
@@ -73,7 +73,7 @@ def generate(members, checkpoint, prompt_ids, max_new_tokens, fmt="fp32", transp
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="pedal.coordinator", description=__doc__,
+    p = argparse.ArgumentParser(prog="commonnet.coordinator", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--endpoints", required=True)
     p.add_argument("--checkpoint", required=True)
@@ -83,7 +83,7 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     try:
         from transformers import AutoTokenizer
-        from pedal.net.client import BlockError
+        from commonnet.net.client import BlockError
         members = load_endpoints(args.endpoints)
         tok = AutoTokenizer.from_pretrained(args.checkpoint)
         ids = tok(args.prompt)["input_ids"]

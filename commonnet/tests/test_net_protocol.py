@@ -3,8 +3,8 @@ import base64
 import json
 import unittest
 
-from pedal.net import protocol
-from pedal.net.protocol import ProtocolError, Tensor
+from commonnet.net import protocol
+from commonnet.net.protocol import ProtocolError, Tensor
 
 
 def tensor(shape=(1, 2, 8), dtype="float16") -> Tensor:

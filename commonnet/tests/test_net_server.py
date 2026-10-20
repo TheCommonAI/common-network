@@ -7,9 +7,9 @@ import unittest
 import urllib.error
 import urllib.request
 
-from pedal.net import protocol
-from pedal.net.protocol import Tensor
-from pedal.net.server import BlockServer, StubBlock
+from commonnet.net import protocol
+from commonnet.net.protocol import Tensor
+from commonnet.net.server import BlockServer, StubBlock
 
 
 def hidden_tensor(seed: int = 0, shape=(1, 1, 8), dtype="float16") -> Tensor:

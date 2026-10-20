@@ -1,11 +1,11 @@
 """Serve one block on a Cloudflare quick tunnel and publish the tunnel URL.
 
-    python3 -m pedal.net.tunnel --stub --layers 0 4 --out PATH
-    python3 -m pedal.net.tunnel --block MODULE:FACTORY --layers 0 8 --out PATH
+    python3 -m commonnet.net.tunnel --stub --layers 0 4 --out PATH
+    python3 -m commonnet.net.tunnel --block MODULE:FACTORY --layers 0 8 --out PATH
 
 In order:
 1. Picks a free loopback port and starts the block server there as a child
-   process (pedal.net.server). The model lives in that process, not in this one.
+   process (commonnet.net.server). The model lives in that process, not in this one.
 2. Waits for the server's /health to answer.
 3. Starts a Cloudflare quick tunnel to it with join.start_tunnel, the call the
    worker and the group relay make. It waits for the tunnel to answer /health with
@@ -36,12 +36,12 @@ import threading
 import time
 from pathlib import Path
 
-from pedal.net import auth, protocol
-from pedal.net.client import BlockClient, BlockError
+from commonnet.net import auth, protocol
+from commonnet.net.client import BlockClient, BlockError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 JOIN_DIR = REPO_ROOT / "join"
-DEFAULT_OUT = Path.home() / ".common-network" / "pedal" / "block-tunnel.json"
+DEFAULT_OUT = Path.home() / ".common-network" / "commonnet" / "block-tunnel.json"
 HEALTH_PATH = "/health"
 SERVER_START_TIMEOUT_SECONDS = 30.0
 HEALTH_CHECK_INTERVAL_SECONDS = 120.0  # quick tunnels can reconnect under a new hostname silently
@@ -84,7 +84,7 @@ def _start_server(server_args: list, port: int, log_path: Path) -> subprocess.Po
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "ab") as log:
         return subprocess.Popen(
-            [sys.executable, "-m", "pedal.net.server", "--port", str(port), *server_args],
+            [sys.executable, "-m", "commonnet.net.server", "--port", str(port), *server_args],
             cwd=str(REPO_ROOT), stdout=log, stderr=subprocess.STDOUT,
         )
 
@@ -113,7 +113,7 @@ def run(server_args: list, out_path: Path, *, token: str | None = None,
     """Run the block and its tunnel until `stop` is set or the block dies.
 
     `open_tunnel(local_url, port)` returns (process, public URL). It is injectable so
-    that tests run without cloudflared. `server_args` are passed to pedal.net.server.
+    that tests run without cloudflared. `server_args` are passed to commonnet.net.server.
     `token` is the bearer token the server requires (None only for --stub). The server
     child reads the same token from the environment or from --token-file in server_args.
     """
@@ -177,7 +177,7 @@ def _log(message: str) -> None:
 
 
 def main(argv: list | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="pedal.net.tunnel", description=__doc__,
+    parser = argparse.ArgumentParser(prog="commonnet.net.tunnel", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--layers", nargs=2, type=int, metavar=("START", "END"), required=True,
                         help="the half-open layer range this block serves")

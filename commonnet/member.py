@@ -1,8 +1,8 @@
 """Start a member: the block server plus its tunnel, and write the endpoint JSON.
 
-    PEDAL_BLOCK_TOKEN=... python -m pedal.member --layers 0 28 --checkpoint DIR --out member.json
+    COMMONNET_BLOCK_TOKEN=... python -m commonnet.member --layers 0 28 --checkpoint DIR --out member.json
 
-The token comes from PEDAL_BLOCK_TOKEN or --token-file (never from the command line).
+The token comes from COMMONNET_BLOCK_TOKEN or --token-file (never from the command line).
 """
 from __future__ import annotations
 
@@ -11,16 +11,16 @@ import os
 import sys
 from pathlib import Path
 
-from pedal.net import auth, factory, tunnel
+from commonnet.net import auth, factory, tunnel
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="pedal.member", description=__doc__,
+    p = argparse.ArgumentParser(prog="commonnet.member", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--layers", nargs=2, type=int, metavar=("START", "END"), required=True)
     p.add_argument("--checkpoint", required=True, help="checkpoint directory")
     p.add_argument("--backend", choices=factory.BACKENDS, default=None,
-                   help="torch (default), mlx, or nf4 (CUDA only); or set PEDAL_BACKEND")
+                   help="torch (default), mlx, or nf4 (CUDA only); or set COMMONNET_BACKEND")
     p.add_argument("--token-file", metavar="PATH")
     p.add_argument("--out", type=Path, default=Path("member.json"))
     args = p.parse_args(argv)
@@ -32,11 +32,11 @@ def main(argv=None) -> int:
     if token is None:
         print(f"error: set {auth.TOKEN_ENV} or pass --token-file", file=sys.stderr)
         return 2
-    os.environ["PEDAL_CHECKPOINT"] = args.checkpoint
+    os.environ["COMMONNET_CHECKPOINT"] = args.checkpoint
     if args.backend:
-        os.environ["PEDAL_BACKEND"] = args.backend
+        os.environ["COMMONNET_BACKEND"] = args.backend
     targv = ["--layers", str(args.layers[0]), str(args.layers[1]),
-             "--block", "pedal.net.factory:FACTORY", "--out", str(args.out)]
+             "--block", "commonnet.net.factory:FACTORY", "--out", str(args.out)]
     if args.token_file:
         targv += ["--token-file", args.token_file]
     return tunnel.main(targv)

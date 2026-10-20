@@ -23,8 +23,8 @@ import time
 import urllib.error
 import urllib.request
 
-from pedal.net import auth, protocol
-from pedal.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
+from commonnet.net import auth, protocol
+from commonnet.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
 
 FORWARD_TIMEOUT_SECONDS = 60.0
 CONTROL_TIMEOUT_SECONDS = 10.0
@@ -79,7 +79,7 @@ _TOKEN_FROM_ENV = object()
 class BlockClient:
     """Calls one block server per call. Holds no connection between calls.
 
-    The token defaults to the one the server reads (PEDAL_BLOCK_TOKEN). Pass
+    The token defaults to the one the server reads (COMMONNET_BLOCK_TOKEN). Pass
     token=None to send no Authorization header, which a real server refuses with 401.
 
     The opener ignores proxy environment variables: the endpoint is a tunnel URL,

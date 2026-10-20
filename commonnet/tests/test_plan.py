@@ -1,14 +1,14 @@
 """Planner tests. Offline, no model weights needed.
 
 Run from the repository root:
-    python3 -m unittest pedal.tests.test_plan -v
+    python3 -m unittest commonnet.tests.test_plan -v
 """
 
 from __future__ import annotations
 
 import unittest
 
-from pedal.plan import (
+from commonnet.plan import (
     GiB,
     MLX4_LAYER_BYTES,
     NF4_LAYER_BYTES,

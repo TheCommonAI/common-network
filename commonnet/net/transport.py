@@ -10,8 +10,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from pedal.net.client import BlockClient
-from pedal.net.protocol import DTYPE_WIDTH, MAX_REQUEST_BYTES, Tensor
+from commonnet.net.client import BlockClient
+from commonnet.net.protocol import DTYPE_WIDTH, MAX_REQUEST_BYTES, Tensor
 
 _NP = {"float16": np.float16, "float32": np.float32}
 _TORCH = {"float16": torch.float16, "float32": torch.float32}

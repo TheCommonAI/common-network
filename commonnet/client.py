@@ -16,8 +16,8 @@ import torch
 from torch import nn
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 
-from pedal.block import BlockRange
-from pedal.weights import CheckpointReader, build_module
+from commonnet.block import BlockRange
+from commonnet.weights import CheckpointReader, build_module
 
 
 @dataclass(frozen=True)

@@ -5,7 +5,7 @@ tensors, quantizes the linears to 4 bits (or uses an already-quantized MLX
 checkpoint), keeps a KV cache per session, and implements the BlockRange
 interface: forward(session_id, hidden, start_pos), close(session_id).
 
-Hidden states cross the boundary as float16 bytes (pedal.wire). Inside, the
+Hidden states cross the boundary as float16 bytes (commonnet.wire). Inside, the
 block computes in float16.
 """
 
@@ -24,7 +24,7 @@ from mlx_lm.models.base import create_causal_mask
 from mlx_lm.models.cache import KVCache
 from mlx_lm.models.qwen3 import ModelArgs, TransformerBlock
 
-from pedal.wire import decode_fp16, encode_fp16
+from commonnet.wire import decode_fp16, encode_fp16
 
 INDEX_NAME = "model.safetensors.index.json"
 SINGLE_NAME = "model.safetensors"

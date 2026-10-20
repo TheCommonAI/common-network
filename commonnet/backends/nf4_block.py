@@ -5,7 +5,7 @@ never run. Only the refusal path has been exercised. It must be validated on the
 Windows RTX 4060 before anyone relies on it.
 
 It is a BlockRange subclass, so forward, close, session_length and open_sessions come
-from pedal.block. Only __post_init__ differs: each Linear is a bitsandbytes
+from commonnet.block. Only __post_init__ differs: each Linear is a bitsandbytes
 Linear4bit loaded from a pre-quantized NF4 checkpoint (unsloth/Qwen3-32B-bnb-4bit
 layout: weight, weight.absmax, weight.quant_map, weight.nested_absmax,
 weight.nested_quant_map, weight.quant_state.bitsandbytes__nf4).
@@ -24,8 +24,8 @@ from safetensors import safe_open
 from torch import nn
 from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer, Qwen3RotaryEmbedding
 
-from pedal.block import BlockRange
-from pedal.weights import CheckpointReader, build_module
+from commonnet.block import BlockRange
+from commonnet.weights import CheckpointReader, build_module
 
 NF4_SUFFIXES = (
     "absmax",

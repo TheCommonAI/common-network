@@ -10,11 +10,11 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from pedal.net import protocol
-from pedal.net.client import BlockClient, RemoteError, Unreachable
-from pedal.net.protocol import ProtocolError, Tensor
-from pedal.net.server import BlockServer, StubBlock
-from pedal.tests.test_net_server import hidden_tensor
+from commonnet.net import protocol
+from commonnet.net.client import BlockClient, RemoteError, Unreachable
+from commonnet.net.protocol import ProtocolError, Tensor
+from commonnet.net.server import BlockServer, StubBlock
+from commonnet.tests.test_net_server import hidden_tensor
 
 
 class Served(unittest.TestCase):

@@ -1,7 +1,7 @@
 """Split-model tests on a tiny random Qwen3 checkpoint. All offline.
 
 Run from the repository root:
-    python3 -m unittest pedal.tests.test_split -v
+    python3 -m unittest commonnet.tests.test_split -v
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 import torch  # noqa: E402
 from transformers import Qwen3Config, Qwen3ForCausalLM  # noqa: E402
 
-from pedal.block import BlockRange  # noqa: E402
-from pedal.client import BlockEndpoint, Client, LocalTransport  # noqa: E402
+from commonnet.block import BlockRange  # noqa: E402
+from commonnet.client import BlockEndpoint, Client, LocalTransport  # noqa: E402
 
 TOL_FP32 = 1e-4
 PROMPT = [5, 17, 301, 42, 9, 133, 77]
@@ -77,7 +77,7 @@ class SplitTestBase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="pedal-ckpt-")
+        cls.tmp = tempfile.mkdtemp(prefix="commonnet-ckpt-")
         cls.ckpt = os.path.join(cls.tmp, "tiny-qwen3")
         make_checkpoint(cls.ckpt, tie=cls.tie, max_shard_size=cls.max_shard_size)
         cls.reference = Qwen3ForCausalLM.from_pretrained(cls.ckpt, dtype=torch.float32).eval()

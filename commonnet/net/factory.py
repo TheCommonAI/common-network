@@ -1,10 +1,10 @@
-"""Block factory for `python -m pedal.net.server --block pedal.net.factory:FACTORY`.
+"""Block factory for `python -m commonnet.net.server --block commonnet.net.factory:FACTORY`.
 
 Environment:
-  PEDAL_CHECKPOINT  checkpoint directory (required)
-  PEDAL_BACKEND     torch (default) | mlx | nf4
-  PEDAL_DEVICE      torch backend device (default cpu)
-  PEDAL_DTYPE       torch backend dtype: float32 (default) | float16 | bfloat16
+  COMMONNET_CHECKPOINT  checkpoint directory (required)
+  COMMONNET_BACKEND     torch (default) | mlx | nf4
+  COMMONNET_DEVICE      torch backend device (default cpu)
+  COMMONNET_DTYPE       torch backend dtype: float32 (default) | float16 | bfloat16
 """
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import os
 
 import torch
 
-from pedal.net import protocol
-from pedal.net.transport import from_wire, to_wire
+from commonnet.net import protocol
+from commonnet.net.transport import from_wire, to_wire
 
 BACKENDS = ("torch", "mlx", "nf4")
 
@@ -40,22 +40,22 @@ class ServedBlock:
 
 def build_block(start: int, end: int, backend: str | None = None, checkpoint: str | None = None, environ=None):
     env = os.environ if environ is None else environ
-    backend = (backend or env.get("PEDAL_BACKEND") or "torch").lower()
-    checkpoint = checkpoint or env.get("PEDAL_CHECKPOINT")
+    backend = (backend or env.get("COMMONNET_BACKEND") or "torch").lower()
+    checkpoint = checkpoint or env.get("COMMONNET_CHECKPOINT")
     if backend not in BACKENDS:
-        raise ValueError(f"unknown PEDAL_BACKEND {backend!r}; choose one of {BACKENDS}")
+        raise ValueError(f"unknown COMMONNET_BACKEND {backend!r}; choose one of {BACKENDS}")
     if not checkpoint:
-        raise ValueError("set PEDAL_CHECKPOINT to the checkpoint directory")
+        raise ValueError("set COMMONNET_CHECKPOINT to the checkpoint directory")
     if backend == "torch":
-        from pedal.block import BlockRange
-        device = env.get("PEDAL_DEVICE", "cpu")
-        dtype = getattr(torch, env.get("PEDAL_DTYPE", "float32"))
+        from commonnet.block import BlockRange
+        device = env.get("COMMONNET_DEVICE", "cpu")
+        dtype = getattr(torch, env.get("COMMONNET_DTYPE", "float32"))
         inner = BlockRange(checkpoint_dir=checkpoint, start=start, end=end, device=device, dtype=dtype)
         return ServedBlock(inner, start, end, device)
     if backend == "mlx":
-        from pedal.backends.mlx_block import MlxBlockRange
+        from commonnet.backends.mlx_block import MlxBlockRange
         return ServedBlock(MlxBlockRange(checkpoint_dir=checkpoint, start=start, end=end), start, end, "metal")
-    from pedal.backends.nf4_block import Nf4BlockRange  # refuses without CUDA
+    from commonnet.backends.nf4_block import Nf4BlockRange  # refuses without CUDA
     return ServedBlock(Nf4BlockRange(checkpoint_dir=checkpoint, start=start, end=end), start, end, "cuda")
 
 

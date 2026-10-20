@@ -17,8 +17,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pedal.net import tunnel
-from pedal.net.tunnel import LauncherError
+from commonnet.net import tunnel
+from commonnet.net.tunnel import LauncherError
 
 REPO_ROOT = tunnel.REPO_ROOT
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(600)"]
@@ -188,7 +188,7 @@ class DefaultOpener(unittest.TestCase):
 WRAPPER = """
 import subprocess, sys
 sys.path.insert(0, {repo!r})
-from pedal.net import tunnel
+from commonnet.net import tunnel
 join = tunnel._join()
 def fake_start_tunnel(target_url, host_header):
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])

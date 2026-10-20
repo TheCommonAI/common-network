@@ -18,7 +18,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3RotaryEmbedding,
 )
 
-from pedal.weights import CheckpointReader, build_module
+from commonnet.weights import CheckpointReader, build_module
 
 
 class KVCache:

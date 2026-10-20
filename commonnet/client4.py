@@ -1,7 +1,7 @@
 """Client with a choice of format for the embedding, final norm and lm_head.
 
 fmt:
-  fp32  same as pedal.client.Client (default there)
+  fp32  same as commonnet.client.Client (default there)
   fp16  tensors loaded as float16 (torch)
   mlx4  embedding and lm_head quantized to 4-bit with MLX (Mac only); the norm stays fp16
 The 4-bit tables are built from the checkpoint's bf16/fp tensors at load time,
@@ -15,8 +15,8 @@ import torch
 from torch import nn
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 
-from pedal.client import Client
-from pedal.weights import CheckpointReader, build_module
+from commonnet.client import Client
+from commonnet.weights import CheckpointReader, build_module
 
 FORMATS = ("fp32", "fp16", "mlx4")
 

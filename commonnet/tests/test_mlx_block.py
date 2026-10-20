@@ -1,7 +1,7 @@
 """MLX block tests on the tiny random Qwen3 checkpoint from the core tests. Needs Apple Metal.
 
 Run on the Mac from the repository root:
-    ~/pedal-venv/bin/python -m unittest pedal.tests.test_mlx_block -v
+    <venv>/bin/python -m unittest commonnet.tests.test_mlx_block -v
 
 Stated tolerances (logits, absolute). Logit std on the tiny model is about 0.8.
   TOL_BOUNDARY: a split MLX chain vs a single MLX block. Only the float16 hidden
@@ -24,9 +24,9 @@ import mlx.core as mx  # noqa: E402
 import torch  # noqa: E402
 from transformers import Qwen3ForCausalLM  # noqa: E402
 
-from pedal.backends.mlx_block import MlxBlockRange  # noqa: E402
-from pedal.client import BlockEndpoint, Client, LocalTransport  # noqa: E402
-from pedal.tests.test_split import NEW_TOKENS, PROMPT, make_checkpoint, route_for  # noqa: E402
+from commonnet.backends.mlx_block import MlxBlockRange  # noqa: E402
+from commonnet.client import BlockEndpoint, Client, LocalTransport  # noqa: E402
+from commonnet.tests.test_split import NEW_TOKENS, PROMPT, make_checkpoint, route_for  # noqa: E402
 
 TOL_BOUNDARY = 2e-2  # split chain vs single block (float16 hidden crossing only)
 TOL_FLOAT = 2e-2  # unquantized MLX block vs fp32 reference (float16 compute)
@@ -42,7 +42,7 @@ def _metal_ok() -> bool:
 class MlxTiny(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="pedal-mlx-")
+        cls.tmp = tempfile.mkdtemp(prefix="commonnet-mlx-")
         cls.ckpt = os.path.join(cls.tmp, "tiny-qwen3")
         make_checkpoint(cls.ckpt)
         cls.reference = Qwen3ForCausalLM.from_pretrained(cls.ckpt, dtype=torch.float32).eval()
