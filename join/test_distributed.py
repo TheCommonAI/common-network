@@ -159,6 +159,36 @@ class DistributedTests(unittest.TestCase):
                 patch.object(runtime.subprocess, "run", side_effect=results):
             config.preflight()
 
+    # Captured from the local llama.cpp build on Apple M3 (`--rpc 127.0.0.1:50051 --list-devices`).
+    # The local accelerator is listed with no RPC prefix; the worker line has an address
+    # and no backend name, so the parser must not infer one.
+    REAL_LOCAL_LISTING = ("Available devices:\n"
+                          "  MTL0: Apple M3 (12124 MiB, 12123 MiB free)\n")
+    REAL_RPC_LISTING = REAL_LOCAL_LISTING + "  RPC0: 127.0.0.1:50051 (12124 MiB, 12123 MiB free)\n"
+
+    def real_preflight(self, listing, **overrides):
+        self.data.update(overrides)
+        config = self.config()
+        results = [subprocess.CompletedProcess([], 0, " ".join(config.extra_argv()), ""),
+                   subprocess.CompletedProcess([], 0, listing, "")]
+        with patch.object(runtime, "unreachable_rpc_servers", return_value=[]), \
+                patch.object(runtime.subprocess, "run", side_effect=results):
+            config.preflight()
+
+    def test_discovery_reads_real_worker_listing(self):
+        listing = self.REAL_RPC_LISTING + "  RPC1: 127.0.0.1:50052 (12124 MiB, 12123 MiB free)\n"
+        self.real_preflight(listing)
+
+    def test_real_local_accelerator_is_a_valid_draft_device(self):
+        listing = self.REAL_RPC_LISTING + "  RPC1: 127.0.0.1:50052 (12124 MiB, 12123 MiB free)\n"
+        self.real_preflight(listing, draft_device="MTL0")
+
+    def test_remote_worker_is_not_a_local_draft_device(self):
+        # RPC0 is listed by the real binary, but it is a remote worker, not a local device.
+        listing = self.REAL_RPC_LISTING + "  RPC1: 127.0.0.1:50052 (12124 MiB, 12123 MiB free)\n"
+        with self.assertRaisesRegex(runtime.FetchFailed, "local draft device RPC0 is unavailable"):
+            self.real_preflight(listing, draft_device="RPC0")
+
     def test_discovery_rejects_two_devices_on_only_one_peer(self):
         config = self.config()
         results = [subprocess.CompletedProcess([], 0, " ".join(config.extra_argv()), ""),
