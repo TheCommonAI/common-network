@@ -13,8 +13,10 @@ import json
 import os
 import secrets
 import shutil
+import signal
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -458,7 +460,7 @@ class GpuDeviceTests(unittest.TestCase):
     """A member serves a GPU only: the device list is checked before anything is spent or served."""
 
     def test_a_cpu_only_list_is_refused_with_the_reason(self):
-        with self.assertRaisesRegex(group.GroupError, r"no GPU device.*lists CPU.*not fall back to CPU"):
+        with self.assertRaisesRegex(group.GroupError, r"no GPU device.*llama-server lists CPU.*not fall back to CPU"):
             group.select_gpu_device(Path("/unused"), list_devices=lambda _binary: ["CPU"])
 
     def test_an_empty_list_is_refused(self):
@@ -477,23 +479,71 @@ class GpuDeviceTests(unittest.TestCase):
         self.assertEqual(group.select_gpu_device(Path("/unused"), list_devices=lambda _b: ["MTL0"]), "MTL0")
         self.assertEqual(group.select_gpu_device(Path("/unused"), list_devices=lambda _b: ["Vulkan0"]), "Vulkan0")
 
-    def test_device_listing_is_read_from_the_rpc_server_output(self):
+    # Captured on this Mac from the installed llama.cpp b11700 (`llama-server --list-devices`).
+    # b11752, the current release, prints the same two lines.
+    REAL_LLAMA_LISTING = ("Available devices:\n"
+                          "  MTL0: Apple M3 (12124 MiB, 12123 MiB free)\n"
+                          "  BLAS: Accelerate (0 MiB, 0 MiB free)\n")
+
+    def test_the_real_listing_from_this_mac_parses_to_the_metal_device(self):
+        self.assertEqual(group.parse_device_listing(self.REAL_LLAMA_LISTING), ["MTL0", "BLAS"])
+        self.assertEqual(group.select_gpu_device(Path("/unused"),
+                                                 list_devices=lambda _b: group.parse_device_listing(self.REAL_LLAMA_LISTING)),
+                         "MTL0")
+
+    def test_the_real_listing_with_no_gpu_line_is_refused(self):
+        cpu_only = "Available devices:\n  CPU: Apple M3 (8 MiB, 8 MiB free)\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n"
+        self.assertEqual(group.parse_device_listing(cpu_only), ["CPU", "BLAS"])
+        with self.assertRaisesRegex(group.GroupError, "no GPU device.*llama-server lists CPU, BLAS.*not fall back to CPU"):
+            group.select_gpu_device(Path("/unused"), list_devices=lambda _b: group.parse_device_listing(cpu_only))
+        with self.assertRaisesRegex(group.GroupError, "no GPU device"):
+            group.select_gpu_device(Path("/unused"), list_devices=lambda _b: group.parse_device_listing("Available devices:\n"))
+
+    def test_the_device_names_come_from_the_lines_and_never_from_a_guess(self):
+        # A backend the parser does not know is not a GPU, even if its name sounds like one.
+        self.assertEqual(group.parse_device_listing("Available devices:\n  Foo0: Something (1 MiB)\n"), ["Foo0"])
+        with self.assertRaisesRegex(group.GroupError, "no GPU device"):
+            group.select_gpu_device(Path("/unused"), list_devices=lambda _b: ["Foo0"])
+
+    def test_device_listing_is_read_from_llama_server_beside_the_rpc_binary(self):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root, True)
-        script = root / "lister"
-        script.write_text(f"#!{sys.executable}\nprint('Available devices:')\n"
-                          "print('  CPU: Fake CPU (8 MiB)')\nprint('  CUDA0: Fake GPU (1024 MiB, 512 MiB free)')\n")
-        script.chmod(0o755)
-        self.assertEqual(group.list_rpc_devices(script), ["CPU", "CUDA0"])
+        (root / "llama-server").write_text(
+            f"#!{sys.executable}\nimport sys\nassert sys.argv[1:] == ['--list-devices']\n"
+            f"sys.stdout.write({self.REAL_LLAMA_LISTING!r})\n")
+        (root / "llama-server").chmod(0o755)
+        self.assertEqual(group.list_rpc_devices(root / "ggml-rpc-server"), ["MTL0", "BLAS"])
+
+    def test_the_rpc_server_is_never_asked_to_list_devices(self):
+        # The real ggml-rpc-server (b11700, b11752) answers --list-devices with "unknown argument"
+        # and its usage text, and exits 0. Parsing that text as a device listing finds no GPU.
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        rpc = root / "ggml-rpc-server"
+        rpc.write_text(f"#!{sys.executable}\nimport sys\n"
+                       "if '--list-devices' in sys.argv:\n"
+                       "    print('error: unknown argument: --list-devices', file=sys.stderr)\n"
+                       "    print('Usage: ggml-rpc-server [options]', file=sys.stderr)\n"
+                       "    print('  -d, --device <dev1,dev2,...>     comma-separated list of devices', file=sys.stderr)\n"
+                       "    sys.exit(0)\n")
+        rpc.chmod(0o755)
+        (root / "llama-server").write_text(f"#!{sys.executable}\nprint({self.REAL_LLAMA_LISTING!r}, end='')\n")
+        (root / "llama-server").chmod(0o755)
+        self.assertEqual(group.list_rpc_devices(rpc), ["MTL0", "BLAS"])
 
     def test_a_failed_device_listing_is_refused(self):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root, True)
-        script = root / "broken"
-        script.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(2)\n")
-        script.chmod(0o755)
+        (root / "llama-server").write_text(f"#!{sys.executable}\nimport sys\nsys.exit(2)\n")
+        (root / "llama-server").chmod(0o755)
         with self.assertRaisesRegex(group.GroupError, "could not list its devices"):
-            group.list_rpc_devices(script)
+            group.list_rpc_devices(root / "ggml-rpc-server")
+
+    def test_a_missing_llama_server_is_refused_without_a_traceback(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        with self.assertRaisesRegex(group.GroupError, "cannot ask llama-server"):
+            group.list_rpc_devices(root / "ggml-rpc-server")
 
     def test_a_cpu_only_member_is_refused_before_it_spends_its_token(self):
         root = Path(tempfile.mkdtemp())
@@ -525,6 +575,9 @@ class EndToEndTests(unittest.TestCase):
         group.init_group("lab", groups_dir=self.groups)
         self.state_path = self.groups / "lab" / "group.json"
         self.fake_rpc = self._fake_rpc_binary()
+        (self.root / "llama-server").write_text(
+            f"#!{sys.executable}\nprint('Available devices:')\nprint('  CUDA0: Fake GPU for tests (1024 MiB, 1024 MiB free)')\n")
+        (self.root / "llama-server").chmod(0o755)
         self.relay_logs = []
         self.stop = threading.Event()
         self.addCleanup(self._stop_relay)
@@ -547,10 +600,9 @@ class EndToEndTests(unittest.TestCase):
             f"#!{sys.executable}\n"
             "import socket, sys, threading\n"
             "if '--list-devices' in sys.argv:\n"
-            "    print('Available devices:')\n"
-            "    print('  CUDA0: Fake GPU for tests (1024 MiB, 1024 MiB free)')\n"
-            "    sys.exit(0)\n"
-            "device = sys.argv[sys.argv.index('-d') + 1] if '-d' in sys.argv else ''\n"
+            "    print('error: unknown argument: --list-devices', file=sys.stderr)\n"
+            "    sys.exit(1)\n"
+            "device =sys.argv[sys.argv.index('-d') + 1] if '-d' in sys.argv else ''\n"
             "if not device.startswith('CUDA'):\n"
             "    sys.exit(3)\n"
             "host = sys.argv[sys.argv.index('--host') + 1]\n"
@@ -624,6 +676,134 @@ class EndToEndTests(unittest.TestCase):
             with self.assertRaisesRegex(group.GroupError, "expired"):
                 group.enrol(stale, groups_dir=self.members)
 
+    def _restart_relay_on_new_tunnel(self) -> str:
+        """Stop the relay and start it again behind a tunnel at a new address. Returns the old address."""
+        old = self.tunnel
+        self.stop.set()
+        self.relay_thread.join(timeout=10)
+        self.stop = threading.Event()
+        self.relay_thread = threading.Thread(
+            target=group.run_relay, daemon=True,
+            kwargs=dict(state_path=self.state_path, log=self.relay_logs.append, stop=self.stop,
+                        open_tunnel=localhost_tunnel, port_range=self.rpc_ports))
+        self.relay_thread.start()
+        self.tunnel = self._wait_for_tunnel_url()
+        return old
+
+    def _start_member(self, token: str, stop: threading.Event, logs: list, relay_url: str | None = None):
+        thread = threading.Thread(
+            target=group.join_group, daemon=True,
+            kwargs=dict(token=token, rpc_binary=self.fake_rpc, groups_dir=self.members,
+                        log=logs.append, stop=stop, relay_url=relay_url))
+        thread.start()
+        self.addCleanup(stop.set)
+        return thread
+
+    def _relay_request(self, url: str, request: dict) -> dict:
+        link = group.client_connect(url)
+        try:
+            group._send_json(link, request)
+            return group._read_json(link)
+        finally:
+            group._close_quietly(link)
+
+    def test_a_member_rejoins_at_a_new_tunnel_url_with_its_key_and_keeps_its_port(self):
+        token = group.issue("lab", "node-a", groups_dir=self.groups)
+        first_stop = threading.Event()
+        first_logs = []
+        first = self._start_member(token, first_stop, first_logs)
+        port = self._wait_for_member("node-a")
+        self.assertTrue(self._echo_through(port, b"before the restart"), f"no echo; log: {first_logs}")
+        member_file = self.members / "lab" / "member.json"
+        before = json.loads(member_file.read_text())
+
+        first_stop.set()
+        first.join(timeout=30)
+        old_tunnel = self._restart_relay_on_new_tunnel()
+        self.assertNotEqual(self.tunnel, old_tunnel)
+
+        logs = []
+        stop = threading.Event()
+        self._start_member(token, stop, logs, relay_url=self.tunnel)
+        payload = b"after the rejoin " * 20_000
+        self.assertTrue(self._echo_through(port, payload), f"no echo after the rejoin; log: {logs}")
+
+        after = json.loads(member_file.read_text())
+        self.assertEqual(after["tunnel_url"], self.tunnel)
+        self.assertNotEqual(after["tunnel_url"], before["tunnel_url"])
+        self.assertEqual(after["key"], before["key"])
+        self.assertEqual((after["member"], after["rpc_port"]), ("node-a", port))
+        self.assertEqual(member_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(self.state_path.read_text())["members"]["node-a"]["rpc_port"], port)
+        self.assertTrue(any(line == "node-a rejoined at the current tunnel" for line in self.relay_logs), self.relay_logs)
+        self.assertTrue(any("rejoined group lab as node-a" in line for line in logs), logs)
+
+    def test_a_rejoin_with_a_wrong_key_is_refused_and_member_json_is_unchanged(self):
+        group.enrol(group.issue("lab", "node-a", groups_dir=self.groups), groups_dir=self.members)
+        member_file = self.members / "lab" / "member.json"
+        before = member_file.read_text()
+        member = group.load_member(self.members, "lab")
+        with self.assertRaisesRegex(group.GroupError, "key is wrong"):
+            group.rejoin(dict(member, key="0" * 64), self.tunnel, groups_dir=self.members)
+        self.assertEqual(member_file.read_text(), before)
+
+    def test_one_time_tokens_cannot_rejoin_whether_spent_expired_or_fresh(self):
+        used = group.issue("lab", "node-a", groups_dir=self.groups)
+        member = group.enrol(used, groups_dir=self.members)
+        secret = bytes.fromhex(json.loads(self.state_path.read_text())["secret"])
+        expired = group.issue_token(secret, group="lab", member="node-a", tunnel_url=self.tunnel,
+                                    expires=time.time() - 5)
+        fresh = group.issue_token(secret, group="lab", member="node-a", tunnel_url=self.tunnel,
+                                  expires=time.time() + 3600)
+        for label, token in (("spent", used), ("expired", expired), ("fresh", fresh)):
+            with self.subTest(token=label):
+                reply = self._relay_request(self.tunnel, {"op": "rejoin", "member": "node-a", "token": token})
+                self.assertFalse(reply["ok"])
+                self.assertIn("one-time token cannot rejoin", reply["error"])
+                reply = self._relay_request(self.tunnel, {"op": "rejoin", "member": "node-a",
+                                                          "key": member["key"], "token": token})
+                self.assertFalse(reply["ok"])
+        # A token offered as the key is just a wrong key.
+        with self.assertRaisesRegex(group.GroupError, "key is wrong"):
+            group.rejoin(dict(member, key=used), self.tunnel, groups_dir=self.members)
+
+    def test_relay_is_refused_for_a_first_enrolment(self):
+        token = group.issue("lab", "node-a", groups_dir=self.groups)
+        with self.assertRaisesRegex(group.GroupError, "already enrolled in this group"):
+            group.join_group(token, rpc_binary=self.fake_rpc, groups_dir=self.members,
+                             log=lambda _t: None, relay_url=self.tunnel)
+        self.assertFalse((self.members / "lab" / "member.json").exists())
+
+    def test_a_different_name_on_an_enrolled_machine_is_still_refused(self):
+        group.enrol(group.issue("lab", "node-a", groups_dir=self.groups), groups_dir=self.members)
+        other = group.issue("lab", "node-b", groups_dir=self.groups)
+        member_file = self.members / "lab" / "member.json"
+        before = member_file.read_text()
+        for relay_url in (None, self.tunnel):
+            with self.subTest(relay_url=relay_url):
+                with self.assertRaisesRegex(group.GroupError, "already enrolled in group lab as node-a"):
+                    group.join_group(other, rpc_binary=self.fake_rpc, groups_dir=self.members,
+                                     log=lambda _t: None, relay_url=relay_url)
+        self.assertEqual(member_file.read_text(), before)
+
+    def test_a_stale_token_on_a_new_machine_is_refused_with_the_reason(self):
+        secret = bytes.fromhex(json.loads(self.state_path.read_text())["secret"])
+        dead = f"http://127.0.0.1:{free_port()}"  # nothing listens here: the relay that issued it is gone
+        stale = group.issue_token(secret, group="lab", member="node-c", tunnel_url=dead,
+                                  expires=time.time() + 3600)
+        with self.assertRaisesRegex(group.GroupError, "ask the coordinator for a new token"):
+            group.enrol(stale, groups_dir=self.members)
+        self.assertFalse((self.members / "lab" / "member.json").exists())
+
+    def test_rejoin_at_an_unreachable_address_leaves_member_json_alone(self):
+        group.enrol(group.issue("lab", "node-a", groups_dir=self.groups), groups_dir=self.members)
+        member_file = self.members / "lab" / "member.json"
+        before = member_file.read_text()
+        member = group.load_member(self.members, "lab")
+        with self.assertRaisesRegex(group.GroupError, "cannot reach the relay"):
+            group.rejoin(member, f"http://127.0.0.1:{free_port()}", groups_dir=self.members)
+        self.assertEqual(member_file.read_text(), before)
+
     def _wait_for_member(self, name: str, timeout: float = 30.0) -> int:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -653,6 +833,40 @@ class EndToEndTests(unittest.TestCase):
         return False
 
 
+RELAY_CLI_HARNESS = """
+import subprocess
+import sys
+from pathlib import Path
+
+import group
+
+groups_dir, pid_file = Path(sys.argv[1]), Path(sys.argv[2])
+
+
+def stub_tunnel(local_url, local_port):
+    # A stub cloudflared: a child process, so the test can see whether it was stopped.
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    pid_file.write_text(str(child.pid))
+    return child, local_url
+
+
+import join  # group._open_tunnel calls join.start_tunnel at call time: this is the cloudflared seam
+
+group.GROUPS_DIR = groups_dir
+join.start_tunnel = stub_tunnel
+sys.exit(group.main(["relay", "--group", "lab"]))
+"""
+
+
+def _process_gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
 class _StubProcess:
     """Stands in for the cloudflared process: alive until stopped."""
 
@@ -672,6 +886,11 @@ class _StubProcess:
 def stub_tunnel(local_url: str, local_port: int):
     """A tunnel that is the local address itself: reachable from this machine, which is all the test needs."""
     return _StubProcess(), local_url
+
+
+def localhost_tunnel(local_url: str, local_port: int):
+    """The same local relay under another name: a new tunnel URL, as after a relay restart."""
+    return _StubProcess(), f"http://localhost:{local_port}"
 
 
 class RelayTests(unittest.TestCase):
@@ -706,6 +925,159 @@ class RelayTests(unittest.TestCase):
         thread.join(timeout=10)
         # the tunnel URL is cleared on the way out, so issue refuses until the relay runs again
         self.assertIsNone(json.loads((root / "lab" / "group.json").read_text())["tunnel_url"])
+
+
+class RelayProcessTests(unittest.TestCase):
+    """The relay CLI as a real process, with a stub tunnel: a stop signal must clean up like Ctrl+C."""
+
+    def _start_relay(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        groups = root / "groups"
+        group.init_group("lab", groups_dir=groups)
+        harness = root / "relay_cli.py"
+        harness.write_text(RELAY_CLI_HARNESS)
+        pid_file = root / "tunnel.pid"
+        home = root / "home"
+        home.mkdir()
+        env = dict(os.environ, HOME=str(home), PYTHONPATH=str(Path(group.__file__).parent))
+        with open(root / "relay.log", "wb") as log:
+            proc = subprocess.Popen([sys.executable, "-u", str(harness), str(groups), str(pid_file)],
+                                    cwd=str(root), env=env, stdout=log, stderr=subprocess.STDOUT)
+
+        def cleanup():
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            if pid_file.exists():
+                try:
+                    os.kill(int(pid_file.read_text()), 9)
+                except (ProcessLookupError, ValueError):
+                    pass
+        self.addCleanup(cleanup)
+        return proc, groups / "lab" / "group.json", pid_file, root / "relay.log"
+
+    def _wait_until_published(self, proc, state_path, pid_file, log):
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            self.assertIsNone(proc.poll(), f"the relay exited before it started: {log.read_text()}")
+            if pid_file.exists() and json.loads(state_path.read_text())["tunnel_url"]:
+                return
+            time.sleep(0.05)
+        self.fail(f"the relay never published its tunnel URL: {log.read_text()}")
+
+    def _stop_with(self, sig):
+        proc, state_path, pid_file, log = self._start_relay()
+        self._wait_until_published(proc, state_path, pid_file, log)
+        tunnel_pid = int(pid_file.read_text())
+        self.assertFalse(_process_gone(tunnel_pid))
+        proc.send_signal(sig)
+        code = proc.wait(timeout=30)
+        self.assertEqual(code, 0, log.read_text())
+        self.assertTrue(_process_gone(tunnel_pid), "the stub tunnel is still running")
+        self.assertIsNone(json.loads(state_path.read_text())["tunnel_url"])
+        self.assertIn("relay stopped", log.read_text())
+
+    def test_sigterm_stops_the_tunnel_and_clears_the_url(self):
+        self._stop_with(signal.SIGTERM)
+
+    def test_ctrl_c_stops_the_tunnel_and_clears_the_url(self):
+        self._stop_with(signal.SIGINT)
+
+
+class _FakeClock:
+    """Stands in for the time module inside group.py: monotonic() moves only when a test advances it."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+class _HealthTicks(threading.Event):
+    """Stands in for the relay's stop event: each wait() is one health-check interval on the fake clock."""
+
+    def __init__(self, clock, ticks):
+        super().__init__()
+        self.clock = clock
+        self.left = ticks
+
+    def wait(self, timeout=None):
+        if self.left == 0:
+            return True
+        self.left -= 1
+        self.clock.now += timeout
+        return False
+
+
+class TunnelGraceTests(unittest.TestCase):
+    """A quick tunnel is replaced only after it has been unreachable for the whole grace period.
+
+    The health check is the real tunnel_is_healthy, fed the errors urllib raises: a DNS
+    failure for a fresh hostname is a URLError wrapping gaierror, the same as a refused
+    connection to a dead tunnel. Each outcome is one health check, one interval apart.
+    """
+
+    DNS_DOWN = urllib.error.URLError(socket.gaierror(-2, "Name or service not known"))
+    REFUSED = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+    HEALTHY = None
+
+    def run_relay_checks(self, outcomes):
+        """Run the relay for one health check per outcome. Returns (tunnels opened, relay log)."""
+        import join
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        group.init_group("lab", groups_dir=root)
+        opened = []
+
+        def tunnel(local_url, local_port):
+            opened.append(local_url)
+            return _StubProcess(), f"https://tunnel-{len(opened)}.trycloudflare.com"
+
+        script = list(outcomes)
+
+        def http_json(method, url, timeout=None, headers=None):
+            outcome = script.pop(0)
+            if outcome is None:
+                return {"ok": True}
+            raise outcome
+
+        clock = _FakeClock()
+        logs = []
+        with patch.object(group, "time", clock), \
+                patch.object(join, "http_json", side_effect=http_json), \
+                patch.object(join, "wait_for_tunnel", return_value=False):
+            group.run_relay(root / "lab" / "group.json", stop=_HealthTicks(clock, len(outcomes)),
+                            log=logs.append, open_tunnel=tunnel)
+        self.assertEqual(script, [], "the relay did not run one health check per outcome")
+        return len(opened), logs
+
+    def test_dns_failures_inside_the_grace_period_do_not_rotate_the_tunnel(self):
+        opened, logs = self.run_relay_checks([self.DNS_DOWN] * 4)  # 480s of DNS failure, under the 600s grace
+        self.assertEqual(opened, 1)
+        self.assertFalse(any("restarting" in line for line in logs), logs)
+
+    def test_dns_recovery_restarts_the_grace_period(self):
+        opened, _ = self.run_relay_checks([self.DNS_DOWN] * 4 + [self.HEALTHY] + [self.DNS_DOWN] * 4)
+        self.assertEqual(opened, 1)  # 4 failures, a success, then 4 more: never 600s in a row
+
+    def test_an_unreachable_tunnel_is_not_rotated_before_the_grace_period_ends(self):
+        opened, _ = self.run_relay_checks([self.REFUSED] * 4)  # 480s
+        self.assertEqual(opened, 1)
+
+    def test_a_tunnel_unreachable_for_the_whole_grace_period_is_rotated(self):
+        opened, logs = self.run_relay_checks([self.REFUSED] * 5)  # 600s
+        self.assertEqual(opened, 2)
+        self.assertIn("tunnel URL: https://tunnel-2.trycloudflare.com", logs)
+
+    def test_dns_failure_for_the_whole_grace_period_is_rotated_as_a_dead_tunnel(self):
+        # Past the grace period a failure cannot be told from a dead tunnel, so it is replaced.
+        opened, _ = self.run_relay_checks([self.DNS_DOWN] * 5)
+        self.assertEqual(opened, 2)
 
 
 class CommandLineTests(unittest.TestCase):
@@ -762,7 +1134,18 @@ class JoinEntryPointTests(unittest.TestCase):
         with patch.object(self.join, "run_group_member") as member, \
                 patch.object(self.join, "resolve_model", side_effect=AssertionError("gateway path")):
             self.run_join(["--group-token", "cng1.x.y"])
-        member.assert_called_once_with("cng1.x.y")
+        member.assert_called_once_with("cng1.x.y", relay_url=None)
+
+    def test_relay_goes_to_the_member_flow_as_the_rejoin_address(self):
+        with patch.object(self.join, "run_group_member") as member:
+            self.run_join(["--group-token", "cng1.x.y", "--relay", "https://new-tunnel.trycloudflare.com"])
+        member.assert_called_once_with("cng1.x.y", relay_url="https://new-tunnel.trycloudflare.com")
+
+    def test_relay_needs_group_token(self):
+        with patch.object(self.join, "run_group_member") as member, \
+                patch.object(sys, "stderr", io.StringIO()), self.assertRaises(SystemExit):
+            self.run_join(["--relay", "https://new-tunnel.trycloudflare.com"])
+        member.assert_not_called()
 
     def test_group_token_cannot_be_combined_with_gateway_or_local_modes(self):
         for extra in (["--model", "qwen"], ["--local-only", "--distributed-config", "c.json"],

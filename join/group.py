@@ -31,6 +31,13 @@ keeps only the SHA-256 of the key, and each later connection presents the key.
 A token is only good while the relay that issued it is running on the same
 tunnel URL; tokens name that URL, so an old token does not reach a new tunnel.
 
+Rejoin: when the relay's tunnel URL changes, an enrolled member does not need a
+new token. It rejoins with its member key from member.json, at the relay's
+current address (`join.py --group-token TOKEN --relay URL`). The coordinator
+checks the key against the stored SHA-256 verifier, and the member keeps its name
+and rpc port. A one-time token is never accepted as a rejoin credential: a
+request that carries one is refused, whether or not it is expired or used.
+
 Trust: the tunnel is operated by Cloudflare, so Cloudflare can read the
 enrolment exchange and the RPC bytes. The coordinator's checks (the token
 signature, the one-time secret and the member key) decide who is admitted; the
@@ -47,8 +54,10 @@ import hashlib
 import hmac
 import json
 import os
+import platform
 import re
 import secrets
+import signal
 import socket
 import ssl
 import struct
@@ -79,6 +88,10 @@ LINK_PATH = "/group/link"
 HEALTH_PATH = "/group/health"
 LOOPBACK_HOSTS = frozenset(("127.0.0.1", "localhost", "::1"))
 RELAY_HEALTH_CHECK_SECONDS = 120
+# A fresh quick tunnel's hostname can take minutes to resolve, and until it does a
+# health check fails just as it would for a dead tunnel. The tunnel is replaced only
+# once it has been unreachable for this long in a row, counted from its start.
+RELAY_TUNNEL_GRACE_SECONDS = 600
 
 # Frames: one kind byte, a 32-bit stream id and a 32-bit payload length.
 OPEN, DATA, CLOSE, PING, PONG = 1, 2, 3, 4, 5
@@ -939,6 +952,22 @@ class Relay:
             _send_json(link, {"ok": True, "rpc_port": port})
             self._attach(member, link)
             return
+        if op == "rejoin":
+            # Only the member key admits a rejoin. A one-time token, fresh or
+            # spent, expired or not, is refused even if a key comes with it.
+            member = request.get("member")
+            if "token" in request:
+                _send_json(link, {"ok": False, "error": "a one-time token cannot rejoin; rejoin with the member key"})
+                self.log(f"rejoin refused for {member!r}: a one-time token was presented")
+                return
+            port = self.state.authenticate(member, request.get("key"))
+            if port is None:
+                _send_json(link, {"ok": False, "error": "this member is not enrolled, or its key is wrong"})
+                self.log(f"rejoin refused for {member!r}")
+                return
+            _send_json(link, {"ok": True, "member": member, "rpc_port": port})
+            self.log(f"{member} rejoined at the current tunnel")
+            return
         _send_json(link, {"ok": False, "error": "unknown request"})
 
     def _attach(self, member: str, link) -> None:
@@ -997,9 +1026,9 @@ def run_relay(state_path: Path, *, port: int = 0, log=print, stop: threading.Eve
     """Serve the group on 127.0.0.1, point a tunnel at it, and run until `stop` is set.
 
     The tunnel URL is written to group.json while the relay runs, so `issue` can
-    name it, and is cleared on the way out. A tunnel that dies is restarted, which
-    gives it a new URL: tokens issued for the old one stop working, so they must be
-    issued again.
+    name it, and is cleared on the way out. A tunnel unreachable for the whole grace
+    period is restarted, which gives it a new URL: tokens issued for the old one stop
+    working, so they must be issued again.
     """
     import join  # for the tunnel health check, shared with the worker
     stop = stop or threading.Event()
@@ -1010,15 +1039,24 @@ def run_relay(state_path: Path, *, port: int = 0, log=print, stop: threading.Eve
     proc = None
     try:
         proc, url = open_tunnel(local_url, local_port)
+        healthy_at = time.monotonic()
         if not join.wait_for_tunnel(url, None, HEALTH_PATH):
             log("warning: the tunnel is not reachable yet; members may not connect until it is")
         _publish_tunnel(server, url, log)
         while not stop.wait(RELAY_HEALTH_CHECK_SECONDS):
-            if proc.poll() is not None or not join.tunnel_is_healthy(url, None, HEALTH_PATH):
-                log("the tunnel is no longer reachable; restarting it")
-                _stop_process(proc)
-                proc, url = open_tunnel(local_url, local_port)
-                _publish_tunnel(server, url, log)
+            if proc.poll() is None and join.tunnel_is_healthy(url, None, HEALTH_PATH):
+                healthy_at = time.monotonic()
+                continue
+            unreachable_for = time.monotonic() - healthy_at
+            if unreachable_for < RELAY_TUNNEL_GRACE_SECONDS:
+                log(f"the tunnel is not reachable yet ({unreachable_for:.0f}s); "
+                    f"it is replaced after {RELAY_TUNNEL_GRACE_SECONDS}s unreachable")
+                continue
+            log(f"the tunnel has been unreachable for {unreachable_for:.0f}s; restarting it")
+            _stop_process(proc)
+            proc, url = open_tunnel(local_url, local_port)
+            healthy_at = time.monotonic()
+            _publish_tunnel(server, url, log)
     finally:
         if proc is not None:
             _stop_process(proc)
@@ -1077,7 +1115,11 @@ def enrol(token: str, *, groups_dir: Path = GROUPS_DIR, now: float | None = None
     now = time.time() if now is None else now
     if payload["x"] <= now:
         raise GroupError("this group token has expired; ask the coordinator for a new one")
-    link = client_connect(payload["u"])
+    try:
+        link = client_connect(payload["u"])
+    except OSError as e:
+        raise GroupError(f"cannot reach the relay this token names ({e}); if the relay has restarted, "
+                         "ask the coordinator for a new token") from None
     try:
         _send_json(link, {"op": "enrol", "token": token})
         reply = _read_json(link)
@@ -1091,6 +1133,32 @@ def enrol(token: str, *, groups_dir: Path = GROUPS_DIR, now: float | None = None
               "tunnel_url": payload["u"], "key": reply["key"], "rpc_port": reply.get("rpc_port")}
     _write_private(member_path(groups_dir, payload["g"]), member)
     return member
+
+
+def rejoin(member: dict, relay_url: str, *, groups_dir: Path = GROUPS_DIR) -> dict:
+    """Prove this member's key to the relay at `relay_url`, and keep that address in member.json.
+
+    No one-time token is involved: the member key is the credential. The member's
+    name and rpc port stay as they were, so the coordinator's port mapping still
+    applies. A refused key leaves member.json as it was.
+    """
+    url = _check_tunnel_url(relay_url)
+    try:
+        link = client_connect(url)
+    except OSError as e:
+        raise GroupError(f"cannot reach the relay at {url} ({e}); check the address the coordinator printed") from None
+    try:
+        _send_json(link, {"op": "rejoin", "member": member["member"], "key": member["key"]})
+        reply = _read_json(link)
+    finally:
+        _close_quietly(link)
+    if not reply.get("ok"):
+        raise GroupError(str(reply.get("error") or "the coordinator refused this member"))
+    if reply.get("member") != member["member"] or reply.get("rpc_port") != member.get("rpc_port"):
+        raise GroupError("the coordinator's reply does not match this member")
+    updated = dict(member, tunnel_url=url)
+    _write_private(member_path(groups_dir, member["group"]), updated)
+    return updated
 
 
 def _connect_rpc(port: int):
@@ -1135,18 +1203,31 @@ def _stop_process(proc) -> None:
 GPU_DEVICE_PATTERN = re.compile(r"(?:CUDA|MTL|Vulkan|ROCm|HIP|SYCL|MUSA|CANN)[0-9]+")
 DEVICE_LINE_PATTERN = re.compile(r"^\s*([A-Za-z][A-Za-z0-9]*):\s", re.MULTILINE)
 RPC_DEVICE_LIST_TIMEOUT_SECONDS = 60
+LLAMA_SERVER_NAME = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
+
+
+def parse_device_listing(text: str) -> list[str]:
+    """The device names in a `--list-devices` listing, in the order it gives them. Pure."""
+    return DEVICE_LINE_PATTERN.findall(text)
 
 
 def list_rpc_devices(binary: Path) -> list[str]:
-    """The device names `ggml-rpc-server --list-devices` reports, in the order it reports them."""
+    """The devices this build reports, from `llama-server --list-devices` beside the RPC server.
+
+    ggml-rpc-server cannot list devices: it refuses --list-devices and its --help names
+    none. llama-server from the same archive lists the same local devices, and those
+    are the names ggml-rpc-server takes with -d.
+    """
     try:
-        result = subprocess.run([str(binary), "--list-devices"], stdin=subprocess.DEVNULL,
-                                capture_output=True, text=True, timeout=RPC_DEVICE_LIST_TIMEOUT_SECONDS)
+        result = subprocess.run([str(binary.with_name(LLAMA_SERVER_NAME)), "--list-devices"],
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                timeout=RPC_DEVICE_LIST_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired) as e:
-        raise GroupError(f"cannot ask the RPC server for its devices ({e})") from None
+        raise GroupError(f"cannot ask llama-server for the devices ({e})") from None
     if result.returncode != 0:
-        raise GroupError(f"the RPC server could not list its devices (exit code {result.returncode})")
-    return DEVICE_LINE_PATTERN.findall(result.stdout + result.stderr)
+        raise GroupError(f"llama-server beside the RPC server could not list its devices "
+                         f"(exit code {result.returncode})")
+    return parse_device_listing(result.stdout + result.stderr)
 
 
 def select_gpu_device(binary: Path, *, list_devices=list_rpc_devices) -> str:
@@ -1159,7 +1240,7 @@ def select_gpu_device(binary: Path, *, list_devices=list_rpc_devices) -> str:
     gpus = [device for device in devices if GPU_DEVICE_PATTERN.fullmatch(device)]
     if not gpus:
         listed = ", ".join(devices) if devices else "nothing"
-        raise GroupError(f"this machine has no GPU device for the group: the RPC server lists {listed}. "
+        raise GroupError(f"this machine has no GPU device for the group: llama-server lists {listed}. "
                          "A group member must have a GPU, and it will not fall back to CPU. Not joining.")
     return gpus[0]
 
@@ -1217,8 +1298,13 @@ def run_worker(member: dict, rpc_binary: Path, *, device: str, log_path: Path, l
 
 def join_group(token: str, *, rpc_binary: Path, groups_dir: Path = GROUPS_DIR, log=print,
                stop: threading.Event | None = None, now: float | None = None,
-               list_devices=list_rpc_devices) -> None:
+               list_devices=list_rpc_devices, relay_url: str | None = None) -> None:
     """Enrol with `token` if this machine is not yet a member, then run the worker.
+
+    A machine that is already a member of the token's group rejoins with its member
+    key when `relay_url` names the relay's current address; without it, the worker
+    resumes at the address in member.json. The token only names the group and the
+    member here: it never admits a rejoin.
 
     The GPU check comes first, so a machine without a GPU refuses before it
     spends the token.
@@ -1228,10 +1314,16 @@ def join_group(token: str, *, rpc_binary: Path, groups_dir: Path = GROUPS_DIR, l
     device = select_gpu_device(rpc_binary, list_devices=list_devices)
     current = load_member(groups_dir, group)
     if current is None:
+        if relay_url is not None:
+            raise GroupError("--relay is for a machine already enrolled in this group; "
+                             "a new member's token names the relay")
         current = enrol(token, groups_dir=groups_dir, now=now)
         log(f"enrolled as {current['member']} in group {group}")
     elif current.get("member") != payload["m"]:
         raise GroupError(f"this machine is already enrolled in group {group} as {current.get('member')}")
+    elif relay_url is not None:
+        current = rejoin(current, relay_url, groups_dir=groups_dir)
+        log(f"rejoined group {group} as {current['member']} at {current['tunnel_url']}")
     else:
         log(f"already enrolled in group {group} as {current['member']}")
     log(f"serving GPU device {device} to group {group}")
@@ -1240,6 +1332,11 @@ def join_group(token: str, *, rpc_binary: Path, groups_dir: Path = GROUPS_DIR, l
 
 
 # --- admin CLI (coordinator) -------------------------------------------------
+
+def _interrupted(signum, frame) -> None:
+    # SIGTERM unwinds exactly like Ctrl+C, so run_relay's cleanup stops the tunnel and clears its URL.
+    raise KeyboardInterrupt
+
 
 def _members_report(state: GroupState) -> list[str]:
     lines = []
@@ -1287,11 +1384,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "relay":
             state_path = _group_dir(GROUPS_DIR, args.group) / "group.json"
             GroupState.load(state_path)  # refuse an unknown group before anything starts
-            print(f"group {args.group}: ctrl+c stops the relay and its tunnel")
+            print(f"group {args.group}: ctrl+c or SIGTERM stops the relay and its tunnel")
+            previous = signal.signal(signal.SIGTERM, _interrupted)
             try:
                 run_relay(state_path, port=args.port)
             except KeyboardInterrupt:
                 print("stopping the relay")
+            finally:
+                signal.signal(signal.SIGTERM, previous)
     except GroupError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
