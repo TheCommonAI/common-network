@@ -31,6 +31,13 @@ keeps only the SHA-256 of the key, and each later connection presents the key.
 A token is only good while the relay that issued it is running on the same
 tunnel URL; tokens name that URL, so an old token does not reach a new tunnel.
 
+Rejoin: when the relay's tunnel URL changes, an enrolled member does not need a
+new token. It rejoins with its member key from member.json, at the relay's
+current address (`join.py --group-token TOKEN --relay URL`). The coordinator
+checks the key against the stored SHA-256 verifier, and the member keeps its name
+and rpc port. A one-time token is never accepted as a rejoin credential: a
+request that carries one is refused, whether or not it is expired or used.
+
 Trust: the tunnel is operated by Cloudflare, so Cloudflare can read the
 enrolment exchange and the RPC bytes. The coordinator's checks (the token
 signature, the one-time secret and the member key) decide who is admitted; the
@@ -944,6 +951,22 @@ class Relay:
             _send_json(link, {"ok": True, "rpc_port": port})
             self._attach(member, link)
             return
+        if op == "rejoin":
+            # Only the member key admits a rejoin. A one-time token, fresh or
+            # spent, expired or not, is refused even if a key comes with it.
+            member = request.get("member")
+            if "token" in request:
+                _send_json(link, {"ok": False, "error": "a one-time token cannot rejoin; rejoin with the member key"})
+                self.log(f"rejoin refused for {member!r}: a one-time token was presented")
+                return
+            port = self.state.authenticate(member, request.get("key"))
+            if port is None:
+                _send_json(link, {"ok": False, "error": "this member is not enrolled, or its key is wrong"})
+                self.log(f"rejoin refused for {member!r}")
+                return
+            _send_json(link, {"ok": True, "member": member, "rpc_port": port})
+            self.log(f"{member} rejoined at the current tunnel")
+            return
         _send_json(link, {"ok": False, "error": "unknown request"})
 
     def _attach(self, member: str, link) -> None:
@@ -1091,7 +1114,11 @@ def enrol(token: str, *, groups_dir: Path = GROUPS_DIR, now: float | None = None
     now = time.time() if now is None else now
     if payload["x"] <= now:
         raise GroupError("this group token has expired; ask the coordinator for a new one")
-    link = client_connect(payload["u"])
+    try:
+        link = client_connect(payload["u"])
+    except OSError as e:
+        raise GroupError(f"cannot reach the relay this token names ({e}); if the relay has restarted, "
+                         "ask the coordinator for a new token") from None
     try:
         _send_json(link, {"op": "enrol", "token": token})
         reply = _read_json(link)
@@ -1105,6 +1132,32 @@ def enrol(token: str, *, groups_dir: Path = GROUPS_DIR, now: float | None = None
               "tunnel_url": payload["u"], "key": reply["key"], "rpc_port": reply.get("rpc_port")}
     _write_private(member_path(groups_dir, payload["g"]), member)
     return member
+
+
+def rejoin(member: dict, relay_url: str, *, groups_dir: Path = GROUPS_DIR) -> dict:
+    """Prove this member's key to the relay at `relay_url`, and keep that address in member.json.
+
+    No one-time token is involved: the member key is the credential. The member's
+    name and rpc port stay as they were, so the coordinator's port mapping still
+    applies. A refused key leaves member.json as it was.
+    """
+    url = _check_tunnel_url(relay_url)
+    try:
+        link = client_connect(url)
+    except OSError as e:
+        raise GroupError(f"cannot reach the relay at {url} ({e}); check the address the coordinator printed") from None
+    try:
+        _send_json(link, {"op": "rejoin", "member": member["member"], "key": member["key"]})
+        reply = _read_json(link)
+    finally:
+        _close_quietly(link)
+    if not reply.get("ok"):
+        raise GroupError(str(reply.get("error") or "the coordinator refused this member"))
+    if reply.get("member") != member["member"] or reply.get("rpc_port") != member.get("rpc_port"):
+        raise GroupError("the coordinator's reply does not match this member")
+    updated = dict(member, tunnel_url=url)
+    _write_private(member_path(groups_dir, member["group"]), updated)
+    return updated
 
 
 def _connect_rpc(port: int):
@@ -1244,8 +1297,13 @@ def run_worker(member: dict, rpc_binary: Path, *, device: str, log_path: Path, l
 
 def join_group(token: str, *, rpc_binary: Path, groups_dir: Path = GROUPS_DIR, log=print,
                stop: threading.Event | None = None, now: float | None = None,
-               list_devices=list_rpc_devices) -> None:
+               list_devices=list_rpc_devices, relay_url: str | None = None) -> None:
     """Enrol with `token` if this machine is not yet a member, then run the worker.
+
+    A machine that is already a member of the token's group rejoins with its member
+    key when `relay_url` names the relay's current address; without it, the worker
+    resumes at the address in member.json. The token only names the group and the
+    member here: it never admits a rejoin.
 
     The GPU check comes first, so a machine without a GPU refuses before it
     spends the token.
@@ -1255,10 +1313,16 @@ def join_group(token: str, *, rpc_binary: Path, groups_dir: Path = GROUPS_DIR, l
     device = select_gpu_device(rpc_binary, list_devices=list_devices)
     current = load_member(groups_dir, group)
     if current is None:
+        if relay_url is not None:
+            raise GroupError("--relay is for a machine already enrolled in this group; "
+                             "a new member's token names the relay")
         current = enrol(token, groups_dir=groups_dir, now=now)
         log(f"enrolled as {current['member']} in group {group}")
     elif current.get("member") != payload["m"]:
         raise GroupError(f"this machine is already enrolled in group {group} as {current.get('member')}")
+    elif relay_url is not None:
+        current = rejoin(current, relay_url, groups_dir=groups_dir)
+        log(f"rejoined group {group} as {current['member']} at {current['tunnel_url']}")
     else:
         log(f"already enrolled in group {group} as {current['member']}")
     log(f"serving GPU device {device} to group {group}")
