@@ -2181,13 +2181,18 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
         # The join script ships next to this file in every installed copy. With
         # --no-update (which the desktop always passes) it is used as installed and
         # nothing is fetched; a first run installs the bundled copy instead.
-        bundled = Path(__file__).resolve().parent / "join.py"
-        if not join_py.exists():
-            if not bundled.exists():
-                print(red("✗ no join script is installed and none is bundled with this CLI"), file=sys.stderr)
+        # join.py imports worker and runtime from its own directory, so a first run
+        # installs all three from the bundle, not just join.py.
+        bundle = Path(__file__).resolve().parent
+        for name in ("join.py", "worker.py", "runtime.py"):
+            target = INSTALL_DIR / name
+            if target.exists():
+                continue
+            if not (bundle / name).exists():
+                print(red(f"✗ {name} is not installed and is not bundled with this CLI"), file=sys.stderr)
                 sys.exit(1)
-            join_py.parent.mkdir(parents=True, exist_ok=True)
-            join_py.write_bytes(bundled.read_bytes())
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((bundle / name).read_bytes())
     else:
         # Always fetch the current version before delegating -- a stale local
         # copy's own self-update runs *after* argparse, so a new flag this CLI
