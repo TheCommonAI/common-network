@@ -1665,12 +1665,15 @@ def run_local_coordinator(config_path: str, port: int = LLAMA_PORT) -> None:
             signal.signal(signum, handler)
 
 
-def run_group_member(token: str) -> None:
+def run_group_member(token: str, relay_url: str | None = None) -> None:
     """Enrol this machine in a distributed group and run its RPC worker, in the foreground.
 
     Nothing listens on this machine and nothing is registered with a gateway: the
     worker dials out to the coordinator over TLS, and its ggml-rpc-server stays on
     127.0.0.1. Ctrl+C stops the worker and the RPC server together.
+
+    `relay_url` is for a machine already enrolled in the group, whose relay has
+    restarted on a new tunnel URL: it rejoins there with its member key.
     """
     try:
         group = importlib.import_module("group")
@@ -1688,7 +1691,8 @@ def run_group_member(token: str) -> None:
     previous = signal.signal(signal.SIGTERM, interrupted)
     try:
         rpc_binary = rt.ensure_rpc_server()
-        group.join_group(token, rpc_binary=rpc_binary, log=lambda text: print(f"{GLYPH_WORK} {text}"))
+        group.join_group(token, rpc_binary=rpc_binary, log=lambda text: print(f"{GLYPH_WORK} {text}"),
+                         relay_url=relay_url)
     except KeyboardInterrupt:
         print(f"\n{GLYPH_WORK} {dim('stopping the group worker...')}")
     except (group.GroupError, rt.FetchFailed) as e:
@@ -1710,6 +1714,7 @@ def main() -> None:
     parser.add_argument("--local-only", action="store_true", help="Run only the distributed model API on loopback; no gateway, worker, warm-up, tunnel, or identity changes")
     parser.add_argument("--port", type=int, default=None, help="With --local-only: the loopback port for the model API (default 11436)")
     parser.add_argument("--group-token", default=None, help="Join a distributed model group with a one-time token from its coordinator, and run this machine's RPC worker; no gateway registration")
+    parser.add_argument("--relay", default=None, help="With --group-token, on a machine already enrolled in that group: the relay's current tunnel URL, as the coordinator printed it after a restart. The machine rejoins there with its member key; no new token is needed")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
     # The name and operator are published to the whole network (`GET /nodes`
@@ -1740,6 +1745,8 @@ def main() -> None:
                                          or args.lan or args.permanent or args.remove_permanent
                                          or args.list_catalogue or args.port is not None):
         parser.error("--group-token cannot be combined with --local-only, --distributed-config, --model, --lan, --port, service installation/removal, or --list-catalogue")
+    if args.relay is not None and args.group_token is None:
+        parser.error("--relay is only used with --group-token")
     if args.local_only:
         if (not args.distributed_config or args.model or args.lan or args.permanent
                 or args.remove_permanent or args.list_catalogue):
@@ -1766,7 +1773,7 @@ def main() -> None:
         return
 
     if args.group_token is not None:
-        run_group_member(args.group_token)
+        run_group_member(args.group_token, relay_url=args.relay)
         return
 
     gateway = args.gateway.rstrip("/")

@@ -96,12 +96,31 @@ Ctrl+C or a service stop also stops its RPC server. The member's key is kept in
 Still manual: copy the `rpc_servers` list from `members` into the coordinator's
 distributed config and restart the coordinator, because the runtime's split is
 fixed at start. A token works once, and it names the tunnel URL the relay had
-when it was issued. Known gap: if the relay's tunnel gets a new URL (a restart,
-or cloudflared restarting), a member enrolled under the old URL keeps retrying
-it and cannot rejoin, because its name is already enrolled. Revoking a
-member, and adding members to a running coordinator without a restart, are not
-built yet. RPC has no authentication between peers, so admit only members you
-trust with the group's weights and compute.
+when it was issued.
+
+Rejoining after the relay's tunnel URL changes (a relay restart, or cloudflared
+restarting). An enrolled member needs no new token. The relay prints its
+current tunnel URL; the member runs the same command with that address:
+
+```bash
+python3 join/join.py --group-token '<the token it enrolled with>' --relay 'https://<new-tunnel>.trycloudflare.com'
+```
+
+The member proves its key from `member.json` to the relay, which checks it
+against the stored SHA-256 verifier, then keeps the new address in `member.json`
+and runs its worker. Its name and rpc port do not change, so the `rpc_servers`
+list stays the same. A one-time token is never a rejoin credential: the coordinator
+refuses one, spent, expired or fresh. The `--group-token` value is read only for
+its group and member name, and it must match `member.json`. A wrong key is
+refused and leaves `member.json` as it was. `--relay` is only for a machine that is
+already enrolled; a new member still enrols with a token from `issue`.
+
+Limit: the new address still has to reach the member by hand, because a quick
+tunnel's URL is not known until the relay runs. A member whose process was
+already running keeps retrying its old address until it is restarted with
+`--relay`. Revoking a member, and adding members to a running coordinator without
+a restart, are not built yet. RPC has no authentication between peers, so admit
+only members you trust with the group's weights and compute.
 
 ## Configure and join
 

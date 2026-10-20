@@ -624,6 +624,134 @@ class EndToEndTests(unittest.TestCase):
             with self.assertRaisesRegex(group.GroupError, "expired"):
                 group.enrol(stale, groups_dir=self.members)
 
+    def _restart_relay_on_new_tunnel(self) -> str:
+        """Stop the relay and start it again behind a tunnel at a new address. Returns the old address."""
+        old = self.tunnel
+        self.stop.set()
+        self.relay_thread.join(timeout=10)
+        self.stop = threading.Event()
+        self.relay_thread = threading.Thread(
+            target=group.run_relay, daemon=True,
+            kwargs=dict(state_path=self.state_path, log=self.relay_logs.append, stop=self.stop,
+                        open_tunnel=localhost_tunnel, port_range=self.rpc_ports))
+        self.relay_thread.start()
+        self.tunnel = self._wait_for_tunnel_url()
+        return old
+
+    def _start_member(self, token: str, stop: threading.Event, logs: list, relay_url: str | None = None):
+        thread = threading.Thread(
+            target=group.join_group, daemon=True,
+            kwargs=dict(token=token, rpc_binary=self.fake_rpc, groups_dir=self.members,
+                        log=logs.append, stop=stop, relay_url=relay_url))
+        thread.start()
+        self.addCleanup(stop.set)
+        return thread
+
+    def _relay_request(self, url: str, request: dict) -> dict:
+        link = group.client_connect(url)
+        try:
+            group._send_json(link, request)
+            return group._read_json(link)
+        finally:
+            group._close_quietly(link)
+
+    def test_a_member_rejoins_at_a_new_tunnel_url_with_its_key_and_keeps_its_port(self):
+        token = group.issue("lab", "node-a", groups_dir=self.groups)
+        first_stop = threading.Event()
+        first_logs = []
+        first = self._start_member(token, first_stop, first_logs)
+        port = self._wait_for_member("node-a")
+        self.assertTrue(self._echo_through(port, b"before the restart"), f"no echo; log: {first_logs}")
+        member_file = self.members / "lab" / "member.json"
+        before = json.loads(member_file.read_text())
+
+        first_stop.set()
+        first.join(timeout=30)
+        old_tunnel = self._restart_relay_on_new_tunnel()
+        self.assertNotEqual(self.tunnel, old_tunnel)
+
+        logs = []
+        stop = threading.Event()
+        self._start_member(token, stop, logs, relay_url=self.tunnel)
+        payload = b"after the rejoin " * 20_000
+        self.assertTrue(self._echo_through(port, payload), f"no echo after the rejoin; log: {logs}")
+
+        after = json.loads(member_file.read_text())
+        self.assertEqual(after["tunnel_url"], self.tunnel)
+        self.assertNotEqual(after["tunnel_url"], before["tunnel_url"])
+        self.assertEqual(after["key"], before["key"])
+        self.assertEqual((after["member"], after["rpc_port"]), ("node-a", port))
+        self.assertEqual(member_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(self.state_path.read_text())["members"]["node-a"]["rpc_port"], port)
+        self.assertTrue(any(line == "node-a rejoined at the current tunnel" for line in self.relay_logs), self.relay_logs)
+        self.assertTrue(any("rejoined group lab as node-a" in line for line in logs), logs)
+
+    def test_a_rejoin_with_a_wrong_key_is_refused_and_member_json_is_unchanged(self):
+        group.enrol(group.issue("lab", "node-a", groups_dir=self.groups), groups_dir=self.members)
+        member_file = self.members / "lab" / "member.json"
+        before = member_file.read_text()
+        member = group.load_member(self.members, "lab")
+        with self.assertRaisesRegex(group.GroupError, "key is wrong"):
+            group.rejoin(dict(member, key="0" * 64), self.tunnel, groups_dir=self.members)
+        self.assertEqual(member_file.read_text(), before)
+
+    def test_one_time_tokens_cannot_rejoin_whether_spent_expired_or_fresh(self):
+        used = group.issue("lab", "node-a", groups_dir=self.groups)
+        member = group.enrol(used, groups_dir=self.members)
+        secret = bytes.fromhex(json.loads(self.state_path.read_text())["secret"])
+        expired = group.issue_token(secret, group="lab", member="node-a", tunnel_url=self.tunnel,
+                                    expires=time.time() - 5)
+        fresh = group.issue_token(secret, group="lab", member="node-a", tunnel_url=self.tunnel,
+                                  expires=time.time() + 3600)
+        for label, token in (("spent", used), ("expired", expired), ("fresh", fresh)):
+            with self.subTest(token=label):
+                reply = self._relay_request(self.tunnel, {"op": "rejoin", "member": "node-a", "token": token})
+                self.assertFalse(reply["ok"])
+                self.assertIn("one-time token cannot rejoin", reply["error"])
+                reply = self._relay_request(self.tunnel, {"op": "rejoin", "member": "node-a",
+                                                          "key": member["key"], "token": token})
+                self.assertFalse(reply["ok"])
+        # A token offered as the key is just a wrong key.
+        with self.assertRaisesRegex(group.GroupError, "key is wrong"):
+            group.rejoin(dict(member, key=used), self.tunnel, groups_dir=self.members)
+
+    def test_relay_is_refused_for_a_first_enrolment(self):
+        token = group.issue("lab", "node-a", groups_dir=self.groups)
+        with self.assertRaisesRegex(group.GroupError, "already enrolled in this group"):
+            group.join_group(token, rpc_binary=self.fake_rpc, groups_dir=self.members,
+                             log=lambda _t: None, relay_url=self.tunnel)
+        self.assertFalse((self.members / "lab" / "member.json").exists())
+
+    def test_a_different_name_on_an_enrolled_machine_is_still_refused(self):
+        group.enrol(group.issue("lab", "node-a", groups_dir=self.groups), groups_dir=self.members)
+        other = group.issue("lab", "node-b", groups_dir=self.groups)
+        member_file = self.members / "lab" / "member.json"
+        before = member_file.read_text()
+        for relay_url in (None, self.tunnel):
+            with self.subTest(relay_url=relay_url):
+                with self.assertRaisesRegex(group.GroupError, "already enrolled in group lab as node-a"):
+                    group.join_group(other, rpc_binary=self.fake_rpc, groups_dir=self.members,
+                                     log=lambda _t: None, relay_url=relay_url)
+        self.assertEqual(member_file.read_text(), before)
+
+    def test_a_stale_token_on_a_new_machine_is_refused_with_the_reason(self):
+        secret = bytes.fromhex(json.loads(self.state_path.read_text())["secret"])
+        dead = f"http://127.0.0.1:{free_port()}"  # nothing listens here: the relay that issued it is gone
+        stale = group.issue_token(secret, group="lab", member="node-c", tunnel_url=dead,
+                                  expires=time.time() + 3600)
+        with self.assertRaisesRegex(group.GroupError, "ask the coordinator for a new token"):
+            group.enrol(stale, groups_dir=self.members)
+        self.assertFalse((self.members / "lab" / "member.json").exists())
+
+    def test_rejoin_at_an_unreachable_address_leaves_member_json_alone(self):
+        group.enrol(group.issue("lab", "node-a", groups_dir=self.groups), groups_dir=self.members)
+        member_file = self.members / "lab" / "member.json"
+        before = member_file.read_text()
+        member = group.load_member(self.members, "lab")
+        with self.assertRaisesRegex(group.GroupError, "cannot reach the relay"):
+            group.rejoin(member, f"http://127.0.0.1:{free_port()}", groups_dir=self.members)
+        self.assertEqual(member_file.read_text(), before)
+
     def _wait_for_member(self, name: str, timeout: float = 30.0) -> int:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -672,6 +800,11 @@ class _StubProcess:
 def stub_tunnel(local_url: str, local_port: int):
     """A tunnel that is the local address itself: reachable from this machine, which is all the test needs."""
     return _StubProcess(), local_url
+
+
+def localhost_tunnel(local_url: str, local_port: int):
+    """The same local relay under another name: a new tunnel URL, as after a relay restart."""
+    return _StubProcess(), f"http://localhost:{local_port}"
 
 
 class RelayTests(unittest.TestCase):
@@ -762,7 +895,18 @@ class JoinEntryPointTests(unittest.TestCase):
         with patch.object(self.join, "run_group_member") as member, \
                 patch.object(self.join, "resolve_model", side_effect=AssertionError("gateway path")):
             self.run_join(["--group-token", "cng1.x.y"])
-        member.assert_called_once_with("cng1.x.y")
+        member.assert_called_once_with("cng1.x.y", relay_url=None)
+
+    def test_relay_goes_to_the_member_flow_as_the_rejoin_address(self):
+        with patch.object(self.join, "run_group_member") as member:
+            self.run_join(["--group-token", "cng1.x.y", "--relay", "https://new-tunnel.trycloudflare.com"])
+        member.assert_called_once_with("cng1.x.y", relay_url="https://new-tunnel.trycloudflare.com")
+
+    def test_relay_needs_group_token(self):
+        with patch.object(self.join, "run_group_member") as member, \
+                patch.object(sys, "stderr", io.StringIO()), self.assertRaises(SystemExit):
+            self.run_join(["--relay", "https://new-tunnel.trycloudflare.com"])
+        member.assert_not_called()
 
     def test_group_token_cannot_be_combined_with_gateway_or_local_modes(self):
         for extra in (["--model", "qwen"], ["--local-only", "--distributed-config", "c.json"],
