@@ -16,33 +16,47 @@ Nothing in commonnet prints it. Rotate by restarting the member with a new file.
 
 ## Patrick: start a member
 
-Needs Python with torch, transformers, safetensors, the model checkpoint on disk, and `cloudflared`.
+Windows step-by-step is in `commonnet/PATRICK.md`. In short (Qwen3-8B, NF4, layers 20-36):
 
-    export COMMONNET_BLOCK_TOKEN="$(cat member.token)"      # or use --token-file member.token
-    python3 -m commonnet.member --layers START END --checkpoint /path/to/Qwen3-8B --out member.json
-    # NVIDIA 4-bit (32B):  add  --backend nf4     (needs CUDA; refuses otherwise)
-    # Mac:                 add  --backend mlx
-    # default backend is torch on cpu; COMMONNET_DEVICE=cuda COMMONNET_DTYPE=float16 for a GPU
+    python -m commonnet.member --layers 20 36 --backend nf4 --checkpoint C:\\path\\Qwen3-8B-bnb-4bit \
+        --token-file member.token --out member.json
 
-`member.json` gets the public tunnel URL and layer range once the tunnel answers. Send Miles the
-`url` and `layers` only (not the token). Ctrl+C or SIGTERM stops the server and tunnel and blanks the URL.
+`member.json` is written once the tunnel answers: `{"tunnel_url": ..., "layers": ..., "device": ...}`.
+Patrick sends Miles the `tunnel_url` only (never the token). Ctrl+C or SIGTERM stops the server and the
+tunnel and sets `tunnel_url` to null. A fresh quick-tunnel hostname can take up to 3 minutes to resolve.
 
-## Miles: start the coordinator
+## Miles: tonight (Qwen3-8B, planner split)
 
-Write `members.json`:
+Split from `python3 -m commonnet.plan --model 8b --mac-gib 11 --pc-gib 6.5 --ctx 2048`:
+Mac layers 0-20 (client + 20 layers, 2.83 GiB), Patrick (NF4) layers 20-36 (16 layers, 1.61 GiB).
+Mac checkpoint: `mlx-community/Qwen3-8B-4bit` (4.6 GB) in `~/models/hf/Qwen3-8B-4bit`.
+Patrick checkpoint: `unsloth/Qwen3-8B-bnb-4bit` (6.1 GB, single file; embed/lm_head are bf16 and unused by his block).
 
-    [{"url": "https://....trycloudflare.com", "layers": [0, 18],  "token_file": "patrick.token"},
-     {"url": "http://127.0.0.1:PORT",          "layers": [18, 36], "token_file": "mine.token"}]
+1. One token for both members, sent to Patrick privately as a file:
+       python3 -c "import secrets;print(secrets.token_urlsafe(32))" > member.token && chmod 600 member.token
+2. Start your member (local only is fine; no tunnel needed for your own half):
+       COMMONNET_CHECKPOINT=$HOME/models/hf/Qwen3-8B-4bit COMMONNET_BACKEND=mlx \
+         python3 -m commonnet.net.server --port 18701 --layers 0 20 --block commonnet.net.factory:FACTORY --token-file member.token &
+3. Patrick starts his member (PATRICK.md) and sends you the `https://....trycloudflare.com` URL.
+4. Write `members.json` with his URL:
+       [{"url": "http://127.0.0.1:18701", "layers": [0, 20],  "token_file": "member.token"},
+        {"url": "https://PATRICKS-URL",   "layers": [20, 36], "token_file": "member.token"}]
+5. Generate (mlx4 client reads the pre-quantized embed/head from the MLX checkpoint):
+       python3 -m commonnet.coordinator --endpoints members.json --checkpoint $HOME/models/hf/Qwen3-8B-4bit \
+         --prompt "Hello" --max-new-tokens 64 --client-format mlx4
+   The prompt is raw text (no chat template). If Patrick restarts, his URL changes: edit `members.json`.
+6. Stop: Ctrl+C the coordinator; `kill` your server (pid is whatever `&` printed); tell Patrick to Ctrl+C.
+   Check nothing is left: `pgrep -fl "commonnet|cloudflared"`.
 
-Run (own member first, same `commonnet.member` command on this Mac):
+Measured on this Mac (Qwen3-8B-4bit, mlx4 client, 64 new tokens, includes prefill): both members on localhost
+12-15 tok/s; one member (layers 0-20) behind a real cloudflared quick tunnel 4.8-5.9 tok/s, about +105 ms per
+token for one tunnel hop. Greedy vs mlx-lm on the same checkpoint: free-running output matches the first 6 of 48
+tokens, then diverges at a near-tie (both are fluent); teacher-forced (same context fed to both) top-1 agrees on
+48 of 48 positions, max logit difference 0.92 against logit std 4.0.
 
-    python3 -m commonnet.coordinator --endpoints members.json --checkpoint /path/to/Qwen3-8B \
-        --prompt "Hello" --max-new-tokens 64 --client-format fp16
-
-Layers must cover the model contiguously with no gap or overlap or the coordinator refuses to start.
-
-### Qwen3-8B first
-36 layers. Split e.g. 0-18 / 18-36 (torch backend, fp16 on GPU, fp32/fp16 on CPU).
+DNS caveat: on this Mac (Tailscale DNS) a brand-new trycloudflare hostname did not resolve locally for minutes
+while 1.1.1.1 resolved it in about 12 s. If the coordinator or the member says it cannot reach the tunnel, wait a
+few minutes and retry, or set the Mac's DNS to 1.1.1.1. The tunnel itself was fine (verified with curl --resolve).
 
 ### Qwen3-32B later
 64 layers; plan with `python3 -m commonnet.plan --mac-gib 11 --pc-gib 6.5 --ctx 2048` gives
@@ -53,7 +67,7 @@ Mac (MLX 4-bit, plus the 4-bit client) layers 0-38, PC (NF4) layers 38-64. Start
 ## Known limits
 
 - 32B memory headroom is about 0.2 GiB on each side at context 2048 (0.181 Mac, 0.205 PC). Longer context will not fit.
-- NF4 backend is untested on CUDA (only its refusal without CUDA is tested). Expect to debug it on first run.
+- NF4 backend is untested on CUDA (only its refusal without CUDA is tested). Expect to debug it on first run. Tonight is that first run.
 - No keep-alive: every call opens a new HTTP connection through the tunnel; quick tunnels have no SLA
   and a restarted tunnel changes the URL (member.json is rewritten, the coordinator must be re-pointed).
   A member dropping mid-generation loses its KV cache; generation fails and must be restarted.

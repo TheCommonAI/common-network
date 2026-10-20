@@ -57,7 +57,6 @@ Save it as `$HOME\member.token`. Do not paste it anywhere, and do not put it on 
 ```powershell
 cd $HOME\common-network
 .\.venv\Scripts\Activate.ps1
-$env:COMMONNET_DEVICE = "cuda"
 python -m commonnet.member --layers 20 36 --backend nf4 --checkpoint $HOME\models\Qwen3-8B-bnb-4bit --token-file $HOME\member.token --out $HOME\member.json
 ```
 Model load takes 1-2 minutes. When it works you see `block server on http://127.0.0.1:...`, then
@@ -71,5 +70,7 @@ Leave the window open. To stop: press Ctrl+C once (it stops the server and the t
 ## If something fails
 
 Send Miles the last 20 lines of the window and of `$HOME\block-server.log` (next to `member.json`).
+If it ends with "the tunnel did not answer /health", cloudflared started but your DNS is slow to learn the new
+name: just run the same command again (or set your DNS to 1.1.1.1).
 Known risks: [UNVERIFIED] NF4 loading on CUDA; Windows Defender Firewall prompt (click Cancel/deny, only loopback is used);
 GPU out-of-memory (close games/browsers; check with `nvidia-smi`).
