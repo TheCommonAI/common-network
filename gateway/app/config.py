@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     health_check_interval_seconds: int = 30
     health_check_timeout_seconds: float = 5.0
 
+    # Distributed groups (app/groups.py). A coordinator's 'restarting' report keeps
+    # its node out of routing only while it is this fresh; after that the health
+    # check decides. Set above the time a full weight reload takes, and the
+    # coordinator must re-report before it lapses. Retry-After is what a client
+    # gets back when no healthy node exists and a group is restarting.
+    group_restart_ttl_seconds: float = 1800.0
+    group_retry_after_seconds: int = 30
+
     # How long to wait on a node, split in two, because a single number could
     # not express a cold start and got the important case wrong.
     #

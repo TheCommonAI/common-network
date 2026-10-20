@@ -10,7 +10,8 @@ from fastapi import APIRouter, Header, HTTPException
 
 from app import db, embedder
 from app.config import settings
-from app.models import NodeCreate, NodeOut, NodePublicOut, NodeRegisterOut
+from app.groups import RESTARTING
+from app.models import GroupReport, NodeCreate, NodeOut, NodePublicOut, NodeRegisterOut
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -180,6 +181,9 @@ def _row_to_node_public_out(row) -> NodePublicOut:
         capability_text=row["capability_text"],
         domain_tags=row["domain_tags"],
         catalogue_id=row["catalogue_id"],
+        group_status=row["group_status"],
+        group_members_total=row["group_members_total"],
+        group_members_up=row["group_members_up"],
     )
 
 
@@ -203,6 +207,9 @@ def _row_to_node_out(row) -> NodeOut:
         capability_text=row["capability_text"],
         domain_tags=row["domain_tags"],
         catalogue_id=row["catalogue_id"],
+        group_status=row["group_status"],
+        group_members_total=row["group_members_total"],
+        group_members_up=row["group_members_up"],
     )
 
 
@@ -275,13 +282,16 @@ async def register_node(
                     worker_token = $13,
                     -- coalesce, not overwrite: a client that does not send the
                     -- field must not erase what an earlier registration said.
-                    client = coalesce($14, client)
+                    client = coalesce($14, client),
+                    group_status = $15, group_members_total = $16, group_members_up = $17,
+                    group_reported_at = case when $15::text is null then null else now() end
                 where name = $1
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
                 node.capability_text, vec, node.region, node.cost_per_1k,
                 node.domain_tags, node.catalogue_id, new_token, node.worker_token, client,
+                node.group_status, node.group_members_total, node.group_members_up,
             )
         else:
             row = await conn.fetchrow(
@@ -289,13 +299,16 @@ async def register_node(
                 insert into nodes
                     (name, operator, endpoint_url, model_name, api_key_ref,
                      capability_text, capability_embed, region, cost_per_1k,
-                     domain_tags, catalogue_id, node_token, worker_token, client, healthy)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, false)
+                     domain_tags, catalogue_id, node_token, worker_token, client, healthy,
+                     group_status, group_members_total, group_members_up, group_reported_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, false,
+                        $15, $16, $17, case when $15::text is null then null else now() end)
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
                 node.capability_text, vec, node.region, node.cost_per_1k,
                 node.domain_tags, node.catalogue_id, new_token, node.worker_token, client,
+                node.group_status, node.group_members_total, node.group_members_up,
             )
 
     out = _row_to_node_public_out(row)
@@ -319,6 +332,48 @@ async def list_nodes():
     async with db.pool().acquire() as conn:
         rows = await conn.fetch("select * from nodes order by created_at desc")
     return [_row_to_node_public_out(r) for r in rows]
+
+
+@router.put("/nodes/{node_id}/group", response_model=NodePublicOut)
+async def report_group(
+    node_id: UUID,
+    report: GroupReport,
+    x_common_node_token: str | None = Header(default=None),
+):
+    """A distributed group's coordinator reports its own state.
+
+    Authenticated by the node's own X-Common-Node-Token, the same credential that
+    registered it, so no other party can change a group's reported state. The
+    gateway cannot verify the counts (it sees no members), so they are stored as
+    the coordinator's claim.
+
+    A 'restarting' report also takes the node out of routing now, rather than at
+    the next health pass, which would otherwise mark it healthy again while its
+    runtime is still reloading. It is honoured only while fresh (see app/groups.py).
+    A 'ready' report does not mark the node healthy: the health check still decides
+    that, so a coordinator cannot make its node routable by saying so.
+    """
+    async with db.pool().acquire() as conn:
+        stored = await conn.fetchval("select node_token from nodes where id = $1", node_id)
+        if stored is None or not x_common_node_token or not secrets.compare_digest(
+            stored.encode(), x_common_node_token.encode()
+        ):
+            raise HTTPException(status_code=404, detail="node not found, or X-Common-Node-Token doesn't match")
+        row = await conn.fetchrow(
+            """
+            update nodes set
+                group_status = $2, group_members_total = $3, group_members_up = $4,
+                group_reported_at = now(),
+                healthy = case when $2 = $5 then false else healthy end
+            where id = $1
+            returning *
+            """,
+            node_id, report.group_status, report.group_members_total, report.group_members_up,
+            RESTARTING,
+        )
+    if row is None:  # deleted between the token check and the update
+        raise HTTPException(status_code=404, detail="node not found, or X-Common-Node-Token doesn't match")
+    return _row_to_node_public_out(row)
 
 
 @router.delete("/nodes/{node_id}")

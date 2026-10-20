@@ -1,6 +1,7 @@
 import json
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -10,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app import compose, db, embedder, metrics, ratelimit, upstream
 from app.compose import PanelPlan
 from app.config import settings
+from app.groups import restarting_detail
 from app.router import ScoredNode, best_matched_domain, score_nodes
 from app.verify import VerificationReport, verify
 
@@ -77,6 +79,19 @@ async def _fetch_healthy_nodes() -> list[dict]:
     async with db.pool().acquire() as conn:
         rows = await conn.fetch("select * from nodes where healthy = true")
     return [dict(r) for r in rows]
+
+
+async def _restarting_group_detail() -> str | None:
+    """Why nothing is routable, when a distributed group is the reason. None otherwise."""
+    async with db.pool().acquire() as conn:
+        rows = await conn.fetch(
+            """
+            select name, model_name, group_status, group_members_total,
+                   group_members_up, group_reported_at
+              from nodes where group_status = 'restarting'
+            """
+        )
+    return restarting_detail([dict(r) for r in rows], datetime.now(timezone.utc))
 
 
 async def _record_decision(
@@ -583,6 +598,15 @@ async def chat_completions(request: Request):
 
     nodes = await _fetch_healthy_nodes()
     if not nodes:
+        # A restarting group is not a failure to route, and not "no nodes" either:
+        # say so, and say when to come back, so a client does not give up.
+        group_detail = await _restarting_group_detail()
+        if group_detail:
+            raise HTTPException(
+                status_code=503,
+                detail=group_detail,
+                headers={"Retry-After": str(settings.group_retry_after_seconds)},
+            )
         raise HTTPException(status_code=503, detail="no healthy nodes available")
 
     # Stage marks for the log line below, so a slow request says which step

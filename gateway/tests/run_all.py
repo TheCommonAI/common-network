@@ -17,7 +17,7 @@ TESTS = ["test_verify.py", "test_compose.py", "test_metrics.py", "test_routing.p
          "test_panel_flow.py", "test_registry.py", "test_health_loop.py",
          "test_access.py", "test_admin.py", "test_client.py",
          "test_client_observability.py", "test_node_url_exposure.py",
-         "test_worker.py"]
+         "test_groups.py", "test_worker.py"]
 
 here = Path(__file__).resolve().parent
 failed = []

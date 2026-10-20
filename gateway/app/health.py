@@ -1,12 +1,14 @@
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import HTTPException
 
 from app import db
 from app.config import settings
+from app.groups import is_restarting
 from app.registry import validate_endpoint_url
 from app.upstream import auth_headers
 
@@ -80,7 +82,8 @@ async def _check_one(client: httpx.AsyncClient, node: dict) -> bool:
 async def run_health_checks_once() -> None:
     async with db.pool().acquire() as conn:
         rows = await conn.fetch(
-            "select id, endpoint_url, api_key_ref, worker_token, model_name from nodes where not paused"
+            "select id, endpoint_url, api_key_ref, worker_token, model_name, "
+            "group_status, group_reported_at from nodes where not paused"
         )
 
     async with httpx.AsyncClient() as client:
@@ -107,12 +110,19 @@ async def run_health_checks_once() -> None:
             *(check(row) for row in rows), return_exceptions=True
         )
 
+    now = datetime.now(timezone.utc)
     async with db.pool().acquire() as conn:
         for row, ok in zip(rows, results):
             if not isinstance(ok, bool):
                 logger.warning(
                     "health check for node %s raised: %r", row["id"], ok
                 )
+                ok = False
+            # A distributed group whose coordinator reports it restarting is not
+            # routable, even if its /models still answers. That is the gap the
+            # probe cannot see: the runtime can be down while the worker serves.
+            r = dict(row)
+            if ok and is_restarting(r.get("group_status"), r.get("group_reported_at"), now):
                 ok = False
             await conn.execute(
                 # last_heartbeat records that we asked; last_seen_healthy
