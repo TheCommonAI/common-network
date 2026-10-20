@@ -13,8 +13,10 @@ import json
 import os
 import secrets
 import shutil
+import signal
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -458,7 +460,7 @@ class GpuDeviceTests(unittest.TestCase):
     """A member serves a GPU only: the device list is checked before anything is spent or served."""
 
     def test_a_cpu_only_list_is_refused_with_the_reason(self):
-        with self.assertRaisesRegex(group.GroupError, r"no GPU device.*lists CPU.*not fall back to CPU"):
+        with self.assertRaisesRegex(group.GroupError, r"no GPU device.*llama-server lists CPU.*not fall back to CPU"):
             group.select_gpu_device(Path("/unused"), list_devices=lambda _binary: ["CPU"])
 
     def test_an_empty_list_is_refused(self):
@@ -492,7 +494,7 @@ class GpuDeviceTests(unittest.TestCase):
     def test_the_real_listing_with_no_gpu_line_is_refused(self):
         cpu_only = "Available devices:\n  CPU: Apple M3 (8 MiB, 8 MiB free)\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n"
         self.assertEqual(group.parse_device_listing(cpu_only), ["CPU", "BLAS"])
-        with self.assertRaisesRegex(group.GroupError, "no GPU device.*lists CPU, BLAS.*not fall back to CPU"):
+        with self.assertRaisesRegex(group.GroupError, "no GPU device.*llama-server lists CPU, BLAS.*not fall back to CPU"):
             group.select_gpu_device(Path("/unused"), list_devices=lambda _b: group.parse_device_listing(cpu_only))
         with self.assertRaisesRegex(group.GroupError, "no GPU device"):
             group.select_gpu_device(Path("/unused"), list_devices=lambda _b: group.parse_device_listing("Available devices:\n"))
@@ -831,6 +833,40 @@ class EndToEndTests(unittest.TestCase):
         return False
 
 
+RELAY_CLI_HARNESS = """
+import subprocess
+import sys
+from pathlib import Path
+
+import group
+
+groups_dir, pid_file = Path(sys.argv[1]), Path(sys.argv[2])
+
+
+def stub_tunnel(local_url, local_port):
+    # A stub cloudflared: a child process, so the test can see whether it was stopped.
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    pid_file.write_text(str(child.pid))
+    return child, local_url
+
+
+import join  # group._open_tunnel calls join.start_tunnel at call time: this is the cloudflared seam
+
+group.GROUPS_DIR = groups_dir
+join.start_tunnel = stub_tunnel
+sys.exit(group.main(["relay", "--group", "lab"]))
+"""
+
+
+def _process_gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
 class _StubProcess:
     """Stands in for the cloudflared process: alive until stopped."""
 
@@ -889,6 +925,64 @@ class RelayTests(unittest.TestCase):
         thread.join(timeout=10)
         # the tunnel URL is cleared on the way out, so issue refuses until the relay runs again
         self.assertIsNone(json.loads((root / "lab" / "group.json").read_text())["tunnel_url"])
+
+
+class RelayProcessTests(unittest.TestCase):
+    """The relay CLI as a real process, with a stub tunnel: a stop signal must clean up like Ctrl+C."""
+
+    def _start_relay(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        groups = root / "groups"
+        group.init_group("lab", groups_dir=groups)
+        harness = root / "relay_cli.py"
+        harness.write_text(RELAY_CLI_HARNESS)
+        pid_file = root / "tunnel.pid"
+        home = root / "home"
+        home.mkdir()
+        env = dict(os.environ, HOME=str(home), PYTHONPATH=str(Path(group.__file__).parent))
+        with open(root / "relay.log", "wb") as log:
+            proc = subprocess.Popen([sys.executable, "-u", str(harness), str(groups), str(pid_file)],
+                                    cwd=str(root), env=env, stdout=log, stderr=subprocess.STDOUT)
+
+        def cleanup():
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            if pid_file.exists():
+                try:
+                    os.kill(int(pid_file.read_text()), 9)
+                except (ProcessLookupError, ValueError):
+                    pass
+        self.addCleanup(cleanup)
+        return proc, groups / "lab" / "group.json", pid_file, root / "relay.log"
+
+    def _wait_until_published(self, proc, state_path, pid_file, log):
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            self.assertIsNone(proc.poll(), f"the relay exited before it started: {log.read_text()}")
+            if pid_file.exists() and json.loads(state_path.read_text())["tunnel_url"]:
+                return
+            time.sleep(0.05)
+        self.fail(f"the relay never published its tunnel URL: {log.read_text()}")
+
+    def _stop_with(self, sig):
+        proc, state_path, pid_file, log = self._start_relay()
+        self._wait_until_published(proc, state_path, pid_file, log)
+        tunnel_pid = int(pid_file.read_text())
+        self.assertFalse(_process_gone(tunnel_pid))
+        proc.send_signal(sig)
+        code = proc.wait(timeout=30)
+        self.assertEqual(code, 0, log.read_text())
+        self.assertTrue(_process_gone(tunnel_pid), "the stub tunnel is still running")
+        self.assertIsNone(json.loads(state_path.read_text())["tunnel_url"])
+        self.assertIn("relay stopped", log.read_text())
+
+    def test_sigterm_stops_the_tunnel_and_clears_the_url(self):
+        self._stop_with(signal.SIGTERM)
+
+    def test_ctrl_c_stops_the_tunnel_and_clears_the_url(self):
+        self._stop_with(signal.SIGINT)
 
 
 class _FakeClock:

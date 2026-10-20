@@ -93,6 +93,11 @@ line `tunnel URL: https://...`. The tokens you issue name that URL, so issue the
 only after it appears. If the relay restarts, the URL changes and earlier tokens
 stop working.
 
+To stop the relay, press Ctrl+C. SIGTERM (`kill <pid>`) also stops it cleanly. Either
+one stops the tunnel and clears the tunnel URL in `group.json`, so `issue` refuses
+until the relay runs again. Enrolled members rejoin the restarted relay with `--relay`
+(see Patrick's step 5), not with a new token.
+
 **6. Issue Patrick's one-time token**, then send it to him over a private channel:
 
 ```bash
@@ -187,7 +192,8 @@ backend too.
 
 **3. Join the group with the token Miles sent you.** Run this in its own foreground
 terminal. It enrols once, then starts your RPC worker and keeps the link open. Use
-`--no-update`, because this checkout is not released:
+`--no-update`, because this checkout is not released. The token already names the
+relay's tunnel URL, so the first join needs only the token:
 
 ```bash
 python3 join/join.py --no-update --group-token '<token>'
@@ -202,4 +208,19 @@ model file, and you do not run a model yourself. The weights come to you over th
 link from Miles's machine.
 
 If you see "already enrolled", your machine has already enrolled in this group. Run
-the same command again, and it reconnects.
+the same command again, and it reconnects at the relay address in `member.json`. If
+Miles has restarted the relay, that address is out of date, so use step 5.
+
+**5. After a relay restart, rejoin at the new URL.** When Miles restarts the relay,
+the tunnel URL changes. Stop your worker with Ctrl+C if it is still running. Then
+run the same command as step 3, with `--relay` set to the new `tunnel URL` line
+that Miles sends you, and the same original token:
+
+```bash
+python3 join/join.py --no-update --group-token '<original token>' --relay 'https://<new tunnel URL>'
+```
+
+You keep your member key. It stays in `member.json`, and only the tunnel URL in that
+file changes. Your name and RPC port are unchanged. The token is only read for your
+group and machine name, so an expired or already used token works here. `--relay` is
+refused on a machine that has not enrolled yet.

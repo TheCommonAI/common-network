@@ -57,6 +57,7 @@ import os
 import platform
 import re
 import secrets
+import signal
 import socket
 import ssl
 import struct
@@ -1239,7 +1240,7 @@ def select_gpu_device(binary: Path, *, list_devices=list_rpc_devices) -> str:
     gpus = [device for device in devices if GPU_DEVICE_PATTERN.fullmatch(device)]
     if not gpus:
         listed = ", ".join(devices) if devices else "nothing"
-        raise GroupError(f"this machine has no GPU device for the group: the RPC server lists {listed}. "
+        raise GroupError(f"this machine has no GPU device for the group: llama-server lists {listed}. "
                          "A group member must have a GPU, and it will not fall back to CPU. Not joining.")
     return gpus[0]
 
@@ -1332,6 +1333,11 @@ def join_group(token: str, *, rpc_binary: Path, groups_dir: Path = GROUPS_DIR, l
 
 # --- admin CLI (coordinator) -------------------------------------------------
 
+def _interrupted(signum, frame) -> None:
+    # SIGTERM unwinds exactly like Ctrl+C, so run_relay's cleanup stops the tunnel and clears its URL.
+    raise KeyboardInterrupt
+
+
 def _members_report(state: GroupState) -> list[str]:
     lines = []
     for name, entry in sorted(state.data["members"].items()):
@@ -1378,11 +1384,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "relay":
             state_path = _group_dir(GROUPS_DIR, args.group) / "group.json"
             GroupState.load(state_path)  # refuse an unknown group before anything starts
-            print(f"group {args.group}: ctrl+c stops the relay and its tunnel")
+            print(f"group {args.group}: ctrl+c or SIGTERM stops the relay and its tunnel")
+            previous = signal.signal(signal.SIGTERM, _interrupted)
             try:
                 run_relay(state_path, port=args.port)
             except KeyboardInterrupt:
                 print("stopping the relay")
+            finally:
+                signal.signal(signal.SIGTERM, previous)
     except GroupError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
