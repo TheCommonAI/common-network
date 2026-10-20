@@ -184,7 +184,10 @@ def main(argv: list[str] | None = None) -> int:
         groups_dir = Path(args.groups_dir).expanduser()
         out = (Path(args.out).expanduser() if args.out
                else group._group_dir(groups_dir, args.group) / "network.json")
-        group._split_hostport(args.local_worker)
+        try:
+            runtime.split_hostport(args.local_worker)
+        except ValueError as e:
+            raise ConfigError(str(e)) from None
         members = member_endpoints(groups_dir, args.group)
         if members and not args.member_backend:
             raise ConfigError("name the GPU backend of the member RPC servers with --member-backend, "

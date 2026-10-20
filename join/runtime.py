@@ -1227,6 +1227,14 @@ RPC_REACHABILITY_TIMEOUT_SECONDS = 2.0
 RPC_WORKER_LOST_MARKERS = ("Remote RPC server crashed", "send failed")
 
 
+def split_hostport(endpoint: str) -> tuple[str, int]:
+    """The (host, port) of a host:port endpoint. Pure: raises ValueError if malformed."""
+    host, sep, port = str(endpoint).rpartition(":")
+    if not sep or not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise ValueError(f"expected host:port, got {endpoint!r}")
+    return host, int(port)
+
+
 def unreachable_rpc_servers(endpoints, timeout=RPC_REACHABILITY_TIMEOUT_SECONDS):
     """Return the host:port endpoints that do not accept a TCP connection in time.
 
