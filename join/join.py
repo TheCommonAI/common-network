@@ -1174,17 +1174,18 @@ REANNOUNCE_BACKOFF_SECONDS = 2
 REANNOUNCE_MAX_BACKOFF_SECONDS = 10
 
 
-def tunnel_is_healthy(tunnel_url: str, worker_token: str) -> bool:
+def tunnel_is_healthy(tunnel_url: str, worker_token: str | None, path: str = "/v1/models") -> bool:
     """Is the tunnel still carrying traffic to our worker?
 
     Needs the token now: the worker 401s an unauthenticated /v1/models, and a
     401 travelling back through the tunnel would prove the tunnel is fine
     while reading as a failure -- so send the credential and treat only a
-    transport error as unhealthy.
+    transport error as unhealthy. `path` lets the group relay (group.py) use
+    the same check against its own route; it has no token, so pass None.
     """
+    headers = {"Authorization": f"Bearer {worker_token}"} if worker_token else {}
     try:
-        http_json("GET", f"{tunnel_url}/v1/models", timeout=8,
-                  headers={"Authorization": f"Bearer {worker_token}"})
+        http_json("GET", f"{tunnel_url}{path}", timeout=8, headers=headers)
         return True
     except urllib.error.HTTPError:
         return True  # reached the worker; a status code is not a dead tunnel
@@ -1199,7 +1200,7 @@ def tunnel_is_healthy(tunnel_url: str, worker_token: str) -> bool:
 TUNNEL_WARMUP_TIMEOUT_SECONDS = 30
 
 
-def wait_for_tunnel(tunnel_url: str, worker_token: str) -> bool:
+def wait_for_tunnel(tunnel_url: str, worker_token: str | None, path: str = "/v1/models") -> bool:
     """Wait until the tunnel is reachable from outside, up to ~30 seconds.
 
     Quick tunnels take a moment after cloudflared reports the URL before they
@@ -1212,7 +1213,7 @@ def wait_for_tunnel(tunnel_url: str, worker_token: str) -> bool:
     attempt = 0
     while time.monotonic() < deadline:
         attempt += 1
-        if tunnel_is_healthy(tunnel_url, worker_token):
+        if tunnel_is_healthy(tunnel_url, worker_token, path):
             return True
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -1336,7 +1337,7 @@ def print_cloudflared_tail(tail: list[str]) -> None:
             print(comment(line.strip()), file=sys.stderr)
 
 
-def tunnel_failure_message(tail: list[str]) -> tuple[str, list[str]]:
+def tunnel_failure_message(tail: list[str], target_url: str = WORKER_URL) -> tuple[str, list[str]]:
     """The headline and the advice for a tunnel that never came up.
 
     Split out from the reporting below so the decision it encodes -- rate limited,
@@ -1354,12 +1355,12 @@ def tunnel_failure_message(tail: list[str]) -> tuple[str, list[str]]:
     if not any(line.strip() for line in tail):
         return (
             "cloudflared exited before a tunnel URL appeared, and printed nothing.",
-            [f"run it by hand to see what it does: cloudflared tunnel --url {WORKER_URL}"],
+            [f"run it by hand to see what it does: cloudflared tunnel --url {target_url}"],
         )
     return ("cloudflared exited before a tunnel URL appeared.", [])
 
 
-def report_tunnel_failure(tail: list[str]) -> None:
+def report_tunnel_failure(tail: list[str], target_url: str = WORKER_URL) -> None:
     """Say why the tunnel did not come up, then exit.
 
     The tail is printed whatever the classification, because cloudflared's own
@@ -1367,7 +1368,7 @@ def report_tunnel_failure(tail: list[str]) -> None:
     only place they can be printed: the reader thread in start_tunnel() is the one
     thing reading that pipe, and it keeps a bounded tail of it and nothing else.
     """
-    headline, advice = tunnel_failure_message(tail)
+    headline, advice = tunnel_failure_message(tail, target_url)
     print(f"{GLYPH_FAILED} {red(headline)}", file=sys.stderr)
     for line in advice:
         print(comment(line), file=sys.stderr)
@@ -1375,10 +1376,12 @@ def report_tunnel_failure(tail: list[str]) -> None:
     sys.exit(1)
 
 
-def start_tunnel() -> tuple[subprocess.Popen, str]:
-    # Points at the worker, never at the model backend: the worker is what
-    # requires the gateway's token and refuses everything but the two inference
-    # routes.
+def start_tunnel(target_url: str = WORKER_URL,
+                 host_header: str = f"127.0.0.1:{WORKER_PORT}") -> tuple[subprocess.Popen, str]:
+    # By default this points at the worker, never at the model backend: the worker
+    # is what requires the gateway's token and refuses everything but the two
+    # inference routes. The group relay (group.py) passes its own loopback
+    # address instead, and reuses this tunnel and its health check unchanged.
     #
     # Cloudflare's quick tunnel forwards the public tunnel hostname as the Host
     # header by default, and this pins it to 127.0.0.1 instead. That used to be
@@ -1389,7 +1392,7 @@ def start_tunnel() -> tuple[subprocess.Popen, str]:
     # nothing. Using 127.0.0.1 instead of localhost avoids IPv4/IPv6 mismatches
     # on Windows.
     proc = subprocess.Popen(
-        ["cloudflared", "tunnel", "--url", WORKER_URL, "--http-host-header", f"127.0.0.1:{WORKER_PORT}"],
+        ["cloudflared", "tunnel", "--url", target_url, "--http-host-header", host_header],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
 
@@ -1420,7 +1423,7 @@ def start_tunnel() -> tuple[subprocess.Popen, str]:
             # all; the timeout keeps a pipe something else is holding open from
             # hanging a join that has already failed.
             reader.join(timeout=2)
-            report_tunnel_failure(tail)
+            report_tunnel_failure(tail, target_url)
         time.sleep(0.5)
 
     stop_process(proc)

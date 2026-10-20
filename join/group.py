@@ -4,29 +4,37 @@
 A group's coordinator runs llama.cpp with RPC peers. Each peer is a
 ggml-rpc-server on a member's machine, and llama.cpp speaks RPC to it in the
 clear with no authentication of its own. Members are not asked to open ports,
-forward SSH or install anything extra. The rules that make that safe:
+forward SSH, know a LAN address or install anything extra. The rules that make
+that safe:
 
 - A member never listens on the network. Its worker agent dials out to the
-  coordinator over TLS and keeps that connection open. The ggml-rpc-server it
-  starts is bound to 127.0.0.1, and the agent relays bytes between that server
-  and the coordinator over the outbound connection.
+  coordinator over a WebSocket (wss://) and keeps that connection open. The
+  ggml-rpc-server it starts is bound to 127.0.0.1, and the agent relays bytes
+  between that server and the coordinator over the outbound connection.
+- The network is GPU-only. The ggml-rpc-server is started on one GPU device,
+  chosen with -d from the device list it reports. A machine with no GPU device
+  refuses to join, before it spends its token, and never falls back to CPU.
+- The coordinator runs the relay as a server on 127.0.0.1 only, and points a
+  Cloudflare quick tunnel at it: the same tunnel the worker uses (join.py's
+  start_tunnel). Cloudflare terminates TLS with a publicly trusted certificate,
+  so members verify it the ordinary way. Nothing here is self-signed or pinned.
 - The coordinator gives each admitted member its own loopback port,
   127.0.0.1:<rpc_port>. That is the rpc_servers entry the distributed config
   lists, so the runtime and its config do not change. Only processes on the
   coordinator can reach those ports.
 
 Admission is by one-time token. The coordinator issues a token, HMAC-signed with
-the group secret, naming the group, the member, the coordinator's address, the
-pinned certificate fingerprint and an expiry. The member pins that fingerprint
-when it connects, so the token cannot be redeemed at a look-alike server. The
-coordinator spends the token's nonce on enrolment and returns a member key over
-that TLS connection. It keeps only the SHA-256 of the key, and each later
-connection presents the key over TLS.
+the group secret, naming the group, the member, the tunnel URL the relay is
+reachable at, a one-time secret and an expiry. The coordinator spends the
+one-time secret on enrolment and returns a member key over the WebSocket. It
+keeps only the SHA-256 of the key, and each later connection presents the key.
+A token is only good while the relay that issued it is running on the same
+tunnel URL; tokens name that URL, so an old token does not reach a new tunnel.
 
-TLS is the only secure transport used. The repo's Common worker tunnel carries
-HTTP requests, not raw TCP, so it cannot carry RPC. The coordinator's
-certificate is self-signed and made with the openssl command, which only the
-coordinator needs. Members need nothing beyond Python.
+Trust: the tunnel is operated by Cloudflare, so Cloudflare can read the
+enrolment exchange and the RPC bytes. The coordinator's checks (the token
+signature, the one-time secret and the member key) decide who is admitted; the
+tunnel only carries them.
 
 Stdlib only, like the rest of the CLI.
 """
@@ -41,7 +49,6 @@ import json
 import os
 import re
 import secrets
-import shutil
 import socket
 import ssl
 import struct
@@ -49,6 +56,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,7 +64,7 @@ COMMON_DIR = Path.home() / ".common-network"
 GROUPS_DIR = COMMON_DIR / "groups"
 
 TOKEN_PREFIX = "cng1."
-TOKEN_VERSION = 1
+TOKEN_VERSION = 2
 DEFAULT_TOKEN_HOURS = 24
 
 # Member RPC ports on the coordinator. Kept clear of llama-server's own port and
@@ -64,6 +72,13 @@ DEFAULT_TOKEN_HOURS = 24
 RPC_PORT_RANGE = range(52100, 52200)
 
 NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+
+# Where the relay answers on the tunnel. LINK_PATH upgrades to a WebSocket;
+# HEALTH_PATH is what the tunnel's health check reads.
+LINK_PATH = "/group/link"
+HEALTH_PATH = "/group/health"
+LOOPBACK_HOSTS = frozenset(("127.0.0.1", "localhost", "::1"))
+RELAY_HEALTH_CHECK_SECONDS = 120
 
 # Frames: one kind byte, a 32-bit stream id and a 32-bit payload length.
 OPEN, DATA, CLOSE, PING, PONG = 1, 2, 3, 4, 5
@@ -76,8 +91,16 @@ IDLE_TIMEOUT_SECONDS = 45.0
 IO_TICK_SECONDS = 0.1
 HANDSHAKE_TIMEOUT_SECONDS = 10.0
 MAX_HANDSHAKE_BYTES = 4096
+MAX_HTTP_HEAD_BYTES = 16384
 RECONNECT_MAX_SECONDS = 60.0
 RPC_START_TIMEOUT_SECONDS = 30.0
+
+# WebSocket (RFC 6455): the parts this link uses.
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WS_OP_CONT, WS_OP_TEXT, WS_OP_BINARY = 0, 1, 2
+WS_OP_CLOSE, WS_OP_PING, WS_OP_PONG = 8, 9, 10
+WS_MAX_PAYLOAD = 4 << 20
+WS_MAX_PENDING = 4 << 20
 
 
 class GroupError(Exception):
@@ -96,11 +119,25 @@ def _check_name(value: str, what: str) -> str:
     return value
 
 
-def _split_hostport(text: str) -> tuple[str, int]:
-    host, sep, port = str(text).rpartition(":")
-    if not sep or not host or not port.isdigit() or not 1 <= int(port) <= 65535:
-        raise GroupError(f"expected host:port, got {text!r}")
-    return host, int(port)
+def _check_tunnel_url(value) -> str:
+    """A tunnel's base URL, as https://host[:port]. Plain http is only accepted to loopback.
+
+    Plain http to loopback is for a relay on this machine, which the tests use
+    with a stand-in tunnel. A member never dials a remote host without TLS.
+    """
+    if not isinstance(value, str):
+        raise GroupError("the tunnel address is missing")
+    try:
+        parts = urllib.parse.urlsplit(value)
+        parts.port  # raises ValueError for a bad port
+    except ValueError:
+        raise GroupError(f"not a tunnel address: {value!r}") from None
+    if (parts.scheme not in ("https", "http") or not parts.hostname or parts.path not in ("", "/")
+            or parts.query or parts.fragment or parts.username or parts.password):
+        raise GroupError(f"not a tunnel address: {value!r}")
+    if parts.scheme == "http" and parts.hostname not in LOOPBACK_HOSTS:
+        raise GroupError(f"tunnel addresses must use https; plain http is only for loopback: {value!r}")
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 def _close_quietly(sock) -> None:
@@ -108,10 +145,6 @@ def _close_quietly(sock) -> None:
         sock.close()
     except OSError:
         pass
-
-
-def cert_fingerprint(der: bytes) -> str:
-    return hashlib.sha256(der).hexdigest()
 
 
 def _write_private(path: Path, data: dict) -> None:
@@ -149,12 +182,16 @@ def _b64d(text: str) -> bytes:
         raise GroupError("malformed group token") from None
 
 
-def issue_token(secret: bytes, *, group: str, member: str, relay: str, cert_fp: str,
-                expires: float, nonce: str | None = None) -> str:
-    """A one-time enrolment token for `member`, signed with the group secret."""
+def issue_token(secret: bytes, *, group: str, member: str, tunnel_url: str, expires: float,
+                nonce: str | None = None) -> str:
+    """A one-time enrolment token for `member`, signed with the group secret.
+
+    `n` is the one-time secret: the coordinator spends it on enrolment, and a
+    second attempt with the same token is refused.
+    """
     _check_name(group, "group name")
     _check_name(member, "member name")
-    payload = {"v": TOKEN_VERSION, "g": group, "m": member, "r": relay, "f": cert_fp,
+    payload = {"v": TOKEN_VERSION, "g": group, "m": member, "u": _check_tunnel_url(tunnel_url),
                "x": int(expires), "n": nonce or secrets.token_hex(16)}
     body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     signature = hmac.new(secret, body, hashlib.sha256).digest()
@@ -178,17 +215,15 @@ def read_token(token: str) -> tuple[dict, bytes, bytes]:
     except ValueError:
         raise GroupError("malformed group token") from None
     if not isinstance(payload, dict) or payload.get("v") != TOKEN_VERSION:
-        raise GroupError("unsupported group token version")
-    for key in ("g", "m", "r", "f", "n"):
+        raise GroupError("unsupported group token version; ask the coordinator for a new one")
+    for key in ("g", "m", "u", "n"):
         if not isinstance(payload.get(key), str):
             raise GroupError("malformed group token")
     if type(payload.get("x")) is not int:
         raise GroupError("malformed group token")
     _check_name(payload["g"], "group name")
     _check_name(payload["m"], "member name")
-    _split_hostport(payload["r"])
-    if not re.fullmatch(r"[0-9a-f]{64}", payload["f"]):
-        raise GroupError("malformed group token")
+    _check_tunnel_url(payload["u"])
     return payload, body, signature
 
 
@@ -251,11 +286,12 @@ class FrameDecoder:
 
 
 class Mux:
-    """One TLS link carrying many byte streams, driven by a single I/O loop.
+    """One link carrying many byte streams, driven by a single I/O loop.
 
-    Only run() touches the socket. Other threads queue frames with send_frame(),
-    so the TLS object is never read and written at the same moment from two
-    threads, which OpenSSL does not allow.
+    The link is any socket-like object: send, recv, settimeout and close. In
+    production it is a WebSocketStream. Only run() touches it. Other threads
+    queue frames with send_frame(), so the link is never read and written at the
+    same moment from two threads.
     """
 
     def __init__(self, sock, on_open=None) -> None:
@@ -406,38 +442,277 @@ class Mux:
             self.send_frame(CLOSE, stream)
 
 
-# --- TLS ---------------------------------------------------------------------
+# --- WebSocket link ----------------------------------------------------------
 
-def server_context(cert: Path, key: Path) -> ssl.SSLContext:
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.load_cert_chain(str(cert), str(key))
-    return ctx
+def _xor_mask(data: bytes, key: bytes) -> bytes:
+    if not data:
+        return b""
+    stream = (key * (len(data) // 4 + 1))[:len(data)]
+    return (int.from_bytes(data, "big") ^ int.from_bytes(stream, "big")).to_bytes(len(data), "big")
 
 
-def client_connect(relay: str, fingerprint: str, timeout: float = HANDSHAKE_TIMEOUT_SECONDS):
-    """A TLS connection to the coordinator, refused unless its certificate is the pinned one.
+def _accept_key(client_key: str) -> str:
+    return base64.b64encode(hashlib.sha1((client_key + WS_GUID).encode()).digest()).decode()
 
-    Certificate chains are not checked: the pin is the trust. The token names the
-    coordinator's certificate by fingerprint, and a different certificate is a
-    different server, whatever its name says.
-    """
-    host, port = _split_hostport(relay)
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    raw = socket.create_connection((host, port), timeout=timeout)
+
+def _is_ws_key(value: str) -> bool:
     try:
-        tls = ctx.wrap_socket(raw, server_hostname=host)
-    except (OSError, ssl.SSLError):
-        _close_quietly(raw)
+        return len(base64.b64decode(value, validate=True)) == 16
+    except (binascii.Error, ValueError):
+        return False
+
+
+def _read_http_head(sock) -> tuple[str, dict]:
+    """The first line and the lower-cased headers of an HTTP message, read one byte at a time.
+
+    Byte at a time so that nothing past the blank line is consumed: the bytes after
+    a WebSocket upgrade belong to the link.
+    """
+    head = bytearray()
+    while not head.endswith(b"\r\n\r\n"):
+        byte = sock.recv(1)
+        if not byte:
+            raise GroupError("the connection closed during the handshake")
+        head += byte
+        if len(head) > MAX_HTTP_HEAD_BYTES:
+            raise GroupError("handshake message is too long")
+    lines = head[:-4].decode("latin-1").split("\r\n")
+    headers = {}
+    for line in lines[1:]:
+        name, sep, value = line.partition(":")
+        if not sep:
+            raise GroupError("malformed HTTP header in the handshake")
+        headers[name.strip().lower()] = value.strip()
+    return lines[0], headers
+
+
+def _http_reply(sock, status: str, body: bytes = b"", extra_headers: str = "") -> None:
+    sock.sendall(f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n"
+                 f"{extra_headers}\r\n".encode() + body)
+
+
+class WebSocketStream:
+    """A byte stream carried in WebSocket frames, with the socket's own methods.
+
+    The link above it (Mux, and the enrolment handshake) speaks send, sendall,
+    recv, settimeout and close, and this presents the same methods over a
+    WebSocket, so none of that framing changes. Client frames are masked and
+    server frames are not, as RFC 6455 requires. A frame that breaks that rule, or
+    is too large, or is a reserved kind, is refused. Bytes are a stream: message
+    boundaries are not kept, because the framing above keeps its own.
+    """
+
+    def __init__(self, sock, *, client: bool) -> None:
+        self.sock = sock
+        self.client = client
+        self._inbox = bytearray()    # bytes read from the socket that are not yet a whole frame
+        self._payload = bytearray()  # decoded data, ready for recv()
+        self._out = bytearray()      # encoded frames the socket has not yet taken
+        self._out_lock = threading.Lock()  # guards _out and writes to the socket
+        self._eof = False
+        self._closing = False
+
+    def settimeout(self, value) -> None:
+        self.sock.settimeout(value)
+
+    def gettimeout(self):
+        return self.sock.gettimeout()
+
+    def send(self, data: bytes) -> int:
+        """Queue `data` as one binary frame and write what the socket will take now.
+
+        Raises socket.timeout when the peer is not reading and too much is queued;
+        the caller offers the same bytes again later.
+        """
+        if not data:
+            return 0
+        with self._out_lock:
+            if len(self._out) > WS_MAX_PENDING:
+                self._flush_locked()
+            if len(self._out) > WS_MAX_PENDING:
+                raise socket.timeout("the link is backed up")
+            self._out += self._frame(WS_OP_BINARY, bytes(data))
+            self._flush_locked()
+        return len(data)
+
+    def sendall(self, data: bytes) -> None:
+        self.send(data)
+        timeout = self.sock.gettimeout()
+        deadline = time.monotonic() + (timeout if timeout is not None else HANDSHAKE_TIMEOUT_SECONDS)
+        while time.monotonic() < deadline:
+            with self._out_lock:
+                if not self._out:
+                    return
+                self._flush_locked()
+                if not self._out:
+                    return
+            time.sleep(0.01)
+        raise socket.timeout("timed out sending on the link")
+
+    def recv(self, size: int) -> bytes:
+        """Up to `size` bytes of the stream. b"" once the peer has closed. Raises socket.timeout if nothing has arrived.
+
+        One reader at a time: the link's receive side is only read from one thread.
+        Sends may come from any thread.
+        """
+        while not self._payload:
+            if self._eof:
+                return b""
+            with self._out_lock:
+                self._flush_locked()  # pongs and close replies go out as they are queued
+            self._fill()
+        chunk = bytes(self._payload[:size])
+        del self._payload[:size]
+        return chunk
+
+    def close(self) -> None:
+        with self._out_lock:
+            if not self._closing:
+                self._closing = True
+                self._out += self._frame(WS_OP_CLOSE, struct.pack("!H", 1000))
+                try:
+                    self._flush_locked()
+                except OSError:
+                    pass
+        _close_quietly(self.sock)
+
+    def _frame(self, opcode: int, payload: bytes) -> bytes:
+        size = len(payload)
+        mask_bit = 0x80 if self.client else 0
+        if size < 126:
+            head = bytes((0x80 | opcode, mask_bit | size))
+        elif size < 1 << 16:
+            head = bytes((0x80 | opcode, mask_bit | 126)) + struct.pack("!H", size)
+        else:
+            head = bytes((0x80 | opcode, mask_bit | 127)) + struct.pack("!Q", size)
+        if not self.client:
+            return head + payload
+        key = os.urandom(4)
+        return head + key + _xor_mask(payload, key)
+
+    def _flush_locked(self) -> None:
+        """Write queued bytes until the socket stops taking them. Caller holds _out_lock."""
+        while self._out:
+            try:
+                sent = self.sock.send(bytes(self._out[:DATA_CHUNK]))
+            except (socket.timeout, ssl.SSLWantReadError, ssl.SSLWantWriteError):
+                return
+            if not sent:
+                return
+            del self._out[:sent]
+
+    def _fill(self) -> None:
+        """Read once from the socket and decode the whole frames that arrived."""
+        data = self.sock.recv(DATA_CHUNK)
+        if not data:
+            self._eof = True
+            return
+        self._inbox += data
+        while True:
+            frame = self._take_frame()
+            if frame is None:
+                return
+            opcode, payload = frame
+            if opcode in (WS_OP_BINARY, WS_OP_TEXT, WS_OP_CONT):
+                self._payload += payload
+            elif opcode == WS_OP_PING:
+                with self._out_lock:
+                    self._out += self._frame(WS_OP_PONG, payload)
+            elif opcode == WS_OP_CLOSE:
+                self._eof = True
+                with self._out_lock:
+                    if not self._closing:
+                        self._closing = True
+                        self._out += self._frame(WS_OP_CLOSE, payload[:2])
+                return
+            elif opcode != WS_OP_PONG:
+                raise GroupError(f"unknown websocket opcode {opcode}")
+
+    def _take_frame(self):
+        """The next whole frame in the inbox as (opcode, payload), or None if it is not all here yet."""
+        buf = self._inbox
+        if len(buf) < 2:
+            return None
+        first, second = buf[0], buf[1]
+        if first & 0x70:
+            raise GroupError("websocket frame sets reserved bits")
+        opcode = first & 0x0F
+        masked = bool(second & 0x80)
+        if masked == self.client:
+            raise GroupError("websocket frame masking is wrong for this side of the link")
+        length = second & 0x7F
+        pos = 2
+        if length == 126:
+            if len(buf) < 4:
+                return None
+            length = struct.unpack_from("!H", buf, 2)[0]
+            pos = 4
+        elif length == 127:
+            if len(buf) < 10:
+                return None
+            length = struct.unpack_from("!Q", buf, 2)[0]
+            pos = 10
+        if length > WS_MAX_PAYLOAD:
+            raise GroupError(f"websocket frame of {length} bytes is over the {WS_MAX_PAYLOAD} byte limit")
+        if opcode >= 8 and (length > 125 or not first & 0x80):
+            raise GroupError("websocket control frame is too long or fragmented")
+        key = b""
+        if masked:
+            if len(buf) < pos + 4:
+                return None
+            key = bytes(buf[pos:pos + 4])
+            pos += 4
+        end = pos + length
+        if len(buf) < end:
+            return None
+        payload = bytes(buf[pos:end])
+        del buf[:end]
+        return opcode, (_xor_mask(payload, key) if masked else payload)
+
+
+def server_upgrade(sock, headers: dict) -> WebSocketStream:
+    """Answer a WebSocket upgrade request on `sock`. Raises GroupError if the request is not one."""
+    key = headers.get("sec-websocket-key", "")
+    if ("websocket" not in headers.get("upgrade", "").lower()
+            or "upgrade" not in headers.get("connection", "").lower()
+            or headers.get("sec-websocket-version") != "13"
+            or not _is_ws_key(key)):
+        raise GroupError("not a WebSocket upgrade request")
+    sock.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                  f"Sec-WebSocket-Accept: {_accept_key(key)}\r\n\r\n").encode())
+    return WebSocketStream(sock, client=False)
+
+
+def client_upgrade(sock, host: str, path: str) -> WebSocketStream:
+    """Ask for a WebSocket on `sock` and check the relay agreed. Raises GroupError if it did not."""
+    key = base64.b64encode(os.urandom(16)).decode()
+    sock.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                  f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+    status, headers = _read_http_head(sock)
+    parts = status.split(" ")
+    if len(parts) < 2 or parts[1] != "101" or headers.get("sec-websocket-accept") != _accept_key(key):
+        raise GroupError(f"the relay did not accept the group link ({status}); is group.py relay running?")
+    return WebSocketStream(sock, client=True)
+
+
+def client_connect(tunnel_url: str, timeout: float = HANDSHAKE_TIMEOUT_SECONDS) -> WebSocketStream:
+    """A WebSocket link to the relay behind `tunnel_url`.
+
+    https uses TLS with the system's certificate authorities and the host name
+    checked, which is what Cloudflare's certificate needs. Plain http is only
+    accepted to a loopback address, for a relay on this machine.
+    """
+    base = _check_tunnel_url(tunnel_url)
+    parts = urllib.parse.urlsplit(base)
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    sock = socket.create_connection((parts.hostname, port), timeout=timeout)
+    try:
+        if parts.scheme == "https":
+            sock = ssl.create_default_context().wrap_socket(sock, server_hostname=parts.hostname)
+        return client_upgrade(sock, parts.netloc, LINK_PATH)
+    except BaseException:
+        _close_quietly(sock)
         raise
-    der = tls.getpeercert(binary_form=True)
-    if not der or not hmac.compare_digest(cert_fingerprint(der), fingerprint):
-        _close_quietly(tls)
-        raise GroupError("the coordinator's certificate does not match the group token; not connecting")
-    return tls
 
 
 def _read_line(sock) -> bytes:
@@ -467,25 +742,14 @@ def _send_json(sock, message: dict) -> None:
     sock.sendall(json.dumps(message).encode() + b"\n")
 
 
-def _make_certificate(cert: Path, key: Path, group: str) -> None:
-    openssl = shutil.which("openssl")
-    if openssl is None:
-        raise GroupError("the coordinator needs the openssl command to make its certificate; "
-                         "install it (macOS and most Linux systems have it) and run init again")
-    subprocess.run([openssl, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
-                    "-nodes", "-keyout", str(key), "-out", str(cert), "-days", "3650",
-                    "-subj", f"/CN=common-group-{group}"],
-                   check=True, capture_output=True, timeout=60)
-    os.chmod(key, 0o600)
-
-
 # --- coordinator state -------------------------------------------------------
 
 class GroupState:
-    """The coordinator's record of one group: its secret, members and spent tokens.
+    """The coordinator's record of one group: its secret, tunnel, members and spent tokens.
 
     Members map to a SHA-256 verifier of their key, never the key. Spent token
-    nonces are kept until the token would have expired anyway.
+    nonces are kept until the token would have expired anyway. `tunnel_url` is set
+    only while the relay runs: it is the address tokens name.
     """
 
     def __init__(self, path: Path, data: dict) -> None:
@@ -501,9 +765,10 @@ class GroupState:
             raise GroupError(f"no group at {path.parent}; create it with `group.py init`") from None
         except (OSError, ValueError) as e:
             raise GroupError(f"cannot read {path}: {e}") from None
-        for key in ("group", "relay", "cert_fp", "secret", "members", "used"):
+        for key in ("group", "secret", "members", "used"):
             if key not in data:
                 raise GroupError(f"{path} is missing {key}")
+        data.setdefault("tunnel_url", None)
         return cls(path, data)
 
     @property
@@ -511,12 +776,8 @@ class GroupState:
         return self.data["group"]
 
     @property
-    def relay(self) -> str:
-        return self.data["relay"]
-
-    @property
-    def cert_fp(self) -> str:
-        return self.data["cert_fp"]
+    def tunnel_url(self) -> str | None:
+        return self.data.get("tunnel_url")
 
     def save(self) -> None:
         _write_private(self.path, self.data)
@@ -525,8 +786,12 @@ class GroupState:
         """Spend a token: returns (member, member key, rpc port). Each token works once."""
         with self._lock:
             payload = check_token(bytes.fromhex(self.data["secret"]), token, now)
-            if payload["g"] != self.group or payload["r"] != self.relay or payload["f"] != self.cert_fp:
-                raise GroupError("this token is for a different group or coordinator")
+            if payload["g"] != self.group:
+                raise GroupError("this token is for a different group")
+            if self.tunnel_url is None:
+                raise GroupError(f"the relay for {self.group} is not running; start it with `group.py relay`")
+            if payload["u"] != self.tunnel_url:
+                raise GroupError("this token is for a different tunnel; ask the coordinator for a new one")
             used = self.data["used"]
             for nonce in [n for n, expires in used.items() if expires <= now]:
                 del used[nonce]
@@ -569,20 +834,22 @@ class GroupState:
 class Relay:
     """The coordinator's end of every member link.
 
-    One TLS listener takes enrolments and member connections. Each enrolled member
-    also gets a loopback listener on its rpc port. A connection to that port is
-    carried to the member over the member's link, or refused if the member is
-    not connected.
+    A plain HTTP server on 127.0.0.1, which the tunnel points at. It answers a
+    health check, and it upgrades LINK_PATH to a WebSocket that carries enrolment
+    and member links. Each enrolled member also gets a loopback listener on its
+    rpc port. A connection to that port is carried to the member over the
+    member's link, or refused if the member is not connected.
     """
 
-    def __init__(self, state_path: Path, host: str, port: int, *,
+    def __init__(self, state_path: Path, host: str = "127.0.0.1", port: int = 0, *,
                  port_range=RPC_PORT_RANGE, log=print) -> None:
+        if host != "127.0.0.1":
+            raise GroupError("the relay listens on 127.0.0.1 only; the tunnel is what reaches it from outside")
         self.state = GroupState.load(state_path)
         self.host = host
         self.port = port
         self.port_range = port_range
         self.log = log
-        self.ctx = server_context(state_path.parent / "cert.pem", state_path.parent / "key.pem")
         self.address = None
         self._listener = None
         self._member_listeners: dict[str, socket.socket] = {}
@@ -621,31 +888,41 @@ class Relay:
             threading.Thread(target=self._handshake, args=(conn,), daemon=True).start()
 
     def _handshake(self, raw) -> None:
+        link = None
         try:
             raw.settimeout(HANDSHAKE_TIMEOUT_SECONDS)
-            tls = self.ctx.wrap_socket(raw, server_side=True)
-        except (OSError, ssl.SSLError):
-            _close_quietly(raw)
-            return
-        try:
-            self._serve(tls)
+            request_line, headers = _read_http_head(raw)
+            method, _, rest = request_line.partition(" ")
+            path = rest.split(" ", 1)[0].split("?", 1)[0]
+            if method == "GET" and path == HEALTH_PATH:
+                _http_reply(raw, "200 OK", b'{"ok": true}', "Content-Type: application/json\r\n")
+                return
+            if method != "GET" or path != LINK_PATH:
+                _http_reply(raw, "404 Not Found")
+                return
+            try:
+                link = server_upgrade(raw, headers)
+            except GroupError:
+                _http_reply(raw, "400 Bad Request")
+                return
+            self._serve(link)
         except (OSError, GroupError) as e:
             self.log(f"connection refused: {e}")
         finally:
-            _close_quietly(tls)
+            _close_quietly(link if link is not None else raw)
 
-    def _serve(self, tls) -> None:
-        request = _read_json(tls)
+    def _serve(self, link) -> None:
+        request = _read_json(link)
         op = request.get("op")
         if op == "enrol":
             try:
                 member, key, port = self.state.enrol(request.get("token"), now=time.time(),
                                                      port_range=self.port_range)
             except GroupError as e:
-                _send_json(tls, {"ok": False, "error": str(e)})
+                _send_json(link, {"ok": False, "error": str(e)})
                 self.log(f"enrolment refused: {e}")
                 return
-            _send_json(tls, {"ok": True, "member": member, "key": key, "rpc_port": port})
+            _send_json(link, {"ok": True, "member": member, "key": key, "rpc_port": port})
             self.log(f"enrolled {member} (127.0.0.1:{port})")
             try:
                 self._bind_member(member, port)
@@ -656,16 +933,16 @@ class Relay:
             member = request.get("member")
             port = self.state.authenticate(member, request.get("key"))
             if port is None:
-                _send_json(tls, {"ok": False, "error": "this member is not enrolled, or its key is wrong"})
+                _send_json(link, {"ok": False, "error": "this member is not enrolled, or its key is wrong"})
                 self.log(f"authentication refused for {member!r}")
                 return
-            _send_json(tls, {"ok": True, "rpc_port": port})
-            self._attach(member, tls)
+            _send_json(link, {"ok": True, "rpc_port": port})
+            self._attach(member, link)
             return
-        _send_json(tls, {"ok": False, "error": "unknown request"})
+        _send_json(link, {"ok": False, "error": "unknown request"})
 
-    def _attach(self, member: str, tls) -> None:
-        mux = Mux(tls)
+    def _attach(self, member: str, link) -> None:
+        mux = Mux(link)
         with self._lock:
             previous = self._links.get(member)
             self._links[member] = mux
@@ -703,21 +980,63 @@ class Relay:
                 _close_quietly(local)
 
 
+def _open_tunnel(local_url: str, local_port: int):
+    """A Cloudflare quick tunnel to the local relay, through the code the worker's tunnel uses."""
+    import join  # join.py imports this module only in its member command, so there is no cycle
+    return join.start_tunnel(local_url, f"127.0.0.1:{local_port}")
+
+
+def _publish_tunnel(server: Relay, url: str, log) -> None:
+    server.state.data["tunnel_url"] = _check_tunnel_url(url)
+    server.state.save()
+    log(f"tunnel URL: {url}")
+
+
+def run_relay(state_path: Path, *, port: int = 0, log=print, stop: threading.Event | None = None,
+              open_tunnel=_open_tunnel, port_range=RPC_PORT_RANGE) -> None:
+    """Serve the group on 127.0.0.1, point a tunnel at it, and run until `stop` is set.
+
+    The tunnel URL is written to group.json while the relay runs, so `issue` can
+    name it, and is cleared on the way out. A tunnel that dies is restarted, which
+    gives it a new URL: tokens issued for the old one stop working, so they must be
+    issued again.
+    """
+    import join  # for the tunnel health check, shared with the worker
+    stop = stop or threading.Event()
+    server = Relay(state_path, "127.0.0.1", port, port_range=port_range, log=log)
+    local_port = server.start()[1]
+    local_url = f"http://127.0.0.1:{local_port}"
+    log(f"relay listening on 127.0.0.1:{local_port} for group {server.state.group}")
+    proc = None
+    try:
+        proc, url = open_tunnel(local_url, local_port)
+        if not join.wait_for_tunnel(url, None, HEALTH_PATH):
+            log("warning: the tunnel is not reachable yet; members may not connect until it is")
+        _publish_tunnel(server, url, log)
+        while not stop.wait(RELAY_HEALTH_CHECK_SECONDS):
+            if proc.poll() is not None or not join.tunnel_is_healthy(url, None, HEALTH_PATH):
+                log("the tunnel is no longer reachable; restarting it")
+                _stop_process(proc)
+                proc, url = open_tunnel(local_url, local_port)
+                _publish_tunnel(server, url, log)
+    finally:
+        if proc is not None:
+            _stop_process(proc)
+        server.state.data["tunnel_url"] = None
+        server.state.save()
+        server.close()
+        log("relay stopped")
+
+
 # --- coordinator commands ----------------------------------------------------
 
-def init_group(group: str, relay: str, *, groups_dir: Path = GROUPS_DIR) -> dict:
-    """Create a group: its secret and a self-signed certificate. `relay` is the host:port members dial."""
+def init_group(group: str, *, groups_dir: Path = GROUPS_DIR) -> dict:
+    """Create a group and its secret. The tunnel address is set when the relay starts."""
     _check_name(group, "group name")
-    host, port = _split_hostport(relay)
-    relay = f"{host}:{port}"
     directory = _group_dir(groups_dir, group)
     if (directory / "group.json").exists():
         raise GroupError(f"group {group} already exists at {directory}")
-    directory.mkdir(parents=True, exist_ok=True)
-    cert, key = directory / "cert.pem", directory / "key.pem"
-    _make_certificate(cert, key, group)
-    der = ssl.PEM_cert_to_DER_cert(cert.read_text())
-    data = {"v": TOKEN_VERSION, "group": group, "relay": relay, "cert_fp": cert_fingerprint(der),
+    data = {"v": TOKEN_VERSION, "group": group, "tunnel_url": None,
             "secret": secrets.token_hex(32), "members": {}, "used": {}}
     _write_private(directory / "group.json", data)
     return data
@@ -729,9 +1048,11 @@ def issue(group: str, member: str, *, hours: float = DEFAULT_TOKEN_HOURS,
     _check_name(member, "member name")
     if member in state.data["members"]:
         raise GroupError(f"{member} is already enrolled in {group}")
+    if state.tunnel_url is None:
+        raise GroupError(f"the relay for {group} is not running; start it with: group.py relay --group {group}")
     now = time.time() if now is None else now
     return issue_token(bytes.fromhex(state.data["secret"]), group=group, member=member,
-                       relay=state.relay, cert_fp=state.cert_fp, expires=now + hours * 3600)
+                       tunnel_url=state.tunnel_url, expires=now + hours * 3600)
 
 
 # --- member side: enrolment and worker agent ---------------------------------
@@ -756,19 +1077,18 @@ def enrol(token: str, *, groups_dir: Path = GROUPS_DIR, now: float | None = None
     now = time.time() if now is None else now
     if payload["x"] <= now:
         raise GroupError("this group token has expired; ask the coordinator for a new one")
-    tls = client_connect(payload["r"], payload["f"])
+    link = client_connect(payload["u"])
     try:
-        _send_json(tls, {"op": "enrol", "token": token})
-        reply = _read_json(tls)
+        _send_json(link, {"op": "enrol", "token": token})
+        reply = _read_json(link)
     finally:
-        _close_quietly(tls)
+        _close_quietly(link)
     if not reply.get("ok"):
         raise GroupError(str(reply.get("error") or "the coordinator refused this token"))
     if reply.get("member") != payload["m"] or not isinstance(reply.get("key"), str):
         raise GroupError("the coordinator's reply does not match the token")
     member = {"v": TOKEN_VERSION, "group": payload["g"], "member": payload["m"],
-              "relay": payload["r"], "cert_fp": payload["f"], "key": reply["key"],
-              "rpc_port": reply.get("rpc_port")}
+              "tunnel_url": payload["u"], "key": reply["key"], "rpc_port": reply.get("rpc_port")}
     _write_private(member_path(groups_dir, payload["g"]), member)
     return member
 
@@ -801,7 +1121,7 @@ def _wait_for_listener(port: int, proc: subprocess.Popen, log_path: Path) -> Non
     raise GroupError(f"the RPC worker did not start listening on 127.0.0.1:{port}; see {log_path}")
 
 
-def _stop_process(proc: subprocess.Popen) -> None:
+def _stop_process(proc) -> None:
     if proc.poll() is None:
         proc.terminate()
         try:
@@ -810,48 +1130,82 @@ def _stop_process(proc: subprocess.Popen) -> None:
             proc.kill()
 
 
-def run_worker(member: dict, rpc_binary: Path, *, log_path: Path, log=print,
+# Accelerator devices as the RPC server names them: CUDA0, MTL0 (Metal), Vulkan0 and
+# so on. CPU, BLAS and RPC are not accelerators, so they never qualify.
+GPU_DEVICE_PATTERN = re.compile(r"(?:CUDA|MTL|Vulkan|ROCm|HIP|SYCL|MUSA|CANN)[0-9]+")
+DEVICE_LINE_PATTERN = re.compile(r"^\s*([A-Za-z][A-Za-z0-9]*):\s", re.MULTILINE)
+RPC_DEVICE_LIST_TIMEOUT_SECONDS = 60
+
+
+def list_rpc_devices(binary: Path) -> list[str]:
+    """The device names `ggml-rpc-server --list-devices` reports, in the order it reports them."""
+    try:
+        result = subprocess.run([str(binary), "--list-devices"], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=RPC_DEVICE_LIST_TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise GroupError(f"cannot ask the RPC server for its devices ({e})") from None
+    if result.returncode != 0:
+        raise GroupError(f"the RPC server could not list its devices (exit code {result.returncode})")
+    return DEVICE_LINE_PATTERN.findall(result.stdout + result.stderr)
+
+
+def select_gpu_device(binary: Path, *, list_devices=list_rpc_devices) -> str:
+    """The GPU device this member serves. Refuses when there is none: members never fall back to CPU.
+
+    Called before the member spends its token, and before the RPC server accepts
+    any connection, so a machine without a GPU never joins.
+    """
+    devices = list_devices(binary)
+    gpus = [device for device in devices if GPU_DEVICE_PATTERN.fullmatch(device)]
+    if not gpus:
+        listed = ", ".join(devices) if devices else "nothing"
+        raise GroupError(f"this machine has no GPU device for the group: the RPC server lists {listed}. "
+                         "A group member must have a GPU, and it will not fall back to CPU. Not joining.")
+    return gpus[0]
+
+
+def run_worker(member: dict, rpc_binary: Path, *, device: str, log_path: Path, log=print,
                stop: threading.Event | None = None) -> None:
-    """Start this member's ggml-rpc-server and keep an outbound link to the coordinator.
+    """Start this member's ggml-rpc-server on `device` and keep an outbound link to the coordinator.
 
     The RPC server stays up across reconnects, so a dropped link does not reload
-    anything. Refusal of the member's key, or a certificate that is not the pinned
-    one, stops the agent: retrying would not change either answer.
+    anything. Refusal of the member's key stops the agent: retrying would not
+    change the answer. A relay that is not there yet is retried, as is a dropped link.
     """
     stop = stop or threading.Event()
     rpc_port = _free_loopback_port()
     with open(log_path, "ab") as log_file:
-        rpc = subprocess.Popen([str(rpc_binary), "--host", "127.0.0.1", "--port", str(rpc_port)],
+        rpc = subprocess.Popen([str(rpc_binary), "--host", "127.0.0.1", "--port", str(rpc_port), "-d", device],
                                stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT)
     try:
         _wait_for_listener(rpc_port, rpc, log_path)
-        log(f"RPC worker listening on 127.0.0.1:{rpc_port}; connecting to {member['relay']}")
+        log(f"RPC worker listening on 127.0.0.1:{rpc_port}; connecting to {member['tunnel_url']}")
         delay = 1.0
         while not stop.is_set():
             if rpc.poll() is not None:
                 raise GroupError(f"the RPC worker stopped (exit code {rpc.returncode}); see {log_path}")
             try:
-                tls = client_connect(member["relay"], member["cert_fp"])
-            except OSError as e:
+                link = client_connect(member["tunnel_url"])
+            except (OSError, GroupError) as e:
                 log(f"coordinator unreachable ({e}); retrying in {delay:.0f}s")
                 stop.wait(delay)
                 delay = min(delay * 2, RECONNECT_MAX_SECONDS)
                 continue
             try:
-                _send_json(tls, {"op": "auth", "member": member["member"], "key": member["key"]})
-                reply = _read_json(tls)
+                _send_json(link, {"op": "auth", "member": member["member"], "key": member["key"]})
+                reply = _read_json(link)
             except (OSError, GroupError) as e:
-                _close_quietly(tls)
+                _close_quietly(link)
                 log(f"handshake failed ({e}); retrying in {delay:.0f}s")
                 stop.wait(delay)
                 delay = min(delay * 2, RECONNECT_MAX_SECONDS)
                 continue
             if not reply.get("ok"):
-                _close_quietly(tls)
+                _close_quietly(link)
                 raise GroupError(str(reply.get("error") or "the coordinator refused this member"))
             log("connected to the coordinator")
             delay = 1.0
-            mux = Mux(tls, on_open=lambda _stream: _connect_rpc(rpc_port))
+            mux = Mux(link, on_open=lambda _stream: _connect_rpc(rpc_port))
             mux.run()
             if stop.is_set():
                 break
@@ -862,10 +1216,16 @@ def run_worker(member: dict, rpc_binary: Path, *, log_path: Path, log=print,
 
 
 def join_group(token: str, *, rpc_binary: Path, groups_dir: Path = GROUPS_DIR, log=print,
-               stop: threading.Event | None = None, now: float | None = None) -> None:
-    """Enrol with `token` if this machine is not yet a member, then run the worker."""
+               stop: threading.Event | None = None, now: float | None = None,
+               list_devices=list_rpc_devices) -> None:
+    """Enrol with `token` if this machine is not yet a member, then run the worker.
+
+    The GPU check comes first, so a machine without a GPU refuses before it
+    spends the token.
+    """
     payload, _, _ = read_token(token)
     group = payload["g"]
+    device = select_gpu_device(rpc_binary, list_devices=list_devices)
     current = load_member(groups_dir, group)
     if current is None:
         current = enrol(token, groups_dir=groups_dir, now=now)
@@ -874,7 +1234,8 @@ def join_group(token: str, *, rpc_binary: Path, groups_dir: Path = GROUPS_DIR, l
         raise GroupError(f"this machine is already enrolled in group {group} as {current.get('member')}")
     else:
         log(f"already enrolled in group {group} as {current['member']}")
-    run_worker(current, rpc_binary, log_path=_group_dir(groups_dir, group) / "rpc-server.log",
+    log(f"serving GPU device {device} to group {group}")
+    run_worker(current, rpc_binary, device=device, log_path=_group_dir(groups_dir, group) / "rpc-server.log",
                log=log, stop=stop)
 
 
@@ -894,9 +1255,8 @@ def main(argv: list[str] | None = None) -> int:
 
     init = commands.add_parser("init", help="create a group on this coordinator")
     init.add_argument("--group", required=True)
-    init.add_argument("--relay", required=True, help="host:port that members dial, e.g. 192.0.2.10:7443")
 
-    issue_cmd = commands.add_parser("issue", help="print a one-time token for a new member")
+    issue_cmd = commands.add_parser("issue", help="print a one-time token for a new member (the relay must be running)")
     issue_cmd.add_argument("--group", required=True)
     issue_cmd.add_argument("--member", required=True)
     issue_cmd.add_argument("--hours", type=float, default=DEFAULT_TOKEN_HOURS)
@@ -904,20 +1264,20 @@ def main(argv: list[str] | None = None) -> int:
     members = commands.add_parser("members", help="list enrolled members and their loopback RPC endpoints")
     members.add_argument("--group", required=True)
 
-    relay = commands.add_parser("relay", help="serve enrolments and member links in the foreground")
+    relay = commands.add_parser("relay", help="start the local relay and its tunnel, in the foreground, and print the tunnel URL")
     relay.add_argument("--group", required=True)
-    relay.add_argument("--listen", help="host:port to bind (default: the port from init, on all interfaces)")
+    relay.add_argument("--port", type=int, default=0,
+                       help="local port for the relay on 127.0.0.1 (default: any free port)")
 
     args = parser.parse_args(argv)
     try:
         if args.command == "init":
-            data = init_group(args.group, args.relay)
-            print(f"created group {data['group']} with relay {data['relay']}")
-            print(f"certificate fingerprint {data['cert_fp']}")
+            data = init_group(args.group, groups_dir=GROUPS_DIR)
+            print(f"created group {data['group']}")
             print(f"next: python3 join/group.py relay --group {data['group']}")
             print(f"then: python3 join/group.py issue --group {data['group']} --member NAME")
         elif args.command == "issue":
-            print(issue(args.group, args.member, hours=args.hours))
+            print(issue(args.group, args.member, hours=args.hours, groups_dir=GROUPS_DIR))
         elif args.command == "members":
             state = GroupState.load(_group_dir(GROUPS_DIR, args.group) / "group.json")
             lines = _members_report(state)
@@ -926,18 +1286,12 @@ def main(argv: list[str] | None = None) -> int:
             print("rpc_servers: " + json.dumps(sorted(endpoints)))
         elif args.command == "relay":
             state_path = _group_dir(GROUPS_DIR, args.group) / "group.json"
-            state = GroupState.load(state_path)
-            host, port = _split_hostport(args.listen or f"0.0.0.0:{_split_hostport(state.relay)[1]}")
-            server = Relay(state_path, host, port)
-            address = server.start()
-            print(f"relay listening on {address[0]}:{address[1]} for group {state.group}; ctrl+c stops it")
+            GroupState.load(state_path)  # refuse an unknown group before anything starts
+            print(f"group {args.group}: ctrl+c stops the relay and its tunnel")
             try:
-                while True:
-                    time.sleep(1)
+                run_relay(state_path, port=args.port)
             except KeyboardInterrupt:
                 print("stopping the relay")
-            finally:
-                server.close()
     except GroupError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

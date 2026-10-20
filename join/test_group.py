@@ -1,26 +1,33 @@
-"""Offline tests for distributed group enrolment, the outbound worker framing, and the link.
+"""Offline tests for distributed groups: tokens, the WebSocket link, enrolment, and the GPU gate.
 
-The end-to-end test runs a real TLS relay and member agent on loopback, with a
-small Python stand-in for ggml-rpc-server. It touches no RPC port other than the
-ephemeral ones it picks, and never starts llama.cpp or a model.
+The end-to-end test runs the real relay on 127.0.0.1 and a real member agent. The
+tunnel is a stub that returns the local address, so nothing calls Cloudflare. The
+RPC server is a small Python stand-in for ggml-rpc-server that lists one CUDA
+device and refuses to serve unless it is started on that device. It never starts
+llama.cpp or a model.
 """
+import hashlib
+import hmac
 import io
 import json
 import os
 import secrets
 import shutil
 import socket
+import struct
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import group
 
-OPENSSL = shutil.which("openssl")
+TUNNEL_URL = "https://lab-test.trycloudflare.com"
 
 
 def free_port() -> int:
@@ -29,9 +36,16 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
-def make_state(directory: Path, relay: str = "127.0.0.1:7443") -> group.GroupState:
-    """A coordinator record without openssl: enrolment does not need a certificate."""
-    data = {"v": 1, "group": "lab", "relay": relay, "cert_fp": "ab" * 32,
+def forge(secret: bytes, payload: dict) -> str:
+    """A token signed as the coordinator would sign it, for any payload the test wants."""
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    signature = hmac.new(secret, body, hashlib.sha256).digest()
+    return f"{group.TOKEN_PREFIX}{group._b64e(body)}.{group._b64e(signature)}"
+
+
+def make_state(directory: Path, tunnel_url: str | None = TUNNEL_URL) -> group.GroupState:
+    """A coordinator record without a relay process. Enrolment needs no certificate and no socket."""
+    data = {"v": 2, "group": "lab", "tunnel_url": tunnel_url,
             "secret": secrets.token_hex(32), "members": {}, "used": {}}
     state = group.GroupState(directory / "group.json", data)
     state.save()
@@ -43,17 +57,21 @@ class TokenTests(unittest.TestCase):
     NOW = 1_800_000_000.0
 
     def token(self, **overrides):
-        fields = dict(group="lab", member="node-a", relay="192.0.2.10:7443", cert_fp="cd" * 32,
-                      expires=self.NOW + 3600)
+        fields = dict(group="lab", member="node-a", tunnel_url=TUNNEL_URL, expires=self.NOW + 3600)
         fields.update(overrides)
         return group.issue_token(self.SECRET, **fields)
 
     def test_valid_token_round_trips_its_fields(self):
         payload = group.check_token(self.SECRET, self.token(), self.NOW)
-        self.assertEqual((payload["g"], payload["m"], payload["r"], payload["f"]),
-                         ("lab", "node-a", "192.0.2.10:7443", "cd" * 32))
+        self.assertEqual((payload["g"], payload["m"], payload["u"]), ("lab", "node-a", TUNNEL_URL))
+        self.assertNotIn("f", payload)  # no certificate fingerprint any more
 
-    def test_each_token_gets_its_own_nonce(self):
+    def test_token_carries_a_one_time_secret_and_the_expiry(self):
+        payload = group.read_token(self.token())[0]
+        self.assertRegex(payload["n"], r"[0-9a-f]{32}")
+        self.assertEqual(payload["x"], int(self.NOW + 3600))
+
+    def test_each_token_gets_its_own_one_time_secret(self):
         first = group.read_token(self.token())[0]["n"]
         second = group.read_token(self.token())[0]["n"]
         self.assertNotEqual(first, second)
@@ -62,13 +80,13 @@ class TokenTests(unittest.TestCase):
         with self.assertRaisesRegex(group.GroupError, "not valid for this group"):
             group.check_token(bytes(32), self.token(), self.NOW)
 
-    def test_tampered_payload_is_rejected(self):
+    def test_tampered_tunnel_address_is_rejected(self):
         token = self.token()
         prefix, body, signature = token.split(".")
-        forged = group._b64e(json.dumps({**json.loads(group._b64d(body)), "m": "intruder"},
-                                        sort_keys=True, separators=(",", ":")).encode())
+        forged_body = group._b64e(json.dumps({**json.loads(group._b64d(body)), "u": "https://evil.example"},
+                                             sort_keys=True, separators=(",", ":")).encode())
         with self.assertRaisesRegex(group.GroupError, "not valid for this group"):
-            group.check_token(self.SECRET, f"{prefix}.{forged}.{signature}", self.NOW)
+            group.check_token(self.SECRET, f"{prefix}.{forged_body}.{signature}", self.NOW)
 
     def test_expired_token_is_rejected_at_the_expiry_instant(self):
         token = self.token(expires=self.NOW)
@@ -83,19 +101,44 @@ class TokenTests(unittest.TestCase):
                 with self.assertRaises(group.GroupError):
                     group.check_token(self.SECRET, bad, self.NOW)
 
-    def test_wrong_version_and_bad_fields_are_refused(self):
-        body = json.dumps({"v": 2, "g": "lab", "m": "node-a", "r": "h:1", "f": "cd" * 32, "x": 1, "n": "n"}).encode()
-        with self.assertRaisesRegex(group.GroupError, "version"):
-            group.read_token("cng1." + group._b64e(body) + "." + group._b64e(b"s"))
-        body = json.dumps({"v": 1, "g": "lab", "m": "node-a", "r": "no-port", "f": "cd" * 32, "x": 1, "n": "n"}).encode()
-        with self.assertRaisesRegex(group.GroupError, "host:port"):
-            group.read_token("cng1." + group._b64e(body) + "." + group._b64e(b"s"))
+    def test_only_version_2_is_accepted(self):
+        base = {"g": "lab", "m": "node-a", "u": TUNNEL_URL, "x": int(self.NOW) + 60, "n": "a" * 32}
+        with self.assertRaisesRegex(group.GroupError, "unsupported group token version"):
+            group.read_token(forge(self.SECRET, {**base, "v": 1}))
+        self.assertEqual(group.read_token(forge(self.SECRET, {**base, "v": 2}))[0]["u"], TUNNEL_URL)
+
+    def test_a_token_naming_a_plain_http_remote_tunnel_is_refused(self):
+        base = {"v": 2, "g": "lab", "m": "node-a", "x": int(self.NOW) + 60, "n": "a" * 32}
+        with self.assertRaisesRegex(group.GroupError, "must use https"):
+            group.read_token(forge(self.SECRET, {**base, "u": "http://192.0.2.10:7443"}))
+
+    def test_bad_tunnel_addresses_are_refused_when_issuing(self):
+        for bad in ("", "lab.trycloudflare.com", "https://lab.example/path", "https://lab.example?x=1",
+                    "https://user@lab.example", "https://", "ftp://lab.example", "https://lab.example:99999",
+                    "http://192.0.2.10:7443"):
+            with self.subTest(url=bad):
+                with self.assertRaises(group.GroupError):
+                    self.token(tunnel_url=bad)
+
+    def test_a_trailing_slash_is_dropped_from_the_tunnel_address(self):
+        self.assertEqual(group.read_token(self.token(tunnel_url=TUNNEL_URL + "/"))[0]["u"], TUNNEL_URL)
 
     def test_names_are_validated_when_issuing(self):
         with self.assertRaises(group.GroupError):
             self.token(member="Not Valid!")
         with self.assertRaises(group.GroupError):
             self.token(group="")
+
+
+class TunnelAddressTests(unittest.TestCase):
+    def test_https_and_loopback_http_are_accepted(self):
+        self.assertEqual(group._check_tunnel_url("https://lab.trycloudflare.com/"), "https://lab.trycloudflare.com")
+        self.assertEqual(group._check_tunnel_url("http://127.0.0.1:8080"), "http://127.0.0.1:8080")
+        self.assertEqual(group._check_tunnel_url("http://localhost:8080"), "http://localhost:8080")
+
+    def test_plain_http_to_a_remote_host_is_refused(self):
+        with self.assertRaisesRegex(group.GroupError, "must use https"):
+            group._check_tunnel_url("http://192.0.2.10:7443")
 
 
 class FramingTests(unittest.TestCase):
@@ -227,6 +270,111 @@ class MuxTests(unittest.TestCase):
         self.assertIsNone(self.coordinator.open_stream(local))
 
 
+class WebSocketTests(unittest.TestCase):
+    def pair(self):
+        a, b = socket.socketpair()
+        a.settimeout(5)
+        b.settimeout(5)
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        return a, b
+
+    def test_accept_key_matches_the_rfc_example(self):
+        self.assertEqual(group._accept_key("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+
+    def test_handshake_then_bytes_both_ways(self):
+        client_sock, server_sock = self.pair()
+        result = {}
+
+        def server():
+            _, headers = group._read_http_head(server_sock)
+            link = group.server_upgrade(server_sock, headers)
+            result["got"] = link.recv(1024)
+            link.sendall(b"pong from server")
+
+        threading.Thread(target=server, daemon=True).start()
+        client = group.client_upgrade(client_sock, "lab-test.example", group.LINK_PATH)
+        client.sendall(b"ping from client")
+        self.assertEqual(client.recv(1024), b"pong from server")
+        deadline = time.monotonic() + 5
+        while "got" not in result and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(result["got"], b"ping from client")
+
+    def test_a_large_payload_crosses_in_both_directions(self):
+        client_sock, server_sock = self.pair()
+        payload = os.urandom(300_000)
+
+        def server():
+            _, headers = group._read_http_head(server_sock)
+            link = group.server_upgrade(server_sock, headers)
+            received = bytearray()
+            while len(received) < len(payload):
+                received += link.recv(65536)
+            link.sendall(bytes(received))
+
+        threading.Thread(target=server, daemon=True).start()
+        client = group.client_upgrade(client_sock, "lab-test.example", group.LINK_PATH)
+        threading.Thread(target=client.sendall, args=(payload,), daemon=True).start()
+        echoed = bytearray()
+        while len(echoed) < len(payload):
+            echoed += client.recv(65536)
+        self.assertEqual(bytes(echoed), payload)
+
+    def test_a_client_that_is_not_upgraded_gets_no_link(self):
+        client_sock, server_sock = self.pair()
+
+        def server():
+            _http_only_reply(server_sock)
+
+        threading.Thread(target=server, daemon=True).start()
+        with self.assertRaisesRegex(group.GroupError, "did not accept the group link"):
+            group.client_upgrade(client_sock, "lab-test.example", group.LINK_PATH)
+
+    def test_server_refuses_an_unmasked_client_frame(self):
+        client_sock, server_sock = self.pair()
+        server = group.WebSocketStream(server_sock, client=False)
+        # A server-side frame looks like a client's frame with the mask bit clear.
+        client_sock.sendall(group.WebSocketStream(client_sock, client=False)._frame(group.WS_OP_BINARY, b"hi"))
+        with self.assertRaisesRegex(group.GroupError, "masking"):
+            server.recv(10)
+
+    def test_client_refuses_a_masked_server_frame(self):
+        client_sock, server_sock = self.pair()
+        client = group.WebSocketStream(client_sock, client=True)
+        server_sock.sendall(group.WebSocketStream(server_sock, client=True)._frame(group.WS_OP_BINARY, b"hi"))
+        with self.assertRaisesRegex(group.GroupError, "masking"):
+            client.recv(10)
+
+    def test_ping_is_answered_with_a_pong_and_the_data_still_arrives(self):
+        client_sock, server_sock = self.pair()
+        client = group.WebSocketStream(client_sock, client=True)
+        peer = group.WebSocketStream(server_sock, client=False)
+        peer.sock.sendall(peer._frame(group.WS_OP_PING, b"are you there"))
+        peer.sock.sendall(peer._frame(group.WS_OP_BINARY, b"hi"))
+        self.assertEqual(client.recv(2), b"hi")
+        self.assertEqual(bytes(client._out)[:1], bytes([0x80 | group.WS_OP_PONG]))
+
+    def test_oversized_frame_is_refused_before_its_payload_arrives(self):
+        client_sock, server_sock = self.pair()
+        client = group.WebSocketStream(client_sock, client=True)
+        server_sock.sendall(bytes([0x82, 127]) + struct.pack("!Q", group.WS_MAX_PAYLOAD + 1))
+        with self.assertRaisesRegex(group.GroupError, "over the"):
+            client.recv(10)
+
+    def test_a_reserved_opcode_is_refused(self):
+        client_sock, server_sock = self.pair()
+        client = group.WebSocketStream(client_sock, client=True)
+        server_sock.sendall(bytes([0x80 | 3, 0]))  # opcode 3 is reserved
+        with self.assertRaisesRegex(group.GroupError, "unknown websocket opcode"):
+            client.recv(10)
+
+
+def _http_only_reply(sock):
+    group._read_http_head(sock)
+    group._http_reply(sock, "404 Not Found")
+
+
 class StateTests(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
@@ -236,7 +384,7 @@ class StateTests(unittest.TestCase):
         self.ports = range(52100, 52110)
 
     def token(self, member="node-a", **overrides):
-        fields = dict(group="lab", member=member, relay=self.state.relay, cert_fp=self.state.cert_fp,
+        fields = dict(group="lab", member=member, tunnel_url=self.state.tunnel_url,
                       expires=time.time() + 3600)
         fields.update(overrides)
         return group.issue_token(self.secret, **fields)
@@ -267,11 +415,25 @@ class StateTests(unittest.TestCase):
         with self.assertRaisesRegex(group.GroupError, "already enrolled"):
             self.state.enrol(self.token("node-a"), now=time.time(), port_range=self.ports)
 
-    def test_token_for_another_group_or_coordinator_is_refused(self):
-        other = group.issue_token(self.secret, group="lab", member="node-a", relay="203.0.113.9:7443",
-                                  cert_fp=self.state.cert_fp, expires=time.time() + 60)
-        with self.assertRaisesRegex(group.GroupError, "different group or coordinator"):
+    def test_token_for_another_tunnel_is_refused(self):
+        other = group.issue_token(self.secret, group="lab", member="node-a",
+                                  tunnel_url="https://old-tunnel.trycloudflare.com", expires=time.time() + 60)
+        with self.assertRaisesRegex(group.GroupError, "different tunnel"):
             self.state.enrol(other, now=time.time(), port_range=self.ports)
+
+    def test_token_for_another_group_is_refused(self):
+        other = group.issue_token(self.secret, group="other", member="node-a",
+                                  tunnel_url=TUNNEL_URL, expires=time.time() + 60)
+        with self.assertRaisesRegex(group.GroupError, "different group"):
+            self.state.enrol(other, now=time.time(), port_range=self.ports)
+
+    def test_no_running_relay_means_no_enrolment(self):
+        state = make_state(self.dir / "idle", tunnel_url=None)
+        secret = bytes.fromhex(state.data["secret"])
+        token = group.issue_token(secret, group="lab", member="node-a", tunnel_url=TUNNEL_URL,
+                                  expires=time.time() + 60)
+        with self.assertRaisesRegex(group.GroupError, "not running"):
+            state.enrol(token, now=time.time(), port_range=self.ports)
 
     def test_expired_token_is_refused(self):
         with self.assertRaisesRegex(group.GroupError, "expired"):
@@ -282,32 +444,115 @@ class StateTests(unittest.TestCase):
         with self.assertRaisesRegex(group.GroupError, "already enrolled"):
             group.issue("lab", "node-a", groups_dir=self.dir)
 
+    def test_issue_needs_a_running_relay(self):
+        make_state(self.dir / "idle" / "lab", tunnel_url=None)
+        with self.assertRaisesRegex(group.GroupError, "not running"):
+            group.issue("lab", "node-x", groups_dir=self.dir / "idle")
 
-@unittest.skipUnless(OPENSSL, "openssl is needed to make the coordinator certificate")
+    def test_issue_names_the_running_tunnel(self):
+        token = group.issue("lab", "node-c", groups_dir=self.dir, now=time.time())
+        self.assertEqual(group.read_token(token)[0]["u"], TUNNEL_URL)
+
+
+class GpuDeviceTests(unittest.TestCase):
+    """A member serves a GPU only: the device list is checked before anything is spent or served."""
+
+    def test_a_cpu_only_list_is_refused_with_the_reason(self):
+        with self.assertRaisesRegex(group.GroupError, r"no GPU device.*lists CPU.*not fall back to CPU"):
+            group.select_gpu_device(Path("/unused"), list_devices=lambda _binary: ["CPU"])
+
+    def test_an_empty_list_is_refused(self):
+        with self.assertRaisesRegex(group.GroupError, "lists nothing"):
+            group.select_gpu_device(Path("/unused"), list_devices=lambda _binary: [])
+
+    def test_rpc_and_blas_devices_do_not_count_as_a_gpu(self):
+        with self.assertRaisesRegex(group.GroupError, "no GPU device"):
+            group.select_gpu_device(Path("/unused"), list_devices=lambda _binary: ["RPC0", "BLAS0", "CPU"])
+
+    def test_the_first_gpu_is_chosen_and_cpu_is_ignored(self):
+        self.assertEqual(group.select_gpu_device(Path("/unused"), list_devices=lambda _b: ["CPU", "CUDA1", "Vulkan0"]),
+                         "CUDA1")
+
+    def test_metal_and_vulkan_names_are_gpus(self):
+        self.assertEqual(group.select_gpu_device(Path("/unused"), list_devices=lambda _b: ["MTL0"]), "MTL0")
+        self.assertEqual(group.select_gpu_device(Path("/unused"), list_devices=lambda _b: ["Vulkan0"]), "Vulkan0")
+
+    def test_device_listing_is_read_from_the_rpc_server_output(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        script = root / "lister"
+        script.write_text(f"#!{sys.executable}\nprint('Available devices:')\n"
+                          "print('  CPU: Fake CPU (8 MiB)')\nprint('  CUDA0: Fake GPU (1024 MiB, 512 MiB free)')\n")
+        script.chmod(0o755)
+        self.assertEqual(group.list_rpc_devices(script), ["CPU", "CUDA0"])
+
+    def test_a_failed_device_listing_is_refused(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        script = root / "broken"
+        script.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(2)\n")
+        script.chmod(0o755)
+        with self.assertRaisesRegex(group.GroupError, "could not list its devices"):
+            group.list_rpc_devices(script)
+
+    def test_a_cpu_only_member_is_refused_before_it_spends_its_token(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        coordinator = root / "coordinator"
+        member_dir = root / "member"
+        state = make_state(coordinator / "lab")
+        token = group.issue("lab", "node-cpu", groups_dir=coordinator)
+        with patch.object(group, "enrol", side_effect=AssertionError("enrolled without a GPU")), \
+                patch.object(group, "run_worker", side_effect=AssertionError("served without a GPU")):
+            with self.assertRaisesRegex(group.GroupError, "no GPU device"):
+                group.join_group(token, rpc_binary=Path("/unused"), groups_dir=member_dir,
+                                 list_devices=lambda _b: ["CPU"])
+        self.assertFalse(group.member_path(member_dir, "lab").exists())
+        # The token is still unspent: the same coordinator can admit it, now that a GPU would be there.
+        reloaded = group.GroupState.load(coordinator / "lab" / "group.json")
+        self.assertEqual(reloaded.data["used"], {})
+        self.assertEqual(state.data["members"], {})
+
+
 class EndToEndTests(unittest.TestCase):
-    """Init, issue, enrol over pinned TLS, the agent connects, and bytes cross to the member and back."""
+    """Init, the relay on loopback with a stub tunnel, enrolment over WebSocket, and bytes both ways."""
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, True)
         self.groups = self.root / "coordinator"
         self.members = self.root / "member"
-        relay_port = free_port()
-        self.relay_addr = f"127.0.0.1:{relay_port}"
-        group.init_group("lab", self.relay_addr, groups_dir=self.groups)
+        group.init_group("lab", groups_dir=self.groups)
+        self.state_path = self.groups / "lab" / "group.json"
+        self.fake_rpc = self._fake_rpc_binary()
+        self.relay_logs = []
+        self.stop = threading.Event()
+        self.addCleanup(self._stop_relay)
         base = free_port()
         self.rpc_ports = range(base, base + 10)
-        self.relay = group.Relay(self.groups / "lab" / "group.json", "127.0.0.1", relay_port,
-                                 port_range=self.rpc_ports, log=lambda _text: None)
-        self.relay.start()
-        self.addCleanup(self.relay.close)
-        self.fake_rpc = self._fake_rpc_binary()
+        self.relay_thread = threading.Thread(
+            target=group.run_relay, daemon=True,
+            kwargs=dict(state_path=self.state_path, log=self.relay_logs.append, stop=self.stop,
+                        open_tunnel=stub_tunnel, port_range=self.rpc_ports))
+        self.relay_thread.start()
+        self.tunnel = self._wait_for_tunnel_url()
+
+    def _stop_relay(self):
+        self.stop.set()
+        self.relay_thread.join(timeout=10)
 
     def _fake_rpc_binary(self) -> Path:
         path = self.root / "fake-ggml-rpc-server"
         path.write_text(
             f"#!{sys.executable}\n"
             "import socket, sys, threading\n"
+            "if '--list-devices' in sys.argv:\n"
+            "    print('Available devices:')\n"
+            "    print('  CUDA0: Fake GPU for tests (1024 MiB, 1024 MiB free)')\n"
+            "    sys.exit(0)\n"
+            "device = sys.argv[sys.argv.index('-d') + 1] if '-d' in sys.argv else ''\n"
+            "if not device.startswith('CUDA'):\n"
+            "    sys.exit(3)\n"
             "host = sys.argv[sys.argv.index('--host') + 1]\n"
             "port = int(sys.argv[sys.argv.index('--port') + 1])\n"
             "srv = socket.create_server((host, port))\n"
@@ -324,7 +569,29 @@ class EndToEndTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def test_member_enrols_and_its_worker_is_reachable_on_the_coordinator_port(self):
+    def _wait_for_tunnel_url(self, timeout: float = 30.0) -> str:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            url = json.loads(self.state_path.read_text()).get("tunnel_url")
+            if url:
+                return url
+            time.sleep(0.05)
+        self.fail(f"the relay never published a tunnel URL; log: {self.relay_logs}")
+
+    def test_relay_serves_health_and_refuses_a_plain_request_on_the_link_path(self):
+        with urllib.request.urlopen(f"{self.tunnel}{group.HEALTH_PATH}", timeout=5) as resp:
+            self.assertEqual(json.loads(resp.read()), {"ok": True})
+        with self.assertRaises(urllib.error.HTTPError) as caught:  # the path exists, but a plain GET is not an upgrade
+            urllib.request.urlopen(f"{self.tunnel}{group.LINK_PATH}", timeout=5)
+        self.assertEqual(caught.exception.code, 400)
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(f"{self.tunnel}/elsewhere", timeout=5)
+        self.assertEqual(caught.exception.code, 404)
+
+    def test_relay_printed_the_tunnel_url(self):
+        self.assertTrue(any(line == f"tunnel URL: {self.tunnel}" for line in self.relay_logs), self.relay_logs)
+
+    def test_member_enrols_over_websocket_and_its_gpu_worker_is_reachable_on_the_coordinator_port(self):
         token = group.issue("lab", "node-a", groups_dir=self.groups)
         stop = threading.Event()
         self.addCleanup(stop.set)
@@ -339,28 +606,19 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn(port, self.rpc_ports)
         payload = b"rpc-bytes " * 40_000  # forces several frames each way
         self.assertTrue(self._echo_through(port, payload), f"no echo through the link; log: {logs}")
+        self.assertTrue(any("GPU device CUDA0" in line for line in logs), logs)
 
-        # The member never reveals its key or its RPC port beyond the local machine,
-        # and the token cannot be spent a second time.
+        # The token cannot be spent a second time, and the member keeps its key with owner-only permissions.
         with self.assertRaisesRegex(group.GroupError, "already been used"):
             group.enrol(token, groups_dir=Path(tempfile.mkdtemp()))
-        self.assertTrue((self.members / "lab" / "member.json").exists())
-        mode = (self.members / "lab" / "member.json").stat().st_mode & 0o777
-        self.assertEqual(mode, 0o600)
-
-    def test_pin_mismatch_refuses_enrolment_before_any_token_is_spent(self):
-        secret = bytes.fromhex(json.loads((self.groups / "lab" / "group.json").read_text())["secret"])
-        bad = group.issue_token(secret, group="lab", member="node-x", relay=self.relay_addr,
-                                cert_fp="00" * 32, expires=time.time() + 60)
-        with self.assertRaisesRegex(group.GroupError, "does not match the group token"):
-            group.enrol(bad, groups_dir=self.members)
-        state = group.GroupState.load(self.groups / "lab" / "group.json")
-        self.assertEqual(state.data["used"], {})
+        member_file = self.members / "lab" / "member.json"
+        self.assertTrue(member_file.exists())
+        self.assertEqual(member_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(member_file.read_text())["tunnel_url"], self.tunnel)
 
     def test_expired_token_is_refused_by_the_member_before_connecting(self):
-        secret = bytes.fromhex(json.loads((self.groups / "lab" / "group.json").read_text())["secret"])
-        stale = group.issue_token(secret, group="lab", member="node-y", relay=self.relay_addr,
-                                  cert_fp=group.GroupState.load(self.groups / "lab" / "group.json").cert_fp,
+        secret = bytes.fromhex(json.loads(self.state_path.read_text())["secret"])
+        stale = group.issue_token(secret, group="lab", member="node-z", tunnel_url=self.tunnel,
                                   expires=time.time() - 5)
         with patch.object(group, "client_connect", side_effect=AssertionError("connected")):
             with self.assertRaisesRegex(group.GroupError, "expired"):
@@ -369,7 +627,7 @@ class EndToEndTests(unittest.TestCase):
     def _wait_for_member(self, name: str, timeout: float = 30.0) -> int:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            members = group.GroupState.load(self.groups / "lab" / "group.json").data["members"]
+            members = json.loads(self.state_path.read_text())["members"]
             if name in members:
                 return members[name]["rpc_port"]
             time.sleep(0.1)
@@ -395,12 +653,95 @@ class EndToEndTests(unittest.TestCase):
         return False
 
 
+class _StubProcess:
+    """Stands in for the cloudflared process: alive until stopped."""
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        pass
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        pass
+
+
+def stub_tunnel(local_url: str, local_port: int):
+    """A tunnel that is the local address itself: reachable from this machine, which is all the test needs."""
+    return _StubProcess(), local_url
+
+
+class RelayTests(unittest.TestCase):
+    def test_relay_listens_on_loopback_only(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        make_state(root / "lab")
+        with self.assertRaisesRegex(group.GroupError, "127.0.0.1 only"):
+            group.Relay(root / "lab" / "group.json", "0.0.0.0", 0)
+
+    def test_run_relay_hands_the_tunnel_the_local_relay_and_its_host_header(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        group.init_group("lab", groups_dir=root)
+        seen = {}
+
+        def tunnel(local_url, local_port):
+            seen["target"] = local_url
+            seen["port"] = local_port
+            return _StubProcess(), local_url
+
+        stop = threading.Event()
+        thread = threading.Thread(target=group.run_relay, daemon=True,
+                                  kwargs=dict(state_path=root / "lab" / "group.json", stop=stop,
+                                              log=lambda _t: None, open_tunnel=tunnel))
+        thread.start()
+        deadline = time.monotonic() + 30
+        while "target" not in seen and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(seen["target"], f"http://127.0.0.1:{seen['port']}")
+        stop.set()
+        thread.join(timeout=10)
+        # the tunnel URL is cleared on the way out, so issue refuses until the relay runs again
+        self.assertIsNone(json.loads((root / "lab" / "group.json").read_text())["tunnel_url"])
+
+
 class CommandLineTests(unittest.TestCase):
     def test_members_on_an_unknown_group_is_a_clean_error(self):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root, True)
         with patch.object(group, "GROUPS_DIR", root), patch.object(sys, "stderr", io.StringIO()) as err:
             self.assertEqual(group.main(["members", "--group", "nothere"]), 1)
+        self.assertIn("no group at", err.getvalue())
+
+    def test_init_takes_no_relay_address_any_more(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        with patch.object(group, "GROUPS_DIR", root), patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(group.main(["init", "--group", "lab"]), 0)
+            self.assertIsNone(json.loads((root / "lab" / "group.json").read_text())["tunnel_url"])
+        with patch.object(sys, "stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                group.main(["init", "--group", "lab", "--relay", "192.0.2.10:7443"])
+
+    def test_relay_command_starts_the_relay_for_the_named_group(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        group.init_group("lab", groups_dir=root)
+        with patch.object(group, "GROUPS_DIR", root), patch.object(group, "run_relay") as run, \
+                patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(group.main(["relay", "--group", "lab", "--port", "0"]), 0)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], root / "lab" / "group.json")
+        self.assertEqual(run.call_args.kwargs["port"], 0)
+
+    def test_issue_on_an_unknown_group_is_a_clean_error(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        with patch.object(group, "GROUPS_DIR", root), patch.object(sys, "stderr", io.StringIO()) as err:
+            self.assertEqual(group.main(["issue", "--group", "nothere", "--member", "node-a"]), 1)
         self.assertIn("no group at", err.getvalue())
 
 
