@@ -708,6 +708,25 @@ check("and never prints the complete summary line",
       any(l.strip().startswith('{"answer"') for l in _cut_out.getvalue().splitlines()), False)
 
 
+# --- --no-update never fetches the join script, and a first run installs the bundled one ---
+import argparse
+import tempfile as _tempfile
+from unittest.mock import patch
+_home = Path(_tempfile.mkdtemp())
+_bundled = Path(_tempfile.mkdtemp()) / "join.py"
+_bundled.write_text("# bundled join\n")
+_ns = argparse.Namespace(no_update=True, auto=False, model=None, region=None, rest=[])
+_run = []
+with patch.object(common, "INSTALL_DIR", _home), \
+        patch.object(common, "__file__", str(_bundled.parent / "common.py")), \
+        patch.object(common.urllib.request, "urlopen", side_effect=AssertionError("fetched join.py")), \
+        patch.object(common.os, "execv", side_effect=lambda exe, argv: _run.append(argv)):
+    common.cmd_join_or_serve("join", "http://gateway", _ns)
+check("with --no-update, no join script is fetched from the network", _run != [], True)
+check("and the bundled join script is installed on a first run",
+      (_home / "join.py").read_text(), "# bundled join\n")
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} of {CHECKS[0]} FAILED\n")

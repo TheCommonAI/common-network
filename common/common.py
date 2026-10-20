@@ -2172,20 +2172,32 @@ def cmd_leave(gateway: str) -> None:
 
 def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_model: str | None = None) -> None:
     join_py = INSTALL_DIR / "join.py"
-    # Always fetch the current version before delegating -- a stale local
-    # copy's own self-update runs *after* argparse, so a new flag this CLI
-    # relies on (e.g. --auto) would crash before join.py ever got the chance
-    # to update itself. Found exactly this bug in testing.
-    try:
-        with urllib.request.urlopen(JOIN_SCRIPT_URL, timeout=10) as resp:
-            remote = resp.read()
-        join_py.parent.mkdir(parents=True, exist_ok=True)
-        join_py.write_bytes(remote)
-    except (urllib.error.URLError, socket.timeout) as e:
+    # The join script ships next to this file in every installed copy. With
+    # --no-update (which the desktop always passes) it is used as installed and
+    # nothing is fetched; a first run installs the bundled copy instead.
+    if args.no_update:
+        bundled = Path(__file__).resolve().parent / "join.py"
         if not join_py.exists():
-            print(red(f"✗ couldn't fetch the join script: {e}"), file=sys.stderr)
-            sys.exit(1)
-        # Offline but we already have a copy -- use it as-is.
+            if not bundled.exists():
+                print(red("✗ no join script is installed and none is bundled with this CLI"), file=sys.stderr)
+                sys.exit(1)
+            join_py.parent.mkdir(parents=True, exist_ok=True)
+            join_py.write_bytes(bundled.read_bytes())
+    else:
+        # Always fetch the current version before delegating -- a stale local
+        # copy's own self-update runs *after* argparse, so a new flag this CLI
+        # relies on (e.g. --auto) would crash before join.py ever got the chance
+        # to update itself. Found exactly this bug in testing.
+        try:
+            with urllib.request.urlopen(JOIN_SCRIPT_URL, timeout=10) as resp:
+                remote = resp.read()
+            join_py.parent.mkdir(parents=True, exist_ok=True)
+            join_py.write_bytes(remote)
+        except (urllib.error.URLError, socket.timeout) as e:
+            if not join_py.exists():
+                print(red(f"✗ couldn't fetch the join script: {e}"), file=sys.stderr)
+                sys.exit(1)
+            # Offline but we already have a copy -- use it as-is.
 
     if verb == "serve":
         print(dim(f"putting {extra_model} out to graze on the commons.\n"))
