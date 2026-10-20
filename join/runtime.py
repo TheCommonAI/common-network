@@ -1220,7 +1220,9 @@ class DistributedConfig:
             if (result.returncode or any(device not in discovered for device in self.devices)
                     or {discovered.get(device) for device in self.devices} != set(self.peers)):
                 raise FetchFailed("RPC device discovery failed or a configured device is unavailable; check peer processes, tunnels, and matching runtime builds")
-            local_devices = set(re.findall(r"^\s*([A-Za-z]+[0-9]+):", devices_text, re.MULTILINE))
+            # RPC workers are listed too, but they are remote: a draft device must be local.
+            local_devices = {name for name in re.findall(r"^\s*([A-Za-z]+[0-9]+):", devices_text, re.MULTILINE)
+                             if not name.startswith("RPC")}
             if self.draft and self.draft_device != "none" and self.draft_device not in local_devices:
                 raise FetchFailed(f"local draft device {self.draft_device} is unavailable")
         except (OSError, subprocess.SubprocessError) as e:
