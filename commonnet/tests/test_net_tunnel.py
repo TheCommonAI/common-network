@@ -100,6 +100,30 @@ class RunWithFakeTunnel(unittest.TestCase):
         self.assertIsNone(published_url(self.out), "a dead URL must never be published")
         self.assertTrue(refused(port))
 
+    def test_a_tunnel_that_becomes_reachable_after_the_first_warmup_round_is_published(self):
+        # Regression: one 30s warm-up round gave up on resolvers that need minutes for a new hostname.
+        port = tunnel.free_loopback_port()
+        stop = threading.Event()
+        join = tunnel._join()
+        calls = []
+
+        def flaky_wait(url, token, path):
+            calls.append(url)
+            return len(calls) >= 3
+
+        def opener(local_url, port_):
+            return subprocess.Popen(SLEEPER), local_url
+
+        with patch.object(join, "wait_for_tunnel", flaky_wait):
+            worker = threading.Thread(target=tunnel.run, args=(["--stub", "--layers", "0", "4"], self.out),
+                                      kwargs=dict(open_tunnel=opener, stop=stop, log=quiet, port=port,
+                                                  health_interval=60))
+            worker.start()
+            self.assertTrue(wait_until(lambda: published_url(self.out)))
+            stop.set()
+            worker.join(timeout=20)
+        self.assertEqual(len(calls), 3)
+
     def test_a_tunnel_that_stays_down_is_replaced_and_the_new_url_published(self):
         port = tunnel.free_loopback_port()
         local = f"http://127.0.0.1:{port}"

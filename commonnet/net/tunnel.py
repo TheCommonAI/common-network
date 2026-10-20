@@ -47,6 +47,7 @@ SERVER_START_TIMEOUT_SECONDS = 30.0
 HEALTH_CHECK_INTERVAL_SECONDS = 120.0  # quick tunnels can reconnect under a new hostname silently
 TUNNEL_GRACE_SECONDS = 600.0           # unreachable this long, and the tunnel is replaced
 SERVER_LOG_NAME = "block-server.log"
+WARMUP_ROUNDS = 6  # x join.TUNNEL_WARMUP_TIMEOUT_SECONDS (30s) = 3 minutes for the tunnel to become routable
 
 
 class LauncherError(RuntimeError):
@@ -133,7 +134,15 @@ def run(server_args: list, out_path: Path, *, token: str | None = None,
 
         tunnel, url = open_tunnel(local_url, port)
         log(f"tunnel URL: {url}")
-        if not join.wait_for_tunnel(url, token, HEALTH_PATH):
+        # A fresh quick-tunnel hostname can take minutes to resolve on some resolvers (negative
+        # caching: seen >40s on a Mac using Tailscale DNS), so one 30s join warm-up is not enough.
+        warm_deadline = time.monotonic() + join.TUNNEL_WARMUP_TIMEOUT_SECONDS * WARMUP_ROUNDS
+        while not join.wait_for_tunnel(url, token, HEALTH_PATH):
+            if time.monotonic() >= warm_deadline or tunnel.poll() is not None:
+                break
+        else:
+            warm_deadline = None
+        if warm_deadline is not None:
             raise LauncherError(
                 f"the tunnel did not answer {HEALTH_PATH} within the warm-up window, so nothing was published"
             )
