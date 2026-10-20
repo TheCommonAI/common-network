@@ -23,7 +23,7 @@ import time
 import urllib.error
 import urllib.request
 
-from pedal.net import protocol
+from pedal.net import auth, protocol
 from pedal.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
 
 FORWARD_TIMEOUT_SECONDS = 60.0
@@ -73,18 +73,27 @@ def _error_text(error: urllib.error.HTTPError) -> str:
     return str(error.reason)
 
 
+_TOKEN_FROM_ENV = object()
+
+
 class BlockClient:
     """Calls one block server per call. Holds no connection between calls.
+
+    The token defaults to the one the server reads (PEDAL_BLOCK_TOKEN). Pass
+    token=None to send no Authorization header, which a real server refuses with 401.
 
     The opener ignores proxy environment variables: the endpoint is a tunnel URL,
     and a proxy in the environment must not carry it.
     """
 
-    def __init__(self, *, retries: int = DEFAULT_RETRIES, backoff: float = RETRY_BACKOFF_SECONDS,
+    def __init__(self, *, token=_TOKEN_FROM_ENV, retries: int = DEFAULT_RETRIES,
+                 backoff: float = RETRY_BACKOFF_SECONDS,
                  max_backoff: float = RETRY_MAX_BACKOFF_SECONDS,
                  max_request_bytes: int = MAX_REQUEST_BYTES, sleep=time.sleep):
         if retries < 0:
             raise ValueError("retries must be zero or more")
+        self.token = auth.load_token() if token is _TOKEN_FROM_ENV else (
+            None if token is None else auth.check_token(token))
         self.retries = retries
         self.backoff = backoff
         self.max_backoff = max_backoff
@@ -133,6 +142,8 @@ class BlockClient:
             request = urllib.request.Request(url, data=data, method=method)
             if data is not None:
                 request.add_header("Content-Type", "application/json")
+            for name, value in auth.authorization_headers(self.token).items():
+                request.add_header(name, value)
             try:
                 with self._opener.open(request, timeout=timeout) as response:
                     raw = response.read()

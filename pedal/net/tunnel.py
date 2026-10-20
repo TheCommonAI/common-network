@@ -36,7 +36,7 @@ import threading
 import time
 from pathlib import Path
 
-from pedal.net import protocol
+from pedal.net import auth, protocol
 from pedal.net.client import BlockClient, BlockError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -89,8 +89,9 @@ def _start_server(server_args: list, port: int, log_path: Path) -> subprocess.Po
         )
 
 
-def _wait_for_server(local_url: str, server: subprocess.Popen, log_path: Path, timeout: float) -> tuple:
-    client = BlockClient(retries=0)
+def _wait_for_server(local_url: str, server: subprocess.Popen, log_path: Path, timeout: float,
+                     token: str | None) -> tuple:
+    client = BlockClient(token=token, retries=0)
     deadline = time.monotonic() + timeout
     while True:
         if server.poll() is not None:
@@ -104,7 +105,8 @@ def _wait_for_server(local_url: str, server: subprocess.Popen, log_path: Path, t
         time.sleep(0.2)
 
 
-def run(server_args: list, out_path: Path, *, open_tunnel=_default_open_tunnel,
+def run(server_args: list, out_path: Path, *, token: str | None = None,
+        open_tunnel=_default_open_tunnel,
         stop: threading.Event | None = None, log=print, port: int | None = None,
         health_interval: float = HEALTH_CHECK_INTERVAL_SECONDS, grace: float = TUNNEL_GRACE_SECONDS,
         server_timeout: float = SERVER_START_TIMEOUT_SECONDS) -> None:
@@ -112,6 +114,8 @@ def run(server_args: list, out_path: Path, *, open_tunnel=_default_open_tunnel,
 
     `open_tunnel(local_url, port)` returns (process, public URL). It is injectable so
     that tests run without cloudflared. `server_args` are passed to pedal.net.server.
+    `token` is the bearer token the server requires (None only for --stub). The server
+    child reads the same token from the environment or from --token-file in server_args.
     """
     join = _join()
     stop = stop or threading.Event()
@@ -124,12 +128,12 @@ def run(server_args: list, out_path: Path, *, open_tunnel=_default_open_tunnel,
     tunnel = None
     try:
         server = _start_server(server_args, port, log_path)
-        layers, device = _wait_for_server(local_url, server, log_path, server_timeout)
+        layers, device = _wait_for_server(local_url, server, log_path, server_timeout, token)
         log(f"block server on {local_url}: layers [{layers[0]}, {layers[1]}) on {device}")
 
         tunnel, url = open_tunnel(local_url, port)
         log(f"tunnel URL: {url}")
-        if not join.wait_for_tunnel(url, None, HEALTH_PATH):
+        if not join.wait_for_tunnel(url, token, HEALTH_PATH):
             raise LauncherError(
                 f"the tunnel did not answer {HEALTH_PATH} within the warm-up window, so nothing was published"
             )
@@ -140,7 +144,7 @@ def run(server_args: list, out_path: Path, *, open_tunnel=_default_open_tunnel,
         while not stop.wait(health_interval):
             if server.poll() is not None:
                 raise LauncherError(f"the block server exited with code {server.returncode}; see {log_path}")
-            if tunnel.poll() is None and join.tunnel_is_healthy(url, None, HEALTH_PATH):
+            if tunnel.poll() is None and join.tunnel_is_healthy(url, token, HEALTH_PATH):
                 healthy_at = time.monotonic()
                 continue
             unreachable_for = time.monotonic() - healthy_at
@@ -182,6 +186,8 @@ def main(argv: list | None = None) -> int:
     source.add_argument("--block", metavar="MODULE:FACTORY", help="serve FACTORY(start, end) from MODULE")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT,
                         help=f"JSON file to write the tunnel URL to (default: {DEFAULT_OUT})")
+    parser.add_argument("--token-file", metavar="PATH",
+                        help=f"file holding the bearer token (or set {auth.TOKEN_ENV})")
     args = parser.parse_args(argv)
 
     try:
@@ -189,13 +195,29 @@ def main(argv: list | None = None) -> int:
     except protocol.ProtocolError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    token = None
+    if not args.stub:
+        try:
+            token = auth.load_token(args.token_file)
+        except auth.TokenError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        if token is None:
+            print(f"error: a real block needs a token: set {auth.TOKEN_ENV} or pass --token-file "
+                  "(--stub runs without one)", file=sys.stderr)
+            return 2
     server_args = ["--layers", str(args.layers[0]), str(args.layers[1])]
-    server_args += ["--stub"] if args.stub else ["--block", args.block]
+    if args.stub:
+        server_args += ["--stub"]
+    else:
+        server_args += ["--block", args.block]
+        if args.token_file:
+            server_args += ["--token-file", str(args.token_file)]
 
     print("ctrl+c or SIGTERM stops the block server and its tunnel", flush=True)
     previous = signal.signal(signal.SIGTERM, _interrupted)
     try:
-        run(server_args, args.out, log=_log)
+        run(server_args, args.out, token=token, log=_log)
     except KeyboardInterrupt:
         print("stopping the block server and its tunnel", flush=True)
     except LauncherError as e:

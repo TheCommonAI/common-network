@@ -43,7 +43,7 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from pedal.net import protocol
+from pedal.net import auth, protocol
 from pedal.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
 
 LOOPBACK = "127.0.0.1"
@@ -136,11 +136,14 @@ class BlockServer:
     """
 
     def __init__(self, block, host: str = LOOPBACK, port: int = 0, *,
-                 max_request_bytes: int = MAX_REQUEST_BYTES):
+                 max_request_bytes: int = MAX_REQUEST_BYTES, token: str | None = None):
+        """token=None serves without authentication. Only tests and --stub do that;
+        the command line refuses to start a real block without a token."""
         if host != LOOPBACK:
             raise ValueError("the block server listens on 127.0.0.1 only; the tunnel is what reaches it")
         if max_request_bytes < 1:
             raise ValueError("max_request_bytes must be positive")
+        self.token = None if token is None else auth.check_token(token)
         self.block = block
         self.layers = protocol.check_layers(block.layers)
         self.device = str(block.device)
@@ -242,11 +245,20 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _authorized(self) -> bool:
+        token = self._block.token
+        if token is None:
+            return True
+        return auth.token_matches(token, self.headers.get("Authorization"))
+
     def _path(self) -> str:
         return self.path.split("?", 1)[0]
 
     def do_GET(self) -> None:
         path = self._path()
+        if not self._authorized():
+            self._send(401, _error("missing or wrong bearer token"))
+            return
         if path == "/health":
             self._send(200, protocol.encode_health(self._block.layers, self._block.device))
         elif path in POST_PATHS:
@@ -265,6 +277,10 @@ class _Handler(BaseHTTPRequestHandler):
         body = self._read_body()
         if body is None:
             return  # the reply has already been sent
+        if not self._authorized():
+            # The body is read first, so the refusal reaches the client intact.
+            self._send(401, _error("missing or wrong bearer token"))
+            return
         try:
             obj = json.loads(body.decode("utf-8"))
         except ValueError:
@@ -340,11 +356,25 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--block", metavar="MODULE:FACTORY",
                         help="serve FACTORY(start, end) from MODULE")
     parser.add_argument("--max-request-bytes", type=int, default=MAX_REQUEST_BYTES)
+    parser.add_argument("--token-file", metavar="PATH",
+                        help=f"file holding the bearer token (or set {auth.TOKEN_ENV})")
     args = parser.parse_args(argv)
+
+    token = None
+    if not args.stub:
+        try:
+            token = auth.load_token(args.token_file)
+        except auth.TokenError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        if token is None:
+            print(f"error: a real block needs a token: set {auth.TOKEN_ENV} or pass --token-file "
+                  "(--stub serves without one)", file=sys.stderr)
+            return 2
 
     start, end = args.layers
     block = StubBlock(start, end) if args.stub else _load_block(args.block, start, end)
-    server = BlockServer(block, LOOPBACK, args.port, max_request_bytes=args.max_request_bytes)
+    server = BlockServer(block, LOOPBACK, args.port, max_request_bytes=args.max_request_bytes, token=token)
     print(f"block server on {server.url} serving layers [{start}, {end}) on {server.device}", flush=True)
     try:
         server.serve_forever()

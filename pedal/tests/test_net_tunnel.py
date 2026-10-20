@@ -145,24 +145,30 @@ class RunWithFakeTunnel(unittest.TestCase):
         def opener(local_url, port_):
             return subprocess.Popen(SLEEPER), local_url
 
-        errors = []
+        outcomes = []
 
         def run():
+            # Every exception is recorded, so a failure says what the launcher raised.
             try:
                 tunnel.run(["--stub", "--layers", "0", "2"], self.out, open_tunnel=opener, log=quiet,
                            port=port, health_interval=0.05)
-            except LauncherError as e:
-                errors.append(str(e))
+                outcomes.append(None)
+            except BaseException as e:
+                outcomes.append(e)
 
         with patch.object(tunnel, "_start_server", side_effect=recording_start):
             worker = threading.Thread(target=run)
             worker.start()
             self.assertTrue(wait_until(lambda: published_url(self.out)))
             started[0].kill()
+            # Reap the child before the launcher looks at it, so poll() reports the
+            # exit rather than racing the kernel's delivery of the signal.
+            started[0].wait(timeout=10)
             worker.join(timeout=20)
         self.assertFalse(worker.is_alive())
-        self.assertEqual(len(errors), 1)
-        self.assertIn("exited", errors[0])
+        self.assertEqual(len(outcomes), 1, "the launcher thread ended without an outcome")
+        self.assertIsInstance(outcomes[0], LauncherError, repr(outcomes[0]))
+        self.assertIn("exited", str(outcomes[0]))
         self.assertIsNone(published_url(self.out))
         self.assertTrue(refused(port))
 
