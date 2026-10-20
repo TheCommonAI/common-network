@@ -564,6 +564,33 @@ class GpuDeviceTests(unittest.TestCase):
         self.assertEqual(state.data["members"], {})
 
 
+class TensorCacheTests(unittest.TestCase):
+    """The member's RPC server runs with its tensor cache on, kept inside ~/.common-network."""
+
+    def _launch_rpc_server(self) -> tuple[list, dict]:
+        member = {"member": "node-a", "key": "key", "tunnel_url": "https://example.trycloudflare.com"}
+        stop = threading.Event()
+        stop.set()  # run_worker only starts the RPC server here; it does not connect
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(group.subprocess, "Popen") as popen, \
+                patch.object(group, "_wait_for_listener"):
+            group.run_worker(member, Path("/unused/ggml-rpc-server"), device="CUDA0",
+                             log_path=Path(tmp) / "rpc-server.log", log=lambda _: None, stop=stop)
+        argv = popen.call_args.args[0]
+        return argv, popen.call_args.kwargs["env"]
+
+    def test_rpc_server_is_started_with_the_cache_flag_and_its_device(self):
+        argv, _ = self._launch_rpc_server()
+        self.assertIn("-c", argv)
+        self.assertEqual(argv[argv.index("-d") + 1], "CUDA0")
+        self.assertEqual(argv[argv.index("--host") + 1], "127.0.0.1")
+
+    def test_cache_directory_is_inside_common_dir(self):
+        self.assertIn(group.COMMON_DIR, group.TENSOR_CACHE_DIR.parents)
+        _, env = self._launch_rpc_server()
+        self.assertEqual(env["LLAMA_CACHE"], str(group.TENSOR_CACHE_DIR))
+
+
 class EndToEndTests(unittest.TestCase):
     """Init, the relay on loopback with a stub tunnel, enrolment over WebSocket, and bytes both ways."""
 

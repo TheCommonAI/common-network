@@ -71,6 +71,11 @@ from pathlib import Path
 
 COMMON_DIR = Path.home() / ".common-network"
 GROUPS_DIR = COMMON_DIR / "groups"
+# The member's RPC server keeps each weight tensor it is sent, under rpc/ in this
+# directory (LLAMA_CACHE). When the coordinator sends a tensor the server already
+# has, the server loads it from here, so reloading a model does not upload its
+# weights over the link again.
+TENSOR_CACHE_DIR = COMMON_DIR / "tensor-cache"
 
 TOKEN_PREFIX = "cng1."
 TOKEN_VERSION = 2
@@ -1255,9 +1260,14 @@ def run_worker(member: dict, rpc_binary: Path, *, device: str, log_path: Path, l
     """
     stop = stop or threading.Event()
     rpc_port = _free_loopback_port()
+    # -c enables the server's tensor cache. Its location comes from LLAMA_CACHE, which
+    # is set for this server only, so the cache stays under ~/.common-network. The server
+    # does not verify cache files, and it writes them without a temp file and rename, so
+    # a file cut short by a kill during a write is served later as if it were complete.
+    rpc_env = dict(os.environ, LLAMA_CACHE=str(TENSOR_CACHE_DIR))
     with open(log_path, "ab") as log_file:
-        rpc = subprocess.Popen([str(rpc_binary), "--host", "127.0.0.1", "--port", str(rpc_port), "-d", device],
-                               stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT)
+        rpc = subprocess.Popen([str(rpc_binary), "--host", "127.0.0.1", "--port", str(rpc_port), "-d", device, "-c"],
+                               stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT, env=rpc_env)
     try:
         _wait_for_listener(rpc_port, rpc, log_path)
         log(f"RPC worker listening on 127.0.0.1:{rpc_port}; connecting to {member['tunnel_url']}")

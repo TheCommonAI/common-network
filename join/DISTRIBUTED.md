@@ -93,6 +93,12 @@ The member enrols, starts its RPC worker and stays connected in the foreground.
 Ctrl+C or a service stop also stops its RPC server. The member's key is kept in
 `~/.common-network/groups/<group>/member.json`, readable only by its owner.
 
+The member's RPC server runs with its tensor cache on. The weights it is sent are
+kept under `~/.common-network/tensor-cache/rpc`, so a later load of the same model
+does not upload them over the link again. The cache is not bounded and is never
+pruned, and the server does not verify it, so a cache file cut short by a kill
+during its first write is served later as if it were complete.
+
 Still manual: copy the `rpc_servers` list from `members` into the coordinator's
 distributed config and restart the coordinator, because the runtime's split is
 fixed at start. A token works once, and it names the tunnel URL the relay had
