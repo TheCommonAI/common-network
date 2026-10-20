@@ -136,7 +136,7 @@ UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
 
 # Everything join.py drives that lives beside it, and has to be refreshed when
 # join.py refreshes itself. See refresh_siblings().
-SIBLING_MODULES = ("worker.py", "runtime.py")
+SIBLING_MODULES = ("worker.py", "runtime.py", "group.py")
 SIBLING_UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/{{}}"
 
 # The schemes a `--model` value may name explicitly. Anything else is read as a
@@ -1662,6 +1662,40 @@ def run_local_coordinator(config_path: str, port: int = LLAMA_PORT) -> None:
             signal.signal(signum, handler)
 
 
+def run_group_member(token: str) -> None:
+    """Enrol this machine in a distributed group and run its RPC worker, in the foreground.
+
+    Nothing listens on this machine and nothing is registered with a gateway: the
+    worker dials out to the coordinator over TLS, and its ggml-rpc-server stays on
+    127.0.0.1. Ctrl+C stops the worker and the RPC server together.
+    """
+    try:
+        group = importlib.import_module("group")
+    except ImportError:
+        die_with_fix("the group module is missing.",
+                     f"join.py needs group.py beside it. Run the installer again, or fetch it from\n"
+                     f"  https://github.com/{REPO}/tree/main/join")
+    rt = _require_runtime()
+
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt
+
+    # SIGTERM (a service manager's stop) must unwind like Ctrl+C, so that the
+    # worker's ggml-rpc-server is stopped with it rather than left running.
+    previous = signal.signal(signal.SIGTERM, interrupted)
+    try:
+        rpc_binary = rt.ensure_rpc_server()
+        group.join_group(token, rpc_binary=rpc_binary, log=lambda text: print(f"{GLYPH_WORK} {text}"))
+    except KeyboardInterrupt:
+        print(f"\n{GLYPH_WORK} {dim('stopping the group worker...')}")
+    except (group.GroupError, rt.FetchFailed) as e:
+        die(str(e))
+    except OSError as e:  # ssl.SSLError is an OSError
+        die(f"could not reach the coordinator ({e})")
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def main() -> None:
     _force_utf8_output()
     sys.stdout.reconfigure(line_buffering=True)
@@ -1672,6 +1706,7 @@ def main() -> None:
     parser.add_argument("--distributed-config", help="v0.2 distributed model group JSON; bypasses specialist model assignment")
     parser.add_argument("--local-only", action="store_true", help="Run only the distributed model API on loopback; no gateway, worker, warm-up, tunnel, or identity changes")
     parser.add_argument("--port", type=int, default=None, help="With --local-only: the loopback port for the model API (default 11436)")
+    parser.add_argument("--group-token", default=None, help="Join a distributed model group with a one-time token from its coordinator, and run this machine's RPC worker; no gateway registration")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
     # The name and operator are published to the whole network (`GET /nodes`
@@ -1698,6 +1733,10 @@ def main() -> None:
         parser.error("--port must be between 1 and 65535")
     if args.port is not None and not args.local_only:
         parser.error("--port is only used with --local-only")
+    if args.group_token is not None and (args.local_only or args.distributed_config or args.model
+                                         or args.lan or args.permanent or args.remove_permanent
+                                         or args.list_catalogue or args.port is not None):
+        parser.error("--group-token cannot be combined with --local-only, --distributed-config, --model, --lan, --port, service installation/removal, or --list-catalogue")
     if args.local_only:
         if (not args.distributed_config or args.model or args.lan or args.permanent
                 or args.remove_permanent or args.list_catalogue):
@@ -1721,6 +1760,10 @@ def main() -> None:
 
     if args.remove_permanent:
         remove_permanent()
+        return
+
+    if args.group_token is not None:
+        run_group_member(args.group_token)
         return
 
     gateway = args.gateway.rstrip("/")

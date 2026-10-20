@@ -4,6 +4,7 @@ import importlib.util
 import json
 import io
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -307,6 +308,118 @@ class DistributedTests(unittest.TestCase):
         # the check is that nothing but that child is ever stopped.
         stop.assert_called_with(child)
         self.assertTrue(all(call.args == (child,) for call in stop.call_args_list))
+
+
+class LlamaDownloadCheckTests(unittest.TestCase):
+    """The llama.cpp archive is checked against GitHub's sha256 for it, or it is not installed."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        for name, value in (("DOWNLOAD_CACHE", self.dir / "cache"), ("RUNTIME_DIR", self.dir / "runtime"),
+                            ("CURRENT_RUNTIME", self.dir / "runtime" / "current")):
+            patcher = patch.object(runtime, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def release_json(self, assets):
+        return json.dumps({"tag_name": "b1", "assets": assets})
+
+    def test_digest_comes_from_the_release_record_for_the_named_asset(self):
+        digest = "ab" * 32
+        body = self.release_json([{"name": "other.zip", "digest": "sha256:" + "11" * 32},
+                                  {"name": "llama-b1-bin-x.tar.gz", "digest": "sha256:" + digest}])
+        with patch.object(runtime, "_read_text", return_value=body):
+            self.assertEqual(runtime.llama_asset_digest("b1", "llama-b1-bin-x.tar.gz"), digest)
+
+    def test_missing_or_malformed_digest_is_none(self):
+        cases = [self.release_json([{"name": "llama-b1-bin-x.tar.gz"}]),
+                 self.release_json([{"name": "llama-b1-bin-x.tar.gz", "digest": "md5:abc"}]),
+                 self.release_json([{"name": "llama-b1-bin-x.tar.gz", "digest": "sha256:xyz"}]),
+                 self.release_json([]), "[]", "not json"]
+        for body in cases:
+            with self.subTest(body=body):
+                with patch.object(runtime, "_read_text", return_value=body):
+                    self.assertIsNone(runtime.llama_asset_digest("b1", "llama-b1-bin-x.tar.gz"))
+
+    def test_unreachable_api_is_none_not_an_exception(self):
+        with patch.object(runtime, "_read_text", side_effect=runtime.urllib.error.URLError("offline")):
+            self.assertIsNone(runtime.llama_asset_digest("b1", "llama-b1-bin-x.tar.gz"))
+
+    def test_install_refuses_when_no_checksum_is_recorded(self):
+        with patch.object(runtime, "_installed_binary", return_value=None), \
+                patch.object(runtime, "llama_asset_name", return_value="llama-b1-bin-x.tar.gz"), \
+                patch.object(runtime, "resolve_llama_build", return_value="b1"), \
+                patch.object(runtime, "llama_asset_digest", return_value=None), \
+                patch.object(runtime, "_download") as download:
+            with self.assertRaisesRegex(runtime.FetchFailed, "no checksum"):
+                runtime.ensure_llama_server()
+        download.assert_not_called()
+
+    def test_download_is_made_with_the_recorded_digest(self):
+        digest = "cd" * 32
+        with patch.object(runtime, "_installed_binary", return_value=None), \
+                patch.object(runtime, "llama_asset_name", return_value="llama-b1-bin-x.tar.gz"), \
+                patch.object(runtime, "resolve_llama_build", return_value="b1"), \
+                patch.object(runtime, "llama_asset_digest", return_value=digest), \
+                patch.object(runtime, "_download", side_effect=runtime.FetchFailed("stop here")) as download:
+            with self.assertRaises(runtime.FetchFailed):
+                runtime.ensure_llama_server()
+        self.assertEqual(download.call_args.kwargs["expected_sha"], digest)
+
+    def test_cached_archive_with_the_wrong_bytes_is_discarded_before_redownload(self):
+        cache = self.dir / "cache"
+        cache.mkdir(parents=True)
+        (cache / "llama-b1-bin-x.tar.gz").write_bytes(b"tampered")
+        seen = {}
+
+        def fake_download(url, dest, **kwargs):
+            seen["existed"] = dest.exists()
+            raise runtime.FetchFailed("stop here")
+
+        with patch.object(runtime, "_installed_binary", return_value=None), \
+                patch.object(runtime, "llama_asset_name", return_value="llama-b1-bin-x.tar.gz"), \
+                patch.object(runtime, "resolve_llama_build", return_value="b1"), \
+                patch.object(runtime, "llama_asset_digest", return_value=runtime.hashlib.sha256(b"good").hexdigest()), \
+                patch.object(runtime, "_download", side_effect=fake_download):
+            with self.assertRaises(runtime.FetchFailed):
+                runtime.ensure_llama_server()
+        self.assertFalse(seen["existed"])
+
+    def test_download_with_a_wrong_checksum_keeps_nothing(self):
+        source = self.dir / "served.bin"
+        source.write_bytes(b"llama bytes")
+        dest = self.dir / "archive.tar.gz"
+        with self.assertRaisesRegex(runtime.FetchFailed, "did not match its recorded checksum"):
+            runtime._download_once(source.as_uri(), dest, expected_sha="00" * 32)
+        self.assertFalse(dest.exists())
+        self.assertFalse(dest.with_name(dest.name + ".part").exists())
+
+    def test_download_with_the_right_checksum_is_kept(self):
+        source = self.dir / "served.bin"
+        source.write_bytes(b"llama bytes")
+        dest = self.dir / "archive.tar.gz"
+        runtime._download_once(source.as_uri(), dest, expected_sha=runtime.hashlib.sha256(b"llama bytes").hexdigest())
+        self.assertEqual(dest.read_bytes(), b"llama bytes")
+
+
+class RpcServerTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def test_rpc_server_is_found_beside_the_installed_llama_server(self):
+        (self.dir / "llama-server").write_text("")
+        rpc = self.dir / runtime.RPC_SERVER_NAME
+        rpc.write_text("")
+        with patch.object(runtime, "ensure_llama_server", return_value=self.dir / "llama-server"):
+            self.assertEqual(runtime.ensure_rpc_server(), rpc)
+
+    def test_build_without_rpc_server_is_refused_with_the_remedy(self):
+        (self.dir / "llama-server").write_text("")
+        with patch.object(runtime, "ensure_llama_server", return_value=self.dir / "llama-server"):
+            with self.assertRaisesRegex(runtime.FetchFailed, "without RPC support"):
+                runtime.ensure_rpc_server()
 
 
 if __name__ == "__main__":
