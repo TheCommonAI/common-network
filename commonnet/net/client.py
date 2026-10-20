@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import time
 import urllib.error
 import urllib.request
 
-from commonnet.net import auth, protocol
+from commonnet.net import auth, dns, protocol
 from commonnet.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
 
 FORWARD_TIMEOUT_SECONDS = 60.0
@@ -73,6 +74,39 @@ def _error_text(error: urllib.error.HTTPError) -> str:
     return str(error.reason)
 
 
+def _connect_resolved(conn, tls: bool) -> None:
+    """Connect to the resolved address, keeping the hostname for the Host header and SNI."""
+    address = dns.resolve(conn.host, conn.port)
+    sock = socket.create_connection((address, conn.port), conn.timeout, conn.source_address)
+    if tls:
+        try:
+            sock = conn._context.wrap_socket(sock, server_hostname=conn.host)
+        except BaseException:
+            sock.close()
+            raise
+    conn.sock = sock
+
+
+class _HTTPConnection(http.client.HTTPConnection):
+    def connect(self):
+        _connect_resolved(self, False)
+
+
+class _HTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        _connect_resolved(self, True)
+
+
+class _HTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_HTTPConnection, req)
+
+
+class _HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_HTTPSConnection, req)
+
+
 _TOKEN_FROM_ENV = object()
 
 
@@ -99,7 +133,8 @@ class BlockClient:
         self.max_backoff = max_backoff
         self.max_request_bytes = max_request_bytes
         self._sleep = sleep
-        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _HTTPHandler, _HTTPSHandler)
 
     def health(self, endpoint: str, timeout: float = CONTROL_TIMEOUT_SECONDS) -> tuple:
         """Returns (layers, device)."""
