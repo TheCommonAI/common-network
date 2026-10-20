@@ -1254,6 +1254,20 @@ def missing_worker_in_log(log_tail):
     return any(marker in line for line in log_tail for marker in RPC_WORKER_LOST_MARKERS)
 
 
+def cpu_reporting_devices(devices_text, devices):
+    """The configured RPC devices whose discovery line names a CPU backend.
+
+    The network is GPU-only, so a CPU backend behind any configured device is a
+    refusal. A CPU token is matched as a whole word after the device's colon, so
+    a hostname such as cpu-host does not count. Pure: it reads only the text.
+    """
+    reporting = []
+    for name, rest in re.findall(r"^\s*(RPC[0-9]+):(.*)$", devices_text, re.MULTILINE):
+        if name in devices and re.search(r"(?<![A-Za-z0-9])CPU[0-9]*(?![A-Za-z0-9])", rest):
+            reporting.append(name)
+    return reporting
+
+
 class DistributedConfig:
     """Operator-managed v0.2 model group; llama.cpp owns verification and KV state.
 
@@ -1358,6 +1372,9 @@ class DistributedConfig:
             if (result.returncode or any(device not in discovered for device in self.devices)
                     or {discovered.get(device) for device in self.devices} != set(self.peers)):
                 raise FetchFailed("RPC device discovery failed or a configured device is unavailable; check peer processes, tunnels, and matching runtime builds")
+            cpu_devices = cpu_reporting_devices(devices_text, self.devices)
+            if cpu_devices:
+                raise FetchFailed(f"RPC device(s) {', '.join(cpu_devices)} report a CPU backend; this network is GPU-only, so start a GPU RPC server (CUDA, Vulkan or Metal) on that member")
             # RPC workers are listed too, but they are remote: a draft device must be local.
             local_devices = {name for name in re.findall(r"^\s*([A-Za-z]+[0-9]+):", devices_text, re.MULTILINE)
                              if not name.startswith("RPC")}
