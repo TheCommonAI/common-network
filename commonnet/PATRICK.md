@@ -71,6 +71,6 @@ Leave the window open. To stop: press Ctrl+C once (it stops the server and the t
 
 Send Miles the last 20 lines of the window and of `$HOME\block-server.log` (next to `member.json`).
 If it ends with "the tunnel did not answer /health", cloudflared started but your DNS is slow to learn the new
-name: just run the same command again (or set your DNS to 1.1.1.1).
+name: just run the same command again (the tools now fall back to 1.1.1.1 automatically when your DNS does not know the name; setting your DNS to 1.1.1.1 is a backup).
 Known risks: [UNVERIFIED] NF4 loading on CUDA; Windows Defender Firewall prompt (click Cancel/deny, only loopback is used);
 GPU out-of-memory (close games/browsers; check with `nvidia-smi`).

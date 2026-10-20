@@ -55,8 +55,9 @@ tokens, then diverges at a near-tie (both are fluent); teacher-forced (same cont
 48 of 48 positions, max logit difference 0.92 against logit std 4.0.
 
 DNS caveat: on this Mac (Tailscale DNS) a brand-new trycloudflare hostname did not resolve locally for minutes
-while 1.1.1.1 resolved it in about 12 s. If the coordinator or the member says it cannot reach the tunnel, wait a
-few minutes and retry, or set the Mac's DNS to 1.1.1.1. The tunnel itself was fine (verified with curl --resolve).
+while 1.1.1.1 resolved it in about 12 s. The tools now fall back to asking 1.1.1.1 (then 8.8.8.8) directly when the system
+resolver fails (commonnet/net/dns.py), so this should resolve in about 12 s on its own. Backup if it still says it cannot
+reach the tunnel: wait a few minutes and retry, or set the Mac's DNS to 1.1.1.1. The tunnel itself was fine (verified with curl --resolve).
 
 ### Qwen3-32B later
 64 layers; plan with `python3 -m commonnet.plan --mac-gib 11 --pc-gib 6.5 --ctx 2048` gives
