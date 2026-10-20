@@ -47,6 +47,7 @@ import hashlib
 import hmac
 import json
 import os
+import platform
 import re
 import secrets
 import socket
@@ -79,6 +80,10 @@ LINK_PATH = "/group/link"
 HEALTH_PATH = "/group/health"
 LOOPBACK_HOSTS = frozenset(("127.0.0.1", "localhost", "::1"))
 RELAY_HEALTH_CHECK_SECONDS = 120
+# A fresh quick tunnel's hostname can take minutes to resolve, and until it does a
+# health check fails just as it would for a dead tunnel. The tunnel is replaced only
+# once it has been unreachable for this long in a row, counted from its start.
+RELAY_TUNNEL_GRACE_SECONDS = 600
 
 # Frames: one kind byte, a 32-bit stream id and a 32-bit payload length.
 OPEN, DATA, CLOSE, PING, PONG = 1, 2, 3, 4, 5
@@ -997,9 +1002,9 @@ def run_relay(state_path: Path, *, port: int = 0, log=print, stop: threading.Eve
     """Serve the group on 127.0.0.1, point a tunnel at it, and run until `stop` is set.
 
     The tunnel URL is written to group.json while the relay runs, so `issue` can
-    name it, and is cleared on the way out. A tunnel that dies is restarted, which
-    gives it a new URL: tokens issued for the old one stop working, so they must be
-    issued again.
+    name it, and is cleared on the way out. A tunnel unreachable for the whole grace
+    period is restarted, which gives it a new URL: tokens issued for the old one stop
+    working, so they must be issued again.
     """
     import join  # for the tunnel health check, shared with the worker
     stop = stop or threading.Event()
@@ -1010,15 +1015,24 @@ def run_relay(state_path: Path, *, port: int = 0, log=print, stop: threading.Eve
     proc = None
     try:
         proc, url = open_tunnel(local_url, local_port)
+        healthy_at = time.monotonic()
         if not join.wait_for_tunnel(url, None, HEALTH_PATH):
             log("warning: the tunnel is not reachable yet; members may not connect until it is")
         _publish_tunnel(server, url, log)
         while not stop.wait(RELAY_HEALTH_CHECK_SECONDS):
-            if proc.poll() is not None or not join.tunnel_is_healthy(url, None, HEALTH_PATH):
-                log("the tunnel is no longer reachable; restarting it")
-                _stop_process(proc)
-                proc, url = open_tunnel(local_url, local_port)
-                _publish_tunnel(server, url, log)
+            if proc.poll() is None and join.tunnel_is_healthy(url, None, HEALTH_PATH):
+                healthy_at = time.monotonic()
+                continue
+            unreachable_for = time.monotonic() - healthy_at
+            if unreachable_for < RELAY_TUNNEL_GRACE_SECONDS:
+                log(f"the tunnel is not reachable yet ({unreachable_for:.0f}s); "
+                    f"it is replaced after {RELAY_TUNNEL_GRACE_SECONDS}s unreachable")
+                continue
+            log(f"the tunnel has been unreachable for {unreachable_for:.0f}s; restarting it")
+            _stop_process(proc)
+            proc, url = open_tunnel(local_url, local_port)
+            healthy_at = time.monotonic()
+            _publish_tunnel(server, url, log)
     finally:
         if proc is not None:
             _stop_process(proc)
@@ -1135,18 +1149,31 @@ def _stop_process(proc) -> None:
 GPU_DEVICE_PATTERN = re.compile(r"(?:CUDA|MTL|Vulkan|ROCm|HIP|SYCL|MUSA|CANN)[0-9]+")
 DEVICE_LINE_PATTERN = re.compile(r"^\s*([A-Za-z][A-Za-z0-9]*):\s", re.MULTILINE)
 RPC_DEVICE_LIST_TIMEOUT_SECONDS = 60
+LLAMA_SERVER_NAME = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
+
+
+def parse_device_listing(text: str) -> list[str]:
+    """The device names in a `--list-devices` listing, in the order it gives them. Pure."""
+    return DEVICE_LINE_PATTERN.findall(text)
 
 
 def list_rpc_devices(binary: Path) -> list[str]:
-    """The device names `ggml-rpc-server --list-devices` reports, in the order it reports them."""
+    """The devices this build reports, from `llama-server --list-devices` beside the RPC server.
+
+    ggml-rpc-server cannot list devices: it refuses --list-devices and its --help names
+    none. llama-server from the same archive lists the same local devices, and those
+    are the names ggml-rpc-server takes with -d.
+    """
     try:
-        result = subprocess.run([str(binary), "--list-devices"], stdin=subprocess.DEVNULL,
-                                capture_output=True, text=True, timeout=RPC_DEVICE_LIST_TIMEOUT_SECONDS)
+        result = subprocess.run([str(binary.with_name(LLAMA_SERVER_NAME)), "--list-devices"],
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                timeout=RPC_DEVICE_LIST_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired) as e:
-        raise GroupError(f"cannot ask the RPC server for its devices ({e})") from None
+        raise GroupError(f"cannot ask llama-server for the devices ({e})") from None
     if result.returncode != 0:
-        raise GroupError(f"the RPC server could not list its devices (exit code {result.returncode})")
-    return DEVICE_LINE_PATTERN.findall(result.stdout + result.stderr)
+        raise GroupError(f"llama-server beside the RPC server could not list its devices "
+                         f"(exit code {result.returncode})")
+    return parse_device_listing(result.stdout + result.stderr)
 
 
 def select_gpu_device(binary: Path, *, list_devices=list_rpc_devices) -> str:
