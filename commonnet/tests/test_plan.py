@@ -84,3 +84,19 @@ class PlanRules(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Qwen8BPlan(unittest.TestCase):
+    def test_8b_split_gives_both_machines_work_and_mac_the_larger_share(self):
+        from commonnet.plan import plan_qwen3_8b
+        plan = plan_qwen3_8b(11.0, 6.5, context_tokens=2048)
+        (_, _, a), (_, _, b) = [(n, s, e) for n, s, e in plan.route()]
+        self.assertEqual(plan.route(), [("mac", 0, 20), ("pc", 20, 36)])
+        self.assertGreater(a, 36 - a)
+        for asg in plan.assignments:
+            self.assertGreater(asg.headroom_bytes, 0)
+
+    def test_8b_pc_budget_too_small_for_its_share_still_plans(self):
+        from commonnet.plan import plan_qwen3_8b
+        plan = plan_qwen3_8b(11.0, 1.0, context_tokens=2048)
+        self.assertLess(plan.assignments[1].used_bytes, 1.0 * GiB)

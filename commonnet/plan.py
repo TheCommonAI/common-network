@@ -39,6 +39,20 @@ class PlanError(ValueError):
     """The members cannot host the model under their budgets, or a member is refused."""
 
 
+# Qwen3-8B architecture (config.json of both checkpoints): 36 layers, hidden 4096, 8 KV heads x 128.
+# Bytes read from the safetensors headers of
+#   mlx-community/Qwen3-8B-4bit    (4.62 GB, 1 shard)
+#   unsloth/Qwen3-8B-bnb-4bit      (6.09 GB, 1 shard; embed and lm_head are bf16, layers are NF4)
+QWEN3_8B_LAYERS = 36
+QWEN3_8B_KV_HEADS = 8
+QWEN3_8B_HEAD_DIM = 128
+MLX4_8B_LAYER_BYTES = 108_544_512  # one decoder layer, 4-bit affine MLX (group 64)
+NF4_8B_LAYER_BYTES = 99_556_473  # one decoder layer, NF4 double-quant, largest layer
+# mlx4 client: embed + lm_head at 4 bit (weight + scales + biases each) + final norm
+MLX4_8B_CLIENT_BYTES = 2 * (311_164_928 + 2 * 19_447_808) + 8_192
+FP16_8B_CLIENT_BYTES = 2 * 1_244_659_712 + 8_192
+
+
 def kv_bytes_per_token_per_layer(kv_heads: int, head_dim: int, dtype_bytes: int = 2) -> int:
     """Keys and values for one token in one layer, stored in fp16 by default."""
     return 2 * kv_heads * head_dim * dtype_bytes
@@ -106,12 +120,15 @@ def plan_split(
     *,
     kv_bytes_per_token_per_layer: int,
     context_tokens: int,
+    objective: str = "headroom",
 ) -> SplitPlan:
     """Choose the split point a. `first` serves [0, a) and `second` serves [a, num_layers).
 
     Raises PlanError if any member is refused, if there is no feasible split, or if the
     context length is not positive. The error message gives the layer capacities.
     """
+    if objective not in ("headroom", "balanced"):
+        raise PlanError(f"unknown objective {objective!r}")
     if num_layers < 2:
         raise PlanError("need at least two layers to split")
     if context_tokens <= 0:
@@ -127,6 +144,9 @@ def plan_split(
         if used1 > first.budget_bytes or used2 > second.budget_bytes:
             continue
         headroom = min(first.budget_bytes - used1, second.budget_bytes - used2)
+        if objective == "balanced":
+            # Same fraction of each budget used on both machines: both do real work.
+            headroom = -abs(used1 / first.budget_bytes - used2 / second.budget_bytes)
         if best is None or headroom > best[0]:
             best = (headroom, a, used1, used2)
 
@@ -182,6 +202,27 @@ def plan_qwen3_32b(
     )
 
 
+def plan_qwen3_8b(
+    mac_budget_gib: float = 11.0,
+    pc_budget_gib: float = 6.5,
+    *,
+    context_tokens: int = 2048,
+    client: str = "mlx4",
+    kv_dtype_bytes: int = 2,
+) -> SplitPlan:
+    """Plan the 8B split. Both machines fit the whole model, so the objective is 'balanced':
+    each machine uses the same fraction of its budget, which gives the Mac (client + larger
+    budget) the larger share while the PC still does real work."""
+    client_bytes = {"mlx4": MLX4_8B_CLIENT_BYTES, "fp16": FP16_8B_CLIENT_BYTES}.get(client)
+    if client_bytes is None:
+        raise PlanError(f"unknown client format {client!r}")
+    kv = kv_bytes_per_token_per_layer(QWEN3_8B_KV_HEADS, QWEN3_8B_HEAD_DIM, kv_dtype_bytes)
+    mac = Member("mac", "metal", int(mac_budget_gib * GiB), MLX4_8B_LAYER_BYTES, fixed_bytes=client_bytes)
+    pc = Member("pc", "cuda", int(pc_budget_gib * GiB), NF4_8B_LAYER_BYTES)
+    return plan_split(QWEN3_8B_LAYERS, mac, pc, kv_bytes_per_token_per_layer=kv,
+                      context_tokens=context_tokens, objective="balanced")
+
+
 def _format(plan: SplitPlan) -> str:
     lines = []
     for a in plan.assignments:
@@ -194,18 +235,20 @@ def _format(plan: SplitPlan) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Plan the Qwen3-32B split from memory budgets.")
+    p = argparse.ArgumentParser(description="Plan the Qwen3 split from memory budgets.")
+    p.add_argument("--model", choices=["8b", "32b"], default="32b")
     p.add_argument("--mac-gib", type=float, default=11.0)
     p.add_argument("--pc-gib", type=float, default=6.5)
     p.add_argument("--ctx", type=int, default=2048, help="context tokens the KV cache must hold")
     p.add_argument("--client", choices=["mlx4", "fp16"], default="mlx4")
     args = p.parse_args(argv)
     try:
-        plan = plan_qwen3_32b(args.mac_gib, args.pc_gib, context_tokens=args.ctx, client=args.client)
+        fn = plan_qwen3_8b if args.model == "8b" else plan_qwen3_32b
+        plan = fn(args.mac_gib, args.pc_gib, context_tokens=args.ctx, client=args.client)
     except PlanError as e:
         print(f"REFUSED: {e}")
         return 1
-    print(f"FITS: {QWEN3_32B_LAYERS} layers, context {plan.context_tokens}, client {args.client}")
+    print(f"FITS: {plan.num_layers} layers, context {plan.context_tokens}, client {args.client}")
     print(_format(plan))
     return 0
 

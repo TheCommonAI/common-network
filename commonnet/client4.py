@@ -40,6 +40,35 @@ class _MlxQuantized:
         mx.eval(self.layer.parameters())
         self.nbytes = sum(v.nbytes for _, v in __import__("mlx.utils", fromlist=["x"]).tree_flatten(self.layer.parameters()))
 
+    @classmethod
+    def from_prequantized(cls, weight_map: dict, name: str, kind: str, bits: int, group_size: int):
+        """Wrap an MLX-quantized embed/head already stored as name.weight/.scales/.biases (uint32 packed)."""
+        import mlx.core as mx
+        import mlx.nn as mnn
+        from mlx.utils import tree_flatten
+        files: dict = {}
+
+        def get(suffix):
+            path = weight_map[f"{name}.{suffix}"]
+            if path not in files:
+                files[path] = mx.load(path)
+            return files[path][f"{name}.{suffix}"]
+
+        w, scales, biases = get("weight"), get("scales"), get("biases")
+        self = cls.__new__(cls)
+        self.mx = mx
+        out_dim, packed = w.shape
+        in_dim = packed * 32 // bits
+        if kind == "embed":
+            layer = mnn.QuantizedEmbedding(out_dim, in_dim, group_size, bits)
+        else:
+            layer = mnn.QuantizedLinear(in_dim, out_dim, bias=False, group_size=group_size, bits=bits)
+        layer.weight, layer.scales, layer.biases = w, scales, biases
+        mx.eval(layer.parameters())
+        self.layer = layer
+        self.nbytes = sum(v.nbytes for _, v in tree_flatten(layer.parameters()))
+        return self
+
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         mx = self.mx
         if x.dtype in (torch.long, torch.int32, torch.int64):
@@ -74,10 +103,21 @@ class Client4(Client):
         self.fmt = fmt
         embed_name = "model.embed_tokens.weight"
         head_name = "lm_head.weight" if reader.has("lm_head.weight") else embed_name
-        t = reader.load([embed_name, "model.norm.weight", head_name], dtype=torch.float32)
         hidden = self.config.hidden_size
-        self.embed = _MlxQuantized(t[embed_name], "embed", bits, group_size)
-        self.head = _MlxQuantized(t[head_name], "linear", bits, group_size)
+        if reader.has(embed_name.replace(".weight", ".scales")):
+            # Pre-quantized MLX checkpoint (e.g. mlx-community/Qwen3-8B-4bit): the stored weight is
+            # packed uint32. Casting it to float32 would give garbage, so use the stored 4-bit tables.
+            q = getattr(self.config, "quantization", None) or getattr(self.config, "quantization_config", None) or {}
+            bits, group_size = q.get("bits", bits), q.get("group_size", group_size)
+            t = reader.load(["model.norm.weight"], dtype=torch.float32)
+            base = lambda n: n[: -len(".weight")]
+            self.embed = _MlxQuantized.from_prequantized(reader.weight_map, base(embed_name), "embed", bits, group_size)
+            self.head = _MlxQuantized.from_prequantized(reader.weight_map, base(head_name), "linear", bits, group_size)
+            reader.read_names += [embed_name, head_name]
+        else:
+            t = reader.load([embed_name, "model.norm.weight", head_name], dtype=torch.float32)
+            self.embed = _MlxQuantized(t[embed_name], "embed", bits, group_size)
+            self.head = _MlxQuantized(t[head_name], "linear", bits, group_size)
         self.norm = build_module(partial(Qwen3RMSNorm, hidden, eps=self.config.rms_norm_eps),
                                  {"weight": t["model.norm.weight"].to(torch.float16)})
         self.loaded_names = list(reader.read_names)
