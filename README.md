@@ -4,6 +4,12 @@
 
 **The Common Network Alpha — v0.1.13**
 
+The working tree also contains the **v0.2.0-dev distributed inference backend**:
+one target model split across configured RPC hosts with local speculative
+drafting. See the [setup guide and release gates](join/DISTRIBUTED.md).
+The first network target model is **Qwen3-32B**; existing Bonsai measurements
+remain development test results.
+
 A South Australian nonprofit building decentralised AI.
 Small models on participants' devices, routed and combined. No single company owns the gate.
 
