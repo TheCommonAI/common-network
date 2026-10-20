@@ -50,6 +50,7 @@ import importlib
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import stat
@@ -710,6 +711,34 @@ def llama_asset_name(build: str, system: str | None = None,
     return None
 
 
+def llama_asset_digest(build: str, asset: str) -> str | None:
+    """The sha256 GitHub records for one llama.cpp release asset, or None.
+
+    GitHub computes and stores a digest for every release asset, and this reads
+    it from the same release API that names the build. It is what the archive is
+    checked against: a runtime that cannot be checked is not installed. None means
+    the record is missing or the API could not be reached.
+    """
+    try:
+        release = json.loads(_read_text(f"https://api.github.com/repos/{LLAMA_REPO}/releases/tags/{build}"))
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+        return None
+    for entry in release.get("assets", []) if isinstance(release, dict) else []:
+        if isinstance(entry, dict) and entry.get("name") == asset:
+            digest = str(entry.get("digest") or "")
+            if digest.startswith("sha256:") and re.fullmatch(r"[0-9a-f]{64}", digest[7:]):
+                return digest[7:]
+    return None
+
+
+def _sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
 def resolve_llama_build(force: bool = False) -> str | None:
     """The current llama.cpp build number, from cache, API or a stale pin.
 
@@ -945,9 +974,17 @@ def ensure_llama_server() -> Path:
         asset = llama_asset_name(build, system, machine)
         archive = DOWNLOAD_CACHE / asset
         try:
+            # The archive is checked against GitHub's digest for it, on the
+            # download and on any copy already cached. No digest, no install:
+            # an unverified llama-server is the one thing this must never run.
+            digest = llama_asset_digest(build, asset)
+            if digest is None:
+                raise FetchFailed(f"no checksum for {asset} could be read from GitHub, so the download cannot be verified; try again when GitHub is reachable")
+            if archive.is_file() and _sha256_file(archive) != digest:
+                _unlink(archive)
             if not archive.is_file():
                 _download(RELEASE_DOWNLOAD.format(build=build, asset=asset), archive,
-                          what=f"the llama.cpp runtime ({build})")
+                          expected_sha=digest, what=f"the llama.cpp runtime ({build})")
             target = RUNTIME_DIR / build
             if _binary_in(target) is None:
                 _extract(archive, target)
@@ -968,6 +1005,24 @@ def ensure_llama_server() -> Path:
             _unlink(archive)
 
     raise FetchFailed("could not fetch a llama.cpp runtime. " + " · ".join(failures))
+
+
+RPC_SERVER_NAME = "ggml-rpc-server.exe" if platform.system() == "Windows" else "ggml-rpc-server"
+
+
+def ensure_rpc_server() -> Path:
+    """The `ggml-rpc-server` that ships beside the installed llama-server.
+
+    llama.cpp's release workflow builds with GGML_RPC=ON and packs the whole build
+    directory, so the RPC worker is in the same archive as llama-server. A group
+    member runs this binary; nothing else is fetched or built.
+    """
+    binary = ensure_llama_server()
+    for candidate in (binary.parent / RPC_SERVER_NAME, binary.parent / "build" / "bin" / RPC_SERVER_NAME):
+        if candidate.is_file():
+            return candidate
+    raise FetchFailed(f"the installed llama.cpp build has no {RPC_SERVER_NAME}; "
+                      f"it was built without RPC support. Delete {CURRENT_RUNTIME} and run again to fetch the current build")
 
 
 def llama_server_argv(binary, gguf, port: int, *,

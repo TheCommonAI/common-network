@@ -718,7 +718,7 @@ from unittest.mock import patch
 _home = Path(_tempfile.mkdtemp())
 _bundled = Path(_tempfile.mkdtemp()) / "join.py"
 _bundled.write_text("# bundled join\n")
-for _name in ("worker.py", "runtime.py"):
+for _name in ("worker.py", "runtime.py", "group.py"):
     (_bundled.parent / _name).write_text(f"# bundled {_name}\n")
 _ns = argparse.Namespace(no_update=True, auto=False, model=None, region=None, rest=[])
 _run = []
@@ -731,7 +731,7 @@ check("with --no-update, no join script is fetched from the network", _run != []
 check("and the bundled join script is installed on a first run",
       (_home / "join.py").read_text(), "# bundled join\n")
 check("and so are the modules it imports",
-      [(_home / n).exists() for n in ("worker.py", "runtime.py")], [True, True])
+      [(_home / n).exists() for n in ("worker.py", "runtime.py", "group.py")], [True, True, True])
 
 
 print()
