@@ -1,5 +1,7 @@
 """Offline guards for v0.2 configuration, placement, and CLI compatibility."""
 import argparse
+from contextlib import contextmanager
+import hashlib
 import importlib.util
 import json
 import io
@@ -10,6 +12,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
+import zipfile
 
 import runtime
 import join
@@ -450,6 +453,204 @@ class RpcServerTests(unittest.TestCase):
         with patch.object(runtime, "ensure_llama_server", return_value=self.dir / "llama-server"):
             with self.assertRaisesRegex(runtime.FetchFailed, "without RPC support"):
                 runtime.ensure_rpc_server()
+
+
+def zip_of(names):
+    """A small zip archive holding `names`, standing in for a release archive."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name in names:
+            zf.writestr(name, b"bytes of " + name.encode())
+    return buf.getvalue()
+
+
+class NvidiaDetectionTests(unittest.TestCase):
+    """nvidia-smi decides whether a Windows machine gets the CUDA build, and which line."""
+
+    def detect(self, listing, report=None, missing=False):
+        def fake_run(args, **kwargs):
+            if missing:
+                raise FileNotFoundError("nvidia-smi")
+            rc, out = listing if args == ["nvidia-smi", "-L"] else report
+            return subprocess.CompletedProcess(args, rc, stdout=out, stderr="")
+
+        with patch.object(runtime.subprocess, "run", side_effect=fake_run):
+            return runtime.detect_nvidia_gpu()
+
+    def test_no_nvidia_smi_means_no_gpu(self):
+        self.assertIsNone(self.detect(None, missing=True))
+
+    def test_nonzero_listing_or_no_device_line_means_no_gpu(self):
+        self.assertIsNone(self.detect((9, ""), (0, "CUDA Version: 13.2")))
+        self.assertIsNone(self.detect((0, "No devices were found\n"), (0, "CUDA Version: 13.2")))
+
+    def test_device_line_with_driver_cuda_13_is_read(self):
+        gpu = self.detect((0, "GPU 0: NVIDIA GeForce RTX 4090 (UUID: GPU-x)\n"),
+                          (0, "| NVIDIA-SMI 575.00  Driver Version: 575.00  CUDA Version: 13.2 |"))
+        self.assertEqual(gpu, runtime.NvidiaGpu(driver_cuda=(13, 2)))
+
+    def test_device_line_with_driver_cuda_12_is_read(self):
+        gpu = self.detect((0, "GPU 0: NVIDIA A10 (UUID: GPU-x)\n"),
+                          (0, "| Driver Version: 550.90  CUDA Version: 12.4 |"))
+        self.assertEqual(gpu, runtime.NvidiaGpu(driver_cuda=(12, 4)))
+
+    def test_unreadable_version_is_a_gpu_with_no_version(self):
+        self.assertEqual(self.detect((0, "GPU 0: x\n"), (0, "no version in this report")),
+                         runtime.NvidiaGpu(driver_cuda=None))
+        self.assertEqual(self.detect((0, "GPU 0: x\n"), (9, "")), runtime.NvidiaGpu(driver_cuda=None))
+
+
+class WindowsCudaSelectionTests(unittest.TestCase):
+    def test_newest_line_the_driver_supports_is_chosen(self):
+        cases = [((13, 9), "13.4"), ((13, 4), "13.4"), ((13, 3), "12.4"), ((13, 0), "12.4"),
+                 ((12, 8), "12.4"), ((12, 4), "12.4"), (None, "12.4")]
+        for driver, line in cases:
+            with self.subTest(driver=driver):
+                self.assertEqual(runtime.windows_cuda_line(runtime.NvidiaGpu(driver_cuda=driver)), line)
+
+    def test_driver_older_than_every_line_is_refused_not_given_the_cpu_build(self):
+        with self.assertRaisesRegex(runtime.FetchFailed, "older than the 12.4 build"):
+            runtime.windows_cuda_line(runtime.NvidiaGpu(driver_cuda=(11, 8)))
+
+    def test_cuda_archive_pair_names(self):
+        self.assertEqual(runtime.windows_cuda_assets("b1", "13.4"),
+                         ("llama-b1-bin-win-cuda-13.4-x64.zip", "cudart-llama-bin-win-cuda-13.4-x64.zip"))
+
+    def test_windows_cpu_asset_is_unchanged(self):
+        self.assertEqual(runtime.llama_asset_name("b1", "Windows", "AMD64"), "llama-b1-bin-win-cpu-x64.zip")
+
+
+class WindowsCudaInstallTests(unittest.TestCase):
+    """Windows with an NVIDIA GPU installs the CUDA pair, verified, into one directory.
+
+    Nothing here touches the network: the GPU probe, the platform, the digests and
+    the downloads are all stubbed, and `_runnable` is stubbed because the test
+    archives hold no real binaries.
+    """
+    BUILD = "b1"
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        for name, value in (("DOWNLOAD_CACHE", self.dir / "cache"), ("RUNTIME_DIR", self.dir / "runtime"),
+                            ("CURRENT_RUNTIME", self.dir / "runtime" / "current"),
+                            ("RPC_SERVER_NAME", "ggml-rpc-server.exe")):
+            patcher = patch.object(runtime, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        cuda = zip_of(["llama-server.exe", "ggml-rpc-server.exe", "ggml-cuda.dll", "ggml-rpc.dll"])
+        cudart = zip_of(["cudart64_13.dll", "cublas64_13.dll"])
+        cpu = zip_of(["llama-server.exe", "ggml-rpc-server.exe"])
+        self.served = {runtime.llama_asset_name(self.BUILD, "Windows", "AMD64"): cpu}
+        for line in ("13.4", "12.4"):
+            cuda_name, cudart_name = runtime.windows_cuda_assets(self.BUILD, line)
+            self.served[cuda_name] = cuda
+            self.served[cudart_name] = cudart
+        self.digests = {name: hashlib.sha256(data).hexdigest() for name, data in self.served.items()}
+
+    @contextmanager
+    def windows(self, gpu):
+        """Windows, with `gpu` as the probe result. Yields the list of downloads made."""
+        downloads = []
+
+        def fake_download(url, dest, expected_sha=None, what=None):
+            name = url.rsplit("/", 1)[1]
+            downloads.append((name, expected_sha))
+            if name not in self.served:
+                raise runtime.FetchFailed(f"{name} is not served")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(self.served[name])
+
+        with patch.object(runtime.platform, "system", return_value="Windows"), \
+                patch.object(runtime.platform, "machine", return_value="AMD64"), \
+                patch.object(runtime, "detect_nvidia_gpu", return_value=gpu), \
+                patch.object(runtime, "resolve_llama_build", return_value=self.BUILD), \
+                patch.object(runtime, "llama_asset_digest", side_effect=lambda build, asset: self.digests.get(asset)), \
+                patch.object(runtime, "_download", side_effect=fake_download), \
+                patch.object(runtime, "_runnable", return_value=True):
+            yield downloads
+
+    def test_nvidia_13_4_driver_installs_the_13_4_pair_into_one_directory(self):
+        with self.windows(runtime.NvidiaGpu(driver_cuda=(13, 4))) as downloads:
+            binary = runtime.ensure_llama_server()
+            rpc = runtime.ensure_rpc_server()
+        names = [name for name, _ in downloads]
+        self.assertEqual(names, list(runtime.windows_cuda_assets(self.BUILD, "13.4")))
+        self.assertEqual([sha for _, sha in downloads], [self.digests[n] for n in names])
+        self.assertEqual(binary.parent, self.dir / "runtime" / "b1-cuda-13.4")
+        self.assertEqual(rpc, binary.parent / "ggml-rpc-server.exe")
+        self.assertTrue((binary.parent / "ggml-cuda.dll").is_file())
+        self.assertTrue((binary.parent / "cudart64_13.dll").is_file())
+        self.assertEqual(runtime.CURRENT_RUNTIME.read_text(), "b1-cuda-13.4")
+
+    def test_driver_below_13_4_gets_the_12_4_pair(self):
+        for driver in ((12, 8), (13, 0), (13, 3)):
+            with self.subTest(driver=driver):
+                with self.windows(runtime.NvidiaGpu(driver_cuda=driver)) as downloads:
+                    binary = runtime.ensure_llama_server()
+                self.assertEqual([n for n, _ in downloads], list(runtime.windows_cuda_assets(self.BUILD, "12.4")))
+                self.assertEqual(binary.parent.name, "b1-cuda-12.4")
+                self.assertEqual(runtime.CURRENT_RUNTIME.read_text(), "b1-cuda-12.4")
+                # Fresh state for the next driver: no cached archive, no install.
+                shutil.rmtree(self.dir / "cache", ignore_errors=True)
+                shutil.rmtree(self.dir / "runtime", ignore_errors=True)
+
+    def test_unreadable_driver_version_gets_the_12_4_pair(self):
+        with self.windows(runtime.NvidiaGpu(driver_cuda=None)) as downloads:
+            binary = runtime.ensure_llama_server()
+        self.assertEqual([n for n, _ in downloads], list(runtime.windows_cuda_assets(self.BUILD, "12.4")))
+        self.assertEqual(binary.parent.name, "b1-cuda-12.4")
+
+    def test_no_nvidia_gpu_keeps_the_cpu_build(self):
+        with self.windows(None) as downloads:
+            binary = runtime.ensure_llama_server()
+            rpc = runtime.ensure_rpc_server()
+        self.assertEqual([n for n, _ in downloads], ["llama-b1-bin-win-cpu-x64.zip"])
+        self.assertEqual(binary.parent.name, "b1")
+        self.assertEqual(rpc, binary.parent / "ggml-rpc-server.exe")
+        self.assertEqual(runtime.CURRENT_RUNTIME.read_text(), "b1")
+
+    def test_cpu_install_is_replaced_when_a_gpu_appears(self):
+        cpu_dir = self.dir / "runtime" / "b1"
+        cpu_dir.mkdir(parents=True)
+        (cpu_dir / "llama-server.exe").write_text("")
+        runtime.CURRENT_RUNTIME.parent.mkdir(parents=True, exist_ok=True)
+        runtime.CURRENT_RUNTIME.write_text("b1")
+        with self.windows(runtime.NvidiaGpu(driver_cuda=(13, 4))) as downloads:
+            binary = runtime.ensure_llama_server()
+        self.assertEqual(binary.parent.name, "b1-cuda-13.4")
+        self.assertNotIn("win-cpu", " ".join(n for n, _ in downloads))
+
+    def test_installed_cpu_build_is_kept_when_there_is_no_gpu(self):
+        cpu_dir = self.dir / "runtime" / "b1"
+        cpu_dir.mkdir(parents=True)
+        (cpu_dir / "llama-server.exe").write_text("")
+        runtime.CURRENT_RUNTIME.parent.mkdir(parents=True, exist_ok=True)
+        runtime.CURRENT_RUNTIME.write_text("b1")
+        with self.windows(None) as downloads:
+            binary = runtime.ensure_llama_server()
+        self.assertEqual(binary, cpu_dir / "llama-server.exe")
+        self.assertEqual(downloads, [])
+
+    def test_cuda_download_failure_never_falls_back_to_the_cpu_build(self):
+        del self.served[runtime.windows_cuda_assets(self.BUILD, "13.4")[0]]
+        with self.windows(runtime.NvidiaGpu(driver_cuda=(13, 4))) as downloads:
+            with self.assertRaisesRegex(runtime.FetchFailed, "cuda"):
+                runtime.ensure_llama_server()
+        self.assertNotIn("win-cpu", " ".join(n for n, _ in downloads))
+
+    def test_cuda_install_without_its_gpu_backend_is_refused(self):
+        install = self.dir / "runtime" / "b1-cuda-13.4"
+        install.mkdir(parents=True)
+        (install / "llama-server.exe").write_text("")
+        (install / "ggml-rpc-server.exe").write_text("")
+        runtime.CURRENT_RUNTIME.parent.mkdir(parents=True, exist_ok=True)
+        runtime.CURRENT_RUNTIME.write_text("b1-cuda-13.4")
+        with self.windows(runtime.NvidiaGpu(driver_cuda=(13, 4))) as downloads:
+            with self.assertRaisesRegex(runtime.FetchFailed, "would run on the CPU"):
+                runtime.ensure_rpc_server()
+        self.assertEqual(downloads, [])
 
 
 if __name__ == "__main__":
