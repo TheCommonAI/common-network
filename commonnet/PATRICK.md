@@ -19,7 +19,7 @@ expect to send Miles the error text if it fails.
 
 ```powershell
 cd $HOME
-git clone -b feat/pedal-integration https://github.com/TheCommonAI/common-network.git
+git clone https://github.com/TheCommonAI/common-network.git
 cd common-network
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
