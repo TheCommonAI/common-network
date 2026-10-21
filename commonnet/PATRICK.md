@@ -36,15 +36,15 @@ rerun the torch install with `--force-reinstall`. [cu126 wheel index and `torch<
 checked on paper only; if cu126 fails use cu128 instead.]
 If the git clone asks for a login, the repo is private: tell Miles to add you.
 
-## 2. Download the model (6.1 GB, one file)
+## 2. The model downloads itself (about 1.6 GB, only your layers)
 
-```powershell
-huggingface-cli download unsloth/Qwen3-8B-bnb-4bit --local-dir $HOME\models\Qwen3-8B-bnb-4bit
-```
-(If `huggingface-cli` is not found, use `hf download unsloth/Qwen3-8B-bnb-4bit --local-dir $HOME\models\Qwen3-8B-bnb-4bit`.)
-You need the whole thing: the weights are a single `model.safetensors` file, so there is no way to fetch only your layers.
-Your member reads only layers 20-35 from it and ignores the embedding and head.
-If the download stalls, press Ctrl+C and rerun the same command; it resumes.
+You no longer download the 6.1 GB file by hand. Starting your member (step 4) fetches only layers 20-35 straight
+from Hugging Face (about 1.6 GB; the first run takes a few minutes and prints `MB of MB` progress). It resumes
+if interrupted: just rerun the same command. Files land in `%USERPROFILE%\.common-network\commonnet\models`
+(set `COMMONNET_CACHE` to change). If the repo ever needs a login, set `$env:HF_TOKEN` first (never paste it anywhere).
+
+Backup (manual, 6.1 GB): `huggingface-cli download unsloth/Qwen3-8B-bnb-4bit --local-dir $HOME\models\Qwen3-8B-bnb-4bit`
+(or `hf download ...`), then use `--checkpoint $HOME\models\Qwen3-8B-bnb-4bit` in step 4 instead of `--repo`.
 
 ## 3. Get the token from Miles
 
@@ -57,9 +57,9 @@ Save it as `$HOME\member.token`. Do not paste it anywhere, and do not put it on 
 ```powershell
 cd $HOME\common-network
 .\.venv\Scripts\Activate.ps1
-python -m commonnet.member --layers 20 36 --backend nf4 --checkpoint $HOME\models\Qwen3-8B-bnb-4bit --token-file $HOME\member.token --out $HOME\member.json
+python -m commonnet.member --repo unsloth/Qwen3-8B-bnb-4bit --layers 20 36 --backend nf4 --token-file $HOME\member.token --out $HOME\member.json
 ```
-Model load takes 1-2 minutes. When it works you see `block server on http://127.0.0.1:...`, then
+The first run downloads your layers, then the model load takes 1-2 minutes. When it works you see `block server on http://127.0.0.1:...`, then
 `tunnel URL: https://....trycloudflare.com`, then `published to ...member.json`.
 
 **Send Miles the tunnel URL (the https://...trycloudflare.com line) and nothing else.** Not the token.
