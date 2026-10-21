@@ -24,12 +24,25 @@ from commonnet.weights import CheckpointReader, build_module
 def layer_classes(arch: str):
     """(decoder layer class, rotary class) for an architecture name."""
     if arch == "qwen3_5":
+        import transformers
+        if not transformers.__version__.startswith("5.8."):
+            raise RuntimeError(
+                f"Qwen3.6 support is tested with transformers 5.8.x, found {transformers.__version__}. "
+                'Run: pip install "transformers==5.8.0"')
         from transformers.models.qwen3_5.modeling_qwen3_5 import (
             Qwen3_5DecoderLayer,
             Qwen3_5TextRotaryEmbedding,
         )
         return Qwen3_5DecoderLayer, Qwen3_5TextRotaryEmbedding
     return Qwen3DecoderLayer, Qwen3RotaryEmbedding
+
+
+def build_rotary(rotary_cls, config, device):
+    """Build a rotary embedding. Newer transformers releases (5.20) dropped the `device` argument."""
+    try:
+        return rotary_cls(config, device=device)
+    except TypeError:
+        return rotary_cls(config).to(device)
 
 
 class _LinState:
@@ -112,7 +125,7 @@ class BlockRange:
         self.num_local = self.end - self.start
         self.arch = reader.arch
         layer_cls, rotary_cls = layer_classes(self.arch)
-        self.rotary_emb = rotary_cls(config, device=self.device)
+        self.rotary_emb = build_rotary(rotary_cls, config, self.device)
         self.layer_types = list(layer_types) if layer_types else ["full_attention"] * n
 
         # Each block loads only its own layers. The tensor names come from the
