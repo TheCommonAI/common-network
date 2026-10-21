@@ -208,3 +208,61 @@ class MlxBlockRange:
     def memory_bytes(self) -> dict[str, int]:
         """MLX's own accounting: active (live) and peak memory in bytes."""
         return {"active": mx.get_active_memory(), "peak": mx.get_peak_memory()}
+
+
+class OnWorkerThread:
+    """Runs one MlxBlockRange, built and called, on a single dedicated thread.
+
+    MLX streams are per-thread: weights, KV cache and linear-attention state made
+    on one thread cannot be used from another. The HTTP server handles each request
+    on a new thread, so every call is handed to this one worker.
+    """
+
+    def __init__(self, factory, *args, **kwargs):
+        from concurrent.futures import ThreadPoolExecutor
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-worker")
+        try:
+            self._block = self._pool.submit(factory, *args, **kwargs).result()
+        except BaseException:
+            self._pool.shutdown(wait=True)
+            raise
+
+    def _run(self, name, *args):
+        return self._pool.submit(getattr(self._block, name), *args).result()
+
+    @property
+    def layers(self):
+        return getattr(self._block, "layers", (self._block.start, self._block.end))
+
+    @property
+    def start(self):
+        return self._block.start
+
+    @property
+    def end(self):
+        return self._block.end
+
+    @property
+    def device(self):
+        return getattr(self._block, "device", "metal")
+
+    def open(self, session_id):
+        return self._run("open", session_id) if hasattr(self._block, "open") else None
+
+    def close(self, session_id):
+        return self._run("close", session_id)
+
+    def forward(self, session_id, hidden_states, start_pos):
+        return self._run("forward", session_id, hidden_states, start_pos)
+
+    def session_length(self, session_id):
+        return self._run("session_length", session_id)
+
+    def open_sessions(self):
+        return self._run("open_sessions")
+
+    def memory_bytes(self):
+        return self._run("memory_bytes")
+
+    def shutdown(self):
+        self._pool.shutdown(wait=True)

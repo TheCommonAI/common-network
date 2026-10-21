@@ -68,10 +68,8 @@ class MlxServedAcrossThreads(unittest.TestCase):
     @staticmethod
     def _close(srv, block):
         srv.stop()
-        inner = getattr(block, "inner", None)
-        closer = getattr(inner, "shutdown", None)
-        if closer:
-            closer()
+        block.shutdown()
+        assert not [t for t in threading.enumerate() if t.name.startswith("mlx-worker") and t.is_alive()]
 
     def test_qwen3_prefill_decode_second_session(self):
         ckpt = os.path.join(self.tmp, "q3")
