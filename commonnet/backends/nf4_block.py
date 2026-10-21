@@ -7,7 +7,9 @@ Windows RTX 4060 before anyone relies on it.
 It is a BlockRange subclass, so forward, close, session_length and open_sessions come
 from commonnet.block. Only __post_init__ differs: each Linear is a bitsandbytes
 Linear4bit loaded from a pre-quantized NF4 checkpoint (unsloth/Qwen3-32B-bnb-4bit
-layout: weight, weight.absmax, weight.quant_map, weight.nested_absmax,
+layout (also the community Qwen3.6-27B bnb repos, tensors under model.language_model.layers.N with
+linear_attn.{in_proj_qkv,in_proj_z,in_proj_a,in_proj_b,out_proj} and self_attn.{q,k,v,o}_proj all NF4;
+conv1d, A_log, dt_bias, norms stay bf16): weight, weight.absmax, weight.quant_map, weight.nested_absmax,
 weight.nested_quant_map, weight.quant_state.bitsandbytes__nf4).
 """
 
@@ -22,9 +24,8 @@ from functools import partial
 import torch
 from safetensors import safe_open
 from torch import nn
-from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer, Qwen3RotaryEmbedding
 
-from commonnet.block import BlockRange
+from commonnet.block import BlockRange, layer_classes
 from commonnet.weights import CheckpointReader, build_module
 
 NF4_SUFFIXES = (
@@ -74,20 +75,25 @@ class Nf4BlockRange(BlockRange):
 
         self.device = device
         self.num_local = self.end - self.start
-        self.rotary_emb = Qwen3RotaryEmbedding(config, device=device)
+        self.arch = reader.arch
+        layer_cls, rotary_cls = layer_classes(self.arch)
+        self.rotary_emb = rotary_cls(config, device=device)
+        self.layer_types = list(layer_types) if layer_types else ["full_attention"] * n
 
         layers = []
         for local in range(self.num_local):
             glob = self.start + local
             with torch.device("meta"):
-                layer = Qwen3DecoderLayer(config, layer_idx=glob)
-            prefix = f"model.layers.{glob}."
+                layer = layer_cls(config, layer_idx=glob)
+            prefix = f"{reader.prefix}layers.{glob}."
+            quantized = set()
 
             # Replace every Linear with a Linear4bit loaded from its NF4 tensors.
             for name, mod in list(layer.named_modules()):
                 if not isinstance(mod, nn.Linear):
                     continue
                 wname = prefix + name + ".weight"
+                quantized.add(name + ".weight")
                 stats = {s: _raw_tensor(reader, f"{wname}.{s}", device) for s in NF4_SUFFIXES}
                 packed = _raw_tensor(reader, wname, device)
                 new = bnb.nn.Linear4bit(
@@ -106,12 +112,16 @@ class Nf4BlockRange(BlockRange):
                 setattr(parent, child, new)
 
             # Norms are not quantized. Load them in the compute dtype.
-            norms = {}
-            for key in ("input_layernorm.weight", "post_attention_layernorm.weight",
-                        "self_attn.q_norm.weight", "self_attn.k_norm.weight"):
-                norms[key] = _raw_tensor(reader, prefix + key, device).to(self.dtype)
-            layer.load_state_dict(norms, strict=False, assign=True)
-            layer.self_attn.layer_idx = local
+            # Everything that is not a quantized Linear (norms, conv1d, A_log, dt_bias) is a plain tensor.
+            plain = {}
+            for key in layer.state_dict().keys():
+                if key in quantized:
+                    continue
+                plain[key] = _raw_tensor(reader, prefix + key, device).to(self.dtype)
+            layer.load_state_dict(plain, strict=False, assign=True)
+            for mod in (getattr(layer, "self_attn", None), getattr(layer, "linear_attn", None)):
+                if mod is not None:
+                    mod.layer_idx = local
             layer.to(device)
             layers.append(layer)
 

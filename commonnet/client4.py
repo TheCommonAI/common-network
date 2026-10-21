@@ -120,7 +120,7 @@ class Client4(Client):
             t = reader.load([embed_name, norm_name, head_name], dtype=torch.float32)
             self.embed = _MlxQuantized(t[embed_name], "embed", bits, group_size)
             self.head = _MlxQuantized(t[head_name], "linear", bits, group_size)
-        self.norm = build_module(partial(make_norm, reader.arch, hidden, self.config.rms_norm_eps),
+        self.norm = build_module(partial(make_norm, reader.arch, hidden, self.config.rms_norm_eps, reader.prefix),
                                  {"weight": t[norm_name].to(torch.float16)})
         self.loaded_names = list(reader.read_names)
         self.client_bytes = self.embed.nbytes + self.head.nbytes + self.norm.weight.numel() * 2

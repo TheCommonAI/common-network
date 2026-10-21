@@ -20,8 +20,8 @@ import mlx.nn as nn
 import numpy as np
 import torch
 from mlx.utils import tree_flatten
-from mlx_lm.models.base import create_causal_mask
-from mlx_lm.models.cache import KVCache
+from mlx_lm.models.base import create_attention_mask, create_causal_mask, create_ssm_mask
+from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.qwen3 import ModelArgs, TransformerBlock
 
 from commonnet.wire import decode_fp16, encode_fp16
@@ -42,9 +42,23 @@ def _weight_files(checkpoint_dir: str) -> dict[str, str]:
     raise FileNotFoundError(f"no safetensors checkpoint in {checkpoint_dir}")
 
 
+def _sanitize_qwen35(pairs, unsanitized):
+    """HF qwen3_5 floats -> mlx-lm layout: conv1d (C,1,K) -> (C,K,1); RMSNorm weights get +1.
+    A checkpoint already converted for MLX (conv1d last dim 1) is left alone."""
+    out = []
+    for k, v in pairs:
+        if "conv1d.weight" in k and v.shape[-1] != 1:
+            v = v.moveaxis(2, 1)
+        if unsanitized and v.ndim == 1 and k.endswith(("input_layernorm.weight", "post_attention_layernorm.weight",
+                                                       "q_norm.weight", "k_norm.weight")):
+            v = v + 1.0
+        out.append((k, v))
+    return out
+
+
 @dataclass
 class _Session:
-    caches: list[KVCache]
+    caches: list
     length: int = 0
 
 
@@ -64,6 +78,8 @@ class MlxBlockRange:
             raise RuntimeError("MLX block needs the Metal GPU; none is available")
         with open(os.path.join(self.checkpoint_dir, "config.json")) as f:
             cfg = json.load(f)
+        wrapper = cfg
+        cfg = cfg.get("text_config", cfg)  # qwen3_5 nests the decoder config
         n = cfg["num_hidden_layers"]
         if not (0 <= self.start < self.end <= n):
             raise ValueError(f"bad layer range [{self.start}, {self.end}) for {n} layers")
@@ -72,12 +88,22 @@ class MlxBlockRange:
             raise NotImplementedError("sliding-window attention layers are not supported")
         self.config = cfg
         self.hidden_size = cfg["hidden_size"]
-        args = ModelArgs.from_dict(cfg)
-
         files = _weight_files(self.checkpoint_dir)
+        self.qwen35 = str(wrapper.get("model_type", "")).startswith("qwen3_5")
+        if self.qwen35:
+            from mlx_lm.models.qwen3_5 import DecoderLayer, TextModelArgs
+            args = TextModelArgs.from_dict(cfg)
+            self.layer_is_linear = [(i + 1) % args.full_attention_interval != 0 for i in range(n)]
+            lp = next((p for p in ("model.language_model.", "language_model.model.")
+                       if any(k.startswith(p) for k in files)), "model.")
+            make_block = lambda glob: DecoderLayer(args, glob)
+        else:
+            args = ModelArgs.from_dict(cfg)
+            lp = "model."
+            make_block = lambda glob: TransformerBlock(args)
         # A checkpoint is pre-quantized if it stores .scales next to the layer weights.
-        prequantized = f"model.layers.{self.start}.self_attn.q_proj.scales" in files
-        qcfg = cfg.get("quantization") or {}
+        prequantized = f"{lp}layers.{self.start}.mlp.up_proj.scales" in files
+        qcfg = wrapper.get("quantization") or cfg.get("quantization") or {}
         if prequantized:
             group_size, bits = qcfg["group_size"], qcfg["bits"]
         else:
@@ -86,6 +112,12 @@ class MlxBlockRange:
             raise ValueError("bits=None is only for float checkpoints")
 
         cache_files: dict[str, dict] = {}
+        hf_layout = False
+        if self.qwen35 and not prequantized:
+            # HF layout has conv1d (C, 1, K) and (1 + w) norms; MLX conversions have conv1d (C, K, 1).
+            first_lin = self.layer_is_linear.index(True)
+            hf_layout = mx.load(files[f"{lp}layers.{first_lin}.linear_attn.conv1d.weight"])[
+                f"{lp}layers.{first_lin}.linear_attn.conv1d.weight"].shape[-1] != 1
 
         def tensor(name: str) -> mx.array:
             path = files[name]
@@ -93,11 +125,11 @@ class MlxBlockRange:
                 cache_files[path] = mx.load(path)
             return cache_files[path][name]
 
-        self.layers: list[TransformerBlock] = []
+        self.layers: list = []
         self.loaded_names: list[str] = []
         for glob in range(self.start, self.end):
-            blk = TransformerBlock(args)
-            prefix = f"model.layers.{glob}."
+            blk = make_block(glob)
+            prefix = f"{lp}layers.{glob}."
             if prequantized:
                 nn.quantize(blk, group_size=group_size, bits=bits)
                 keys = [k for k, _ in tree_flatten(blk.parameters())]
@@ -106,6 +138,8 @@ class MlxBlockRange:
             else:
                 keys = [k for k, _ in tree_flatten(blk.parameters())]
                 pairs = [(k, tensor(prefix + k)) for k in keys]
+                if self.qwen35:
+                    pairs = _sanitize_qwen35(pairs, hf_layout)
                 blk.load_weights(pairs, strict=True)
                 if bits is not None:
                     nn.quantize(blk, group_size=group_size, bits=bits)
@@ -124,7 +158,12 @@ class MlxBlockRange:
         q_len = shape[1]
 
         if start_pos == 0:
-            sess = _Session(caches=[KVCache() for _ in range(self.num_local)])
+            if self.qwen35:
+                caches = [ArraysCache(size=2) if self.layer_is_linear[self.start + i] else KVCache()
+                          for i in range(self.num_local)]
+            else:
+                caches = [KVCache() for _ in range(self.num_local)]
+            sess = _Session(caches=caches)
             self._sessions[session_id] = sess
         else:
             sess = self._sessions.get(session_id)
@@ -140,8 +179,17 @@ class MlxBlockRange:
         else:
             mask = create_causal_mask(q_len, start_pos)
 
-        for blk, cache in zip(self.layers, sess.caches):
-            x = blk(x, mask, cache)
+        if self.qwen35:
+            # one mask per kind: full attention uses a causal mask, linear attention a (usually None) ssm mask
+            lin = [i for i in range(self.num_local) if self.layer_is_linear[self.start + i]]
+            full = [i for i in range(self.num_local) if not self.layer_is_linear[self.start + i]]
+            fa_mask = create_attention_mask(x, sess.caches[full[0]]) if full else None
+            ssm_mask = create_ssm_mask(x, sess.caches[lin[0]]) if lin else None
+            for i, (blk, cache) in enumerate(zip(self.layers, sess.caches)):
+                x = blk(x, ssm_mask if blk.is_linear else fa_mask, cache)
+        else:
+            for blk, cache in zip(self.layers, sess.caches):
+                x = blk(x, mask, cache)
         sess.length += q_len
         out = np.array(x.astype(mx.float16))
         out_bytes, out_shape = out.tobytes(), out.shape
