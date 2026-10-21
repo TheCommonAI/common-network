@@ -32,6 +32,11 @@ class ServedBlock:
     def close(self, session_id: str) -> None:
         self.inner.close(session_id)
 
+    def shutdown(self) -> None:
+        stop = getattr(self.inner, "shutdown", None)
+        if stop:
+            stop()
+
     def forward(self, session_id: str, hidden, start_pos: int):
         out = self.inner.forward(session_id, from_wire(hidden), start_pos)
         wire = to_wire(out)
@@ -53,8 +58,10 @@ def build_block(start: int, end: int, backend: str | None = None, checkpoint: st
         inner = BlockRange(checkpoint_dir=checkpoint, start=start, end=end, device=device, dtype=dtype)
         return ServedBlock(inner, start, end, device)
     if backend == "mlx":
-        from commonnet.backends.mlx_block import MlxBlockRange
-        return ServedBlock(MlxBlockRange(checkpoint_dir=checkpoint, start=start, end=end), start, end, "metal")
+        from commonnet.backends.mlx_block import MlxBlockRange, OnWorkerThread
+        # MLX streams are per-thread and the server runs each request on a new thread.
+        inner = OnWorkerThread(MlxBlockRange, checkpoint_dir=checkpoint, start=start, end=end)
+        return ServedBlock(inner, start, end, "metal")
     from commonnet.backends.nf4_block import Nf4BlockRange  # refuses without CUDA
     return ServedBlock(Nf4BlockRange(checkpoint_dir=checkpoint, start=start, end=end), start, end, "cuda")
 

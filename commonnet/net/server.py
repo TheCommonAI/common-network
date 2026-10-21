@@ -382,6 +382,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     finally:
         server.stop()
+        getattr(block, "shutdown", lambda: None)()
     return 0
 
 
