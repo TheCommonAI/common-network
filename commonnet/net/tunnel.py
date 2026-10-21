@@ -9,9 +9,11 @@ In order:
 2. Waits for the server's /health to answer.
 3. Starts a Cloudflare quick tunnel to it with join.start_tunnel, the call the
    worker and the group relay make. It waits for the tunnel to answer /health with
-   join.wait_for_tunnel. If the tunnel is still unreachable after that warm-up, it
-   stops and exits with an error rather than publish a dead URL.
-4. Writes {"tunnel_url", "layers", "device"} to the --out file, atomically.
+   a /health probe that resolves the hostname through commonnet.net.dns (public DNS
+   fallback). If the tunnel is still unreachable after the warm-up, it warns, keeps
+   running and publishes the URL with "verified": false. It exits only if the tunnel
+   process or the block server dies.
+4. Writes {"tunnel_url", "layers", "device", "verified"} to the --out file, atomically.
 5. Keeps running. Each health interval it checks the tunnel. A tunnel that stays
    unreachable for the grace period is replaced, and the new URL is written.
 
@@ -37,7 +39,8 @@ import time
 from pathlib import Path
 
 from commonnet.net import auth, protocol
-from commonnet.net.client import BlockClient, BlockError
+from commonnet.net.client import BlockClient, BlockError, RemoteError
+from commonnet.net.protocol import ProtocolError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 JOIN_DIR = REPO_ROOT / "join"
@@ -73,9 +76,51 @@ def _default_open_tunnel(local_url: str, port: int):
     return _join().start_tunnel(local_url, f"127.0.0.1:{port}")
 
 
-def _publish(path: Path, url, layers, device) -> None:
+UNVERIFIED_WARNING = (
+    "WARNING: this machine could not reach the tunnel yet (probably slow DNS here). The tunnel and block "
+    "server are still running and the URL is published as unverified; send it on, the coordinator will check it."
+)
+
+
+def _probe(url: str, token) -> bool:
+    """Does the tunnel answer /health? Resolves through commonnet.net.dns (public DNS fallback).
+
+    Any reply from the block server (including 401) proves the path works. A 5xx from the
+    edge (Cloudflare 530/502 while the tunnel is not connected yet) does not.
+    """
+    try:
+        BlockClient(token=token, retries=0).health(url, timeout=8)
+        return True
+    except RemoteError as e:
+        return e.status < 500
+    except ProtocolError:
+        return True  # something answered, just not with our JSON
+    except (BlockError, ValueError, OSError):
+        return False
+
+
+def _wait_for_tunnel(url, token, window: float, tunnel, stop, server, log_path, sleep=time.sleep) -> bool:
+    deadline = time.monotonic() + window
+    announced = False
+    while not stop.is_set():
+        if server.poll() is not None:
+            raise LauncherError(f"the block server exited with code {server.returncode}; see {log_path}")
+        if _probe(url, token):
+            return True
+        if tunnel.poll() is not None or time.monotonic() >= deadline:
+            return False
+        if not announced:
+            print(f"waiting for tunnel to become reachable (up to {window:.0f}s)...", flush=True)
+            announced = True
+        sleep(2.0)
+    return False
+
+
+def _publish(path: Path, url, layers, device, verified=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {"tunnel_url": url, "layers": list(layers) if layers else None, "device": device}
+    if url is not None and verified is not None:
+        record["verified"] = bool(verified)
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
@@ -127,6 +172,7 @@ def run(server_args: list, out_path: Path, *, token: str | None = None,
     device = None
     server = None
     tunnel = None
+    verified = False
     try:
         server = _start_server(server_args, port, log_path)
         layers, device = _wait_for_server(local_url, server, log_path, server_timeout, token)
@@ -135,19 +181,19 @@ def run(server_args: list, out_path: Path, *, token: str | None = None,
         tunnel, url = open_tunnel(local_url, port)
         log(f"tunnel URL: {url}")
         # A fresh quick-tunnel hostname can take minutes to resolve on some resolvers (negative
-        # caching: seen >40s on a Mac using Tailscale DNS), so one 30s join warm-up is not enough.
-        warm_deadline = time.monotonic() + join.TUNNEL_WARMUP_TIMEOUT_SECONDS * WARMUP_ROUNDS
-        while not join.wait_for_tunnel(url, token, HEALTH_PATH):
-            if time.monotonic() >= warm_deadline or tunnel.poll() is not None:
-                break
-        else:
-            warm_deadline = None
-        if warm_deadline is not None:
-            raise LauncherError(
-                f"the tunnel did not answer {HEALTH_PATH} within the warm-up window, so nothing was published"
-            )
-        _publish(out_path, url, layers, device)
-        log(f"published to {out_path}")
+        # caching: seen >40s on a Mac using Tailscale DNS). The probe resolves through
+        # commonnet.net.dns (1.1.1.1/8.8.8.8 fallback), and the warm-up runs several rounds.
+        verified = _wait_for_tunnel(url, token, join.TUNNEL_WARMUP_TIMEOUT_SECONDS * WARMUP_ROUNDS,
+                                    tunnel, stop, server, log_path)
+        if not verified:
+            if tunnel.poll() is not None:
+                raise LauncherError(f"the tunnel process exited with code {tunnel.returncode} during warm-up")
+            log(UNVERIFIED_WARNING)
+        _publish(out_path, url, layers, device, verified=verified)
+        log(f"published to {out_path}" + ("" if verified else " (unverified)"))
+        log(f"READY. Send Miles this URL: {url}")
+        if not verified:
+            log("(unverified: this PC could not reach it yet; leave this window open, Miles will check it)")
 
         healthy_at = time.monotonic()
         while not stop.wait(health_interval):
@@ -155,7 +201,12 @@ def run(server_args: list, out_path: Path, *, token: str | None = None,
                 raise LauncherError(f"the block server exited with code {server.returncode}; see {log_path}")
             if tunnel.poll() is None and _healthy(join, url, token):
                 healthy_at = time.monotonic()
+                if not verified:
+                    verified = True
+                    _publish(out_path, url, layers, device, verified=True)
+                    log("the tunnel now answers /health; marked verified")
                 continue
+
             unreachable_for = time.monotonic() - healthy_at
             if unreachable_for < grace:
                 log(f"the tunnel is not reachable yet ({unreachable_for:.0f}s); "
@@ -165,7 +216,8 @@ def run(server_args: list, out_path: Path, *, token: str | None = None,
             join.stop_process(tunnel)
             tunnel, url = open_tunnel(local_url, port)
             healthy_at = time.monotonic()
-            _publish(out_path, url, layers, device)
+            verified = False
+            _publish(out_path, url, layers, device, verified=False)
             log(f"tunnel URL: {url}")
     finally:
         join.stop_process(tunnel)
@@ -180,7 +232,7 @@ def _healthy(join, url: str, token) -> bool:
     # The server can die mid-probe (connection reset); that is "unhealthy", and the
     # next loop iteration reports the dead server instead of this probe raising.
     try:
-        return join.tunnel_is_healthy(url, token, HEALTH_PATH)
+        return _probe(url, token)
     except OSError:
         return False
 
