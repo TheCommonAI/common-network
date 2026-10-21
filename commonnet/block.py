@@ -21,6 +21,22 @@ from transformers.models.qwen3.modeling_qwen3 import (
 from commonnet.weights import CheckpointReader, build_module
 
 
+def layer_classes(arch: str):
+    """(decoder layer class, rotary class) for an architecture name."""
+    if arch == "qwen3_5":
+        from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5DecoderLayer,
+            Qwen3_5TextRotaryEmbedding,
+        )
+        return Qwen3_5DecoderLayer, Qwen3_5TextRotaryEmbedding
+    return Qwen3DecoderLayer, Qwen3RotaryEmbedding
+
+
+class _LinState:
+    conv_states = None
+    recurrent_states = None
+
+
 class KVCache:
     """Per-session keys and values, one entry per local layer.
 
@@ -31,6 +47,19 @@ class KVCache:
     def __init__(self, num_layers: int):
         self.keys: list[torch.Tensor | None] = [None] * num_layers
         self.values: list[torch.Tensor | None] = [None] * num_layers
+        # Gated-DeltaNet layers (qwen3_5): fixed-size conv and recurrent state per layer.
+        self.layers = [_LinState() for _ in range(num_layers)]
+
+    def has_previous_state(self, layer_idx: int = 0) -> bool:
+        return self.layers[layer_idx].recurrent_states is not None
+
+    def update_conv_state(self, state, layer_idx: int):
+        self.layers[layer_idx].conv_states = state
+        return state
+
+    def update_recurrent_state(self, state, layer_idx: int):
+        self.layers[layer_idx].recurrent_states = state
+        return state
 
     def update(self, key: torch.Tensor, value: torch.Tensor, layer_idx: int):
         if self.keys[layer_idx] is None:
@@ -81,24 +110,29 @@ class BlockRange:
 
         self.device = torch.device(self.device)
         self.num_local = self.end - self.start
-        self.rotary_emb = Qwen3RotaryEmbedding(config, device=self.device)
+        self.arch = reader.arch
+        layer_cls, rotary_cls = layer_classes(self.arch)
+        self.rotary_emb = rotary_cls(config, device=self.device)
+        self.layer_types = list(layer_types) if layer_types else ["full_attention"] * n
 
         # Each block loads only its own layers. The tensor names come from the
         # module's own state_dict keys, not a hard-coded list.
         layers = []
         for local in range(self.num_local):
             glob = self.start + local
-            factory = partial(Qwen3DecoderLayer, config, layer_idx=glob)
+            factory = partial(layer_cls, config, layer_idx=glob)
             with torch.device("meta"):
                 keys = list(factory().state_dict().keys())
-            prefix = f"model.layers.{glob}."
+            prefix = f"{reader.prefix}layers.{glob}."
             tensors = reader.load([prefix + k for k in keys], device=self.device, dtype=self.dtype)
             state = {k[len(prefix):]: v for k, v in tensors.items()}
             layer = build_module(factory, state)
             # The attention code indexes the session cache by layer_idx, so the
             # local index is set here. The global index was used above only to
             # pick the right layer type.
-            layer.self_attn.layer_idx = local
+            for mod in (getattr(layer, "self_attn", None), getattr(layer, "linear_attn", None)):
+                if mod is not None:
+                    mod.layer_idx = local
             layers.append(layer)
         self.layers = torch.nn.ModuleList(layers)
         self.loaded_names = list(reader.read_names)
@@ -126,13 +160,15 @@ class BlockRange:
                 )
 
         position_ids = torch.arange(start_pos, start_pos + q_len, device=self.device).unsqueeze(0)
-        position_embeddings = self.rotary_emb(hidden, position_ids)
+        # qwen3_5 uses 3-axis (t, h, w) rope; for text all three axes are the same position.
+        rope_ids = position_ids[None].expand(3, -1, -1) if self.arch == "qwen3_5" else position_ids
+        position_embeddings = self.rotary_emb(hidden, rope_ids)
         mask = self._causal_mask(start_pos, q_len, hidden.dtype)
 
-        for layer in self.layers:
+        for layer, ltype in zip(self.layers, self.layer_types[self.start : self.end]):
             hidden = layer(
                 hidden,
-                attention_mask=mask,
+                attention_mask=None if ltype == "linear_attention" else mask,
                 position_ids=position_ids,
                 past_key_values=session.cache,
                 use_cache=True,

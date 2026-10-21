@@ -15,7 +15,7 @@ import torch
 from torch import nn
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 
-from commonnet.client import Client
+from commonnet.client import Client, make_norm
 from commonnet.weights import CheckpointReader, build_module
 
 FORMATS = ("fp32", "fp16", "mlx4")
@@ -101,7 +101,9 @@ class Client4(Client):
         self.device = torch.device("cpu")
         self.dtype = torch.float16
         self.fmt = fmt
-        embed_name = "model.embed_tokens.weight"
+        self.arch = reader.arch
+        embed_name = reader.prefix + "embed_tokens.weight"
+        norm_name = reader.prefix + "norm.weight"
         head_name = "lm_head.weight" if reader.has("lm_head.weight") else embed_name
         hidden = self.config.hidden_size
         if reader.has(embed_name.replace(".weight", ".scales")):
@@ -109,16 +111,16 @@ class Client4(Client):
             # packed uint32. Casting it to float32 would give garbage, so use the stored 4-bit tables.
             q = getattr(self.config, "quantization", None) or getattr(self.config, "quantization_config", None) or {}
             bits, group_size = q.get("bits", bits), q.get("group_size", group_size)
-            t = reader.load(["model.norm.weight"], dtype=torch.float32)
+            t = reader.load([norm_name], dtype=torch.float32)
             base = lambda n: n[: -len(".weight")]
             self.embed = _MlxQuantized.from_prequantized(reader.weight_map, base(embed_name), "embed", bits, group_size)
             self.head = _MlxQuantized.from_prequantized(reader.weight_map, base(head_name), "linear", bits, group_size)
             reader.read_names += [embed_name, head_name]
         else:
-            t = reader.load([embed_name, "model.norm.weight", head_name], dtype=torch.float32)
+            t = reader.load([embed_name, norm_name, head_name], dtype=torch.float32)
             self.embed = _MlxQuantized(t[embed_name], "embed", bits, group_size)
             self.head = _MlxQuantized(t[head_name], "linear", bits, group_size)
-        self.norm = build_module(partial(Qwen3RMSNorm, hidden, eps=self.config.rms_norm_eps),
-                                 {"weight": t["model.norm.weight"].to(torch.float16)})
+        self.norm = build_module(partial(make_norm, reader.arch, hidden, self.config.rms_norm_eps),
+                                 {"weight": t[norm_name].to(torch.float16)})
         self.loaded_names = list(reader.read_names)
         self.client_bytes = self.embed.nbytes + self.head.nbytes + self.norm.weight.numel() * 2
