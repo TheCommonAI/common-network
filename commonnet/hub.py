@@ -115,7 +115,7 @@ class Hub:
             self.sleep(min(2 ** attempt, 20))
         raise HubError(f"{name}: wrong size for bytes {rng[0]}-{rng[1]}")
 
-    def stream_range(self, name, start, end, out, label):
+    def stream_range(self, name, start, end, out, label, quiet=False):
         """Append bytes [start, end) of name to the open file `out`, resuming on drop. Returns bytes written."""
         pos, last = start, time.monotonic()
         for attempt in range(RETRIES):
@@ -129,7 +129,7 @@ class Hub:
                             break
                         out.write(chunk)
                         pos += len(chunk)
-                        if time.monotonic() - last > 2:
+                        if not quiet and time.monotonic() - last > 2:
                             last = time.monotonic()
                             self.log(f"{label}: {(pos - start) >> 20} MB of {(end - start) >> 20} MB")
                 if pos == end:
@@ -232,15 +232,18 @@ class Hub:
                 out.truncate(0)
                 out.write(head)
                 have = len(head)
-            done, base = have - len(head), 8 + n
+            done, base, lastlog = have - len(head), 8 + n, 0.0
             for k in names:
                 a, b = header[k]["data_offsets"]
                 s, e = new[k]["data_offsets"]
                 if e <= done:
                     continue
                 skip = max(0, done - s)
-                self.stream_range(name, base + a + skip, base + b, out, f"{out_name} {k.rsplit('.', 2)[0][-24:]}")
+                self.stream_range(name, base + a + skip, base + b, out, out_name, quiet=True)
                 done = e
+                if time.monotonic() - lastlog > 2:
+                    lastlog = time.monotonic()
+                    self.log(f"{out_name}: {(len(head) + done) >> 20} MB of {total >> 20} MB")
         if os.path.getsize(part) != total:
             raise HubError(f"{out_name}: size mismatch after download")
         os.replace(part, final)

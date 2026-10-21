@@ -18,8 +18,12 @@ Nothing in commonnet prints it. Rotate by restarting the member with a new file.
 
 Windows step-by-step is in `commonnet/PATRICK.md`. In short (Qwen3-8B, NF4, layers 20-36):
 
-    python -m commonnet.member --layers 20 36 --backend nf4 --checkpoint C:\\path\\Qwen3-8B-bnb-4bit \
+    python -m commonnet.member --repo unsloth/Qwen3-8B-bnb-4bit --layers 20 36 --backend nf4 \
         --token-file member.token --out member.json
+
+The member downloads only layers 20-35 (about 1.6 GB of the 6.1 GB file, via HTTP Range requests) from Hugging
+Face into `~/.common-network/commonnet/models/` (override `COMMONNET_CACHE`; `HF_TOKEN` for gated repos), then
+serves. Backup: download the whole repo by hand and pass `--checkpoint DIR` instead of `--repo` (still works).
 
 `member.json` is written once the tunnel answers: `{"tunnel_url": ..., "layers": ..., "device": ...}`.
 Patrick sends Miles the `tunnel_url` only (never the token). Ctrl+C or SIGTERM stops the server and the
@@ -29,8 +33,10 @@ tunnel and sets `tunnel_url` to null. A fresh quick-tunnel hostname can take up 
 
 Split from `python3 -m commonnet.plan --model 8b --mac-gib 11 --pc-gib 6.5 --ctx 2048`:
 Mac layers 0-20 (client + 20 layers, 2.83 GiB), Patrick (NF4) layers 20-36 (16 layers, 1.61 GiB).
-Mac checkpoint: `mlx-community/Qwen3-8B-4bit` (4.6 GB) in `~/models/hf/Qwen3-8B-4bit`.
-Patrick checkpoint: `unsloth/Qwen3-8B-bnb-4bit` (6.1 GB, single file; embed/lm_head are bf16 and unused by his block).
+Mac checkpoint: `mlx-community/Qwen3-8B-4bit` (4.6 GB) in `~/models/hf/Qwen3-8B-4bit`. The coordinator can fetch only
+the client tensors (embed, final norm, head) with `--repo mlx-community/Qwen3-8B-4bit` instead of `--checkpoint`;
+the manual local path remains as backup.
+Patrick checkpoint: `unsloth/Qwen3-8B-bnb-4bit` (6.1 GB single file, but his member fetches only its layers itself; embed/lm_head are bf16 and unused by his block).
 
 1. One token for both members, sent to Patrick privately as a file:
        python3 -c "import secrets;print(secrets.token_urlsafe(32))" > member.token && chmod 600 member.token
