@@ -80,7 +80,10 @@ Untested on CUDA. If it fails, send Miles the last 20 lines and go back to the 8
 ## If something fails
 
 Send Miles the last 20 lines of the window and of `$HOME\block-server.log` (next to `member.json`).
-If it ends with "the tunnel did not answer /health", cloudflared started but your DNS is slow to learn the new
-name: just run the same command again (the tools now fall back to 1.1.1.1 automatically when your DNS does not know the name; setting your DNS to 1.1.1.1 is a backup).
+If it printed "WARNING: this machine could not reach the tunnel yet" and then "READY. Send Miles this URL", that is
+fine: your DNS is slow to learn the new name, but the block and the tunnel are running and the URL is published
+(marked `"verified": false` in `member.json`). Send Miles the URL and leave the window open; he checks it from his side.
+(The tools already fall back to 1.1.1.1 when your DNS does not know the name; setting your DNS to 1.1.1.1 is a backup.)
+The program only stops with an error if cloudflared or the block server itself dies: then send Miles the last 20 lines.
 Known risks: [UNVERIFIED] NF4 loading on CUDA; Windows Defender Firewall prompt (click Cancel/deny, only loopback is used);
 GPU out-of-memory (close games/browsers; check with `nvidia-smi`).

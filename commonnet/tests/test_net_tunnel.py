@@ -85,44 +85,63 @@ class RunWithFakeTunnel(unittest.TestCase):
         self.assertIsNone(read_record(self.out)["tunnel_url"])
         self.assertTrue(refused(port), "the block server must be gone after stop")
 
-    def test_an_unreachable_tunnel_publishes_nothing_and_stops_the_server(self):
+    def test_an_unreachable_tunnel_is_still_published_as_unverified_and_keeps_running(self):
         port = tunnel.free_loopback_port()
         dead = tunnel.free_loopback_port()  # nothing listens here
+        messages = []
 
         def opener(local_url, port_):
             return subprocess.Popen(SLEEPER), f"http://127.0.0.1:{dead}"
 
+        stop = threading.Event()
         with patch.object(tunnel._join(), "TUNNEL_WARMUP_TIMEOUT_SECONDS", 0.5):
-            with self.assertRaises(LauncherError) as caught:
-                tunnel.run(["--stub", "--layers", "0", "2"], self.out, open_tunnel=opener,
-                           log=quiet, port=port)
-        self.assertIn("warm-up", str(caught.exception))
-        self.assertIsNone(published_url(self.out), "a dead URL must never be published")
+            worker = threading.Thread(target=tunnel.run, args=(["--stub", "--layers", "0", "2"], self.out),
+                                      kwargs=dict(open_tunnel=opener, stop=stop, log=messages.append,
+                                                  port=port, health_interval=60))
+            worker.start()
+            self.assertTrue(wait_until(lambda: published_url(self.out)))
+            self.assertIs(read_record(self.out)["verified"], False)
+            self.assertFalse(refused(port), "the block server must keep running")
+            self.assertTrue(worker.is_alive())
+            self.assertTrue(any("WARNING" in m for m in messages))
+            stop.set()
+            worker.join(timeout=20)
+        self.assertIsNone(published_url(self.out))
         self.assertTrue(refused(port))
 
-    def test_a_tunnel_that_becomes_reachable_after_the_first_warmup_round_is_published(self):
-        # Regression: one 30s warm-up round gave up on resolvers that need minutes for a new hostname.
+    def test_probe_fails_then_succeeds_through_the_dns_fallback(self):
+        # The system resolver does not know the name at first; the fallback does, so the
+        # probe connects to the IP it returns and the URL is published as verified.
+        import socket as socket_module
+        from commonnet.net import dns
         port = tunnel.free_loopback_port()
-        stop = threading.Event()
-        join = tunnel._join()
-        calls = []
+        name = "fresh-tunnel.example"
+        attempts = []
 
-        def flaky_wait(url, token, path):
-            calls.append(url)
-            return len(calls) >= 3
+        def fake_resolve(host, port_=443, **kw):
+            if host != name:
+                return host
+            attempts.append(host)
+            if len(attempts) < 3:
+                raise socket_module.gaierror(socket_module.EAI_NONAME, "NXDOMAIN")
+            return "127.0.0.1"
 
         def opener(local_url, port_):
-            return subprocess.Popen(SLEEPER), local_url
+            return subprocess.Popen(SLEEPER), f"http://{name}:{port}"
 
-        with patch.object(join, "wait_for_tunnel", flaky_wait):
-            worker = threading.Thread(target=tunnel.run, args=(["--stub", "--layers", "0", "4"], self.out),
+        stop = threading.Event()
+        with patch.object(dns, "resolve", fake_resolve), \
+                patch.object(tunnel.time, "sleep", lambda s: None) as _:
+            worker = threading.Thread(target=tunnel.run, args=(["--stub", "--layers", "0", "2"], self.out),
                                       kwargs=dict(open_tunnel=opener, stop=stop, log=quiet, port=port,
                                                   health_interval=60))
             worker.start()
             self.assertTrue(wait_until(lambda: published_url(self.out)))
+            record = read_record(self.out)
             stop.set()
             worker.join(timeout=20)
-        self.assertEqual(len(calls), 3)
+        self.assertIs(record["verified"], True)
+        self.assertGreaterEqual(len(attempts), 3)
 
     def test_a_tunnel_that_stays_down_is_replaced_and_the_new_url_published(self):
         port = tunnel.free_loopback_port()
@@ -130,12 +149,12 @@ class RunWithFakeTunnel(unittest.TestCase):
         replacement = f"http://127.0.0.1:{port}/replacement"
         urls = []
         local_is_down = threading.Event()
-        real_healthy = tunnel._join().tunnel_is_healthy
+        real_healthy = tunnel._probe
 
-        def fake_healthy(url, token, path="/v1/models"):
+        def fake_healthy(url, token):
             if url == local and local_is_down.is_set():
                 return False
-            return real_healthy(url, token, path)
+            return real_healthy(url, token)
 
         def opener(local_url, port_):
             url = local if not urls else replacement
@@ -143,7 +162,7 @@ class RunWithFakeTunnel(unittest.TestCase):
             return subprocess.Popen(SLEEPER), url
 
         stop = threading.Event()
-        with patch.object(tunnel._join(), "tunnel_is_healthy", side_effect=fake_healthy):
+        with patch.object(tunnel, "_probe", side_effect=fake_healthy):
             worker = threading.Thread(target=tunnel.run, args=(["--stub", "--layers", "0", "2"], self.out),
                                       kwargs=dict(open_tunnel=opener, stop=stop, log=quiet, port=port,
                                                   health_interval=0.05, grace=0))
