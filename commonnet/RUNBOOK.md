@@ -65,6 +65,28 @@ while 1.1.1.1 resolved it in about 12 s. The tools now fall back to asking 1.1.1
 resolver fails (commonnet/net/dns.py), so this should resolve in about 12 s on its own. Backup if it still says it cannot
 reach the tunnel: wait a few minutes and retry, or set the Mac's DNS to 1.1.1.1. The tunnel itself was fine (verified with curl --resolve).
 
+### Qwen3.6-27B (hybrid linear attention) - experimental, 8B above stays the safe fallback
+
+Architecture: 64 layers, 48 Gated-DeltaNet (linear attention) + 16 full attention (every 4th). Block servers keep a
+KV cache for the 16 full layers and a fixed conv + recurrent state (about 3.2 MB per linear layer) for the 48 others.
+Tensor layout is `model.language_model.layers.N.*` (HF/bnb) or `language_model.model.layers.N.*` (mlx-community); the
+vision tower and `mtp.*` tensors are never downloaded.
+
+Split from `python3 -m commonnet.plan --model 27b --mac-gib 11 --pc-gib 6.5 --ctx 2048` (same at 4096):
+Mac (MLX 4-bit + 4-bit client) layers 0-39, PC (NF4) layers 39-64.
+
+    # Mac member (download is about 9.8 GB: layers 0-38 plus embed/head/norm, fetched by Range, not whole 5 GB shards)
+    python3 -m commonnet.member --repo mlx-community/Qwen3.6-27B-4bit --layers 0 39 --backend mlx --token-file member.token --out mac.json
+    # Patrick (about 4.9 GB download)
+    python -m commonnet.member --repo samajlouis/Qwen3.6-27B-bnb-nf4 --layers 39 64 --backend nf4 --token-file member.token --out member.json
+    # Coordinator: client tensors from the MLX repo
+    python3 -m commonnet.coordinator --endpoints members.json --repo mlx-community/Qwen3.6-27B-4bit --client-format mlx4 --prompt "Hello"
+
+Alternative PC repo: `wyzxxywl/Qwen3.6-27B-bnb-4bit` (same layer sizes). Needs about 10 GB (Mac) + 5 GB (PC) of free disk.
+Verified only on a tiny random qwen3_5 model (torch split parity, MLX block, hub offline) and by checking that the
+loader tensor names match the real headers. NOT run: the real 27B weights, the NF4 block on CUDA, the mlx4 client on
+the real mlx-community embed/head. If anything fails, fall back to the 8B commands above.
+
 ### Qwen3-32B later
 64 layers; plan with `python3 -m commonnet.plan --mac-gib 11 --pc-gib 6.5 --ctx 2048` gives
 Mac (MLX 4-bit, plus the 4-bit client) layers 0-38, PC (NF4) layers 38-64. Start Mac with

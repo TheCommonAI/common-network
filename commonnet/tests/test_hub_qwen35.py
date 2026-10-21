@@ -54,7 +54,10 @@ class HubQwen35(unittest.TestCase):
         want = {wm[n] for n in wm if n.startswith(("model.language_model.layers.2.", "model.language_model.layers.3."))}
         got = {n for n in os.listdir(d) if n.endswith(".safetensors")}
         self.assertEqual(got, want)
-        self.assertLess(len(got), 4 + 1)
+        kept = json.load(open(os.path.join(d, "model.safetensors.index.json")))["weight_map"]
+        self.assertTrue(kept and all(n.startswith(("model.language_model.layers.2.", "model.language_model.layers.3.")) for n in kept))
+        # no whole-shard GET: every shard request carried a Range
+        self.assertFalse(any(n.endswith(".safetensors") and not r and m == "GET" for m, n, r, _ in log))
         b = BlockRange(d, 2, 4)
         ref = BlockRange(full, 2, 4)
         x = torch.randn(1, 5, 64)

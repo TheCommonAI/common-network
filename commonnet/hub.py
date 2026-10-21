@@ -270,8 +270,22 @@ class Hub:
             self.fetch_config()
             with open(idx_path) as f:
                 wm = json.load(f)["weight_map"]
-            prefixes = needed_prefixes(layers, client, detect_layout(wm))
+            layout = detect_layout(wm)
+            prefixes = needed_prefixes(layers, client, layout)
             shards = sorted({wm[n] for n in select_names(wm, prefixes)})
+            if layout != "model.":
+                # qwen3_5 repos have ~5 GB shards that also hold vision/other layers: range-download only the
+                # needed tensors of each shard into a compact copy with a filtered index.
+                sel = ("L%d-%d" % tuple(layers) if layers else "") + ("+client" if client else "")
+                self.dir = os.path.join(base, "compact-" + sel.strip("+"))
+                self.fetch_config()
+                for i, sname in enumerate(shards):
+                    self.log(f"shard {i + 1}/{len(shards)}: {sname} (needed tensors only)")
+                    self.fetch_compact(sname, prefixes, out_name=sname)
+                keep = {n: wm[n] for n in select_names(wm, prefixes)}
+                _atomic_write(os.path.join(self.dir, INDEX_NAME),
+                              json.dumps({"metadata": {}, "weight_map": keep}).encode())
+                return self.dir
             for i, s in enumerate(shards):
                 self.log(f"shard {i + 1}/{len(shards)}: {s}")
                 self.fetch_file(s)
