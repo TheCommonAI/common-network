@@ -42,12 +42,21 @@ def cache_dir(repo: str, revision: str = "main", environ=None) -> str:
     return os.path.join(root, *repo.split("/"), revision)
 
 
-def needed_prefixes(layers=None, client=False) -> list[str]:
+LAYOUTS = ("model.language_model.", "language_model.model.", "model.")  # qwen3_5 HF, qwen3_5 MLX, qwen3
+
+
+def detect_layout(names) -> str:
+    """Tensor-name prefix of the decoder in this checkpoint. Vision/mtp tensors never match it."""
+    names = list(names)
+    return next((p for p in LAYOUTS if any(n.startswith(p + "layers.") for n in names)), "model.")
+
+
+def needed_prefixes(layers=None, client=False, layout="model.") -> list[str]:
     out = []
     if layers:
-        out += [f"model.layers.{i}." for i in range(layers[0], layers[1])]
+        out += [f"{layout}layers.{i}." for i in range(layers[0], layers[1])]
     if client:
-        out += ["model.embed_tokens.", "model.norm.", "lm_head."]
+        out += [layout + "embed_tokens.", layout + "norm.", "lm_head.", "language_model.lm_head."]
     return out
 
 
@@ -203,6 +212,8 @@ class Hub:
         final = os.path.join(self.dir, out_name)
         n, header = self.read_header(name)
         meta = header.pop("__metadata__", None)
+        if callable(prefixes):
+            prefixes = prefixes(header)
         names = sorted(select_names(header, prefixes), key=lambda k: header[k]["data_offsets"][0])
         if not names:
             raise HubError(f"{name}: no tensors match {prefixes[:2]}...")
@@ -253,13 +264,13 @@ class Hub:
     # ---- top level ---------------------------------------------------
     def fetch(self, layers=None, client=False):
         """Download what is needed; returns the checkpoint directory."""
-        prefixes = needed_prefixes(layers, client)
         base = self.dir
         idx_path = self.fetch_small(INDEX_NAME, required=False)
         if idx_path:
             self.fetch_config()
             with open(idx_path) as f:
                 wm = json.load(f)["weight_map"]
+            prefixes = needed_prefixes(layers, client, detect_layout(wm))
             shards = sorted({wm[n] for n in select_names(wm, prefixes)})
             for i, s in enumerate(shards):
                 self.log(f"shard {i + 1}/{len(shards)}: {s}")
@@ -269,7 +280,7 @@ class Hub:
         sel = ("L%d-%d" % tuple(layers) if layers else "") + ("+client" if client else "")
         self.dir = os.path.join(base, "compact-" + sel.strip("+"))
         self.fetch_config()
-        self.fetch_compact(SINGLE_NAME, prefixes)
+        self.fetch_compact(SINGLE_NAME, lambda names: needed_prefixes(layers, client, detect_layout(names)))
         return self.dir
 
 

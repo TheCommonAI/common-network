@@ -47,8 +47,11 @@ class CheckpointReader:
         else:
             raise FileNotFoundError(f"no safetensors checkpoint in {checkpoint_dir}")
         # "model." for plain Qwen3, "model.language_model." for qwen3_5 (multimodal layout).
-        self.prefix = "model.language_model." if any(
-            n.startswith("model.language_model.") for n in self.weight_map) else "model."
+        # MLX conversions of the same model use "language_model.model.".
+        self.prefix = next((p for p in ("model.language_model.", "language_model.model.")
+                            if any(n.startswith(p) for n in self.weight_map)), "model.")
+        self.head_name = next((n for n in ("lm_head.weight", "language_model.lm_head.weight")
+                               if n in self.weight_map), self.prefix + "embed_tokens.weight")  # else tied
         self.arch = "qwen3_5" if getattr(self.config, "model_type", "").startswith("qwen3_5") else "qwen3"
         # Names actually read by load(), in order. Tests use it to prove that a
         # block never touches tensors outside its layer range.

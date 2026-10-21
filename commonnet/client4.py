@@ -104,7 +104,7 @@ class Client4(Client):
         self.arch = reader.arch
         embed_name = reader.prefix + "embed_tokens.weight"
         norm_name = reader.prefix + "norm.weight"
-        head_name = "lm_head.weight" if reader.has("lm_head.weight") else embed_name
+        head_name = reader.head_name
         hidden = self.config.hidden_size
         if reader.has(embed_name.replace(".weight", ".scales")):
             # Pre-quantized MLX checkpoint (e.g. mlx-community/Qwen3-8B-4bit): the stored weight is

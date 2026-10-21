@@ -86,7 +86,7 @@ class Client:
         self.arch = reader.arch
         embed_name = reader.prefix + "embed_tokens.weight"
         norm_name = reader.prefix + "norm.weight"
-        head_name = "lm_head.weight" if reader.has("lm_head.weight") else embed_name  # tied embeddings
+        head_name = reader.head_name  # tied embeddings fall back to the embedding
         tensors = reader.load(
             [embed_name, norm_name, head_name], device=self.device, dtype=dtype
         )
