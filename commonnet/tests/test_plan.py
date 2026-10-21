@@ -100,3 +100,27 @@ class Qwen8BPlan(unittest.TestCase):
         from commonnet.plan import plan_qwen3_8b
         plan = plan_qwen3_8b(11.0, 1.0, context_tokens=2048)
         self.assertLess(plan.assignments[1].used_bytes, 1.0 * GiB)
+
+
+class Qwen36PlanTest(unittest.TestCase):
+    def test_27b_fits_default_budgets(self):
+        from commonnet import plan as P
+        for ctx in (2048, 4096):
+            pl = P.plan_qwen36_27b(11.0, 6.5, context_tokens=ctx)
+            self.assertEqual(sum(a.end - a.start for a in pl.assignments), 64)
+            for a in pl.assignments:
+                self.assertGreater(a.headroom_bytes, 1 << 30)
+
+    def test_27b_kv_only_counts_full_layers_and_state_is_fixed(self):
+        from commonnet import plan as P
+        a = P.plan_qwen36_27b(context_tokens=2048).assignments
+        b = P.plan_qwen36_27b(context_tokens=4096).assignments
+        self.assertEqual(a[0].end, b[0].end)
+        kv = P.kv_bytes_per_token_per_layer(4, 256)
+        n_full = sum(1 for i in range(a[0].start, a[0].end) if i % 4 == 3)
+        self.assertEqual(b[0].used_bytes - a[0].used_bytes, n_full * kv * 2048)
+
+    def test_27b_refuses_when_too_small(self):
+        from commonnet import plan as P
+        with self.assertRaises(P.PlanError):
+            P.plan_qwen36_27b(5.0, 3.0)

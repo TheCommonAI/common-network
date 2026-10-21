@@ -223,6 +223,96 @@ def plan_qwen3_8b(
                       context_tokens=context_tokens, objective="balanced")
 
 
+# ---- Qwen3.6-27B (qwen3_5, hybrid): 64 layers, 48 linear_attention + 16 full_attention ---------
+# Config: hidden 5120, 24 heads, 4 KV heads, head_dim 256, intermediate 17408, vocab 248320, untied head,
+# full_attention_interval 4 (layer i is full attention when i % 4 == 3).
+# Bytes read from safetensors headers (Range requests, no weights downloaded):
+#   mlx-community/Qwen3.6-27B-4bit   (3 shards; everything quantized incl. in_proj_a/b; embed/head 4 bit)
+#   samajlouis/Qwen3.6-27B-bnb-nf4   (1 shard; embed/lm_head bf16; layers NF4 double quant)
+#   wyzxxywl/Qwen3.6-27B-bnb-4bit    (1 shard; same layer sizes within 21 KB)
+QWEN36_27B_LAYERS = 64
+QWEN36_27B_KV_HEADS = 4
+QWEN36_27B_HEAD_DIM = 256
+QWEN36_27B_FULL_INTERVAL = 4
+QWEN36_27B_MLX4_LINEAR_LAYER = 215_665_088
+QWEN36_27B_MLX4_FULL_LAYER = 209_409_024
+QWEN36_27B_NF4_LINEAR_LAYER = 197_825_950  # largest seen (197_805_207 .. 197_825_950)
+QWEN36_27B_NF4_FULL_LAYER = 192_081_277  # largest seen (192_059_764 .. 192_081_277)
+# mlx4 client: embed + lm_head (each: weight 635_699_200 + scales 39_731_200 + biases 39_731_200) + norm (5120 bf16)
+QWEN36_27B_MLX4_CLIENT_BYTES = 2 * (635_699_200 + 2 * 39_731_200) + 10_240
+# Per-session state of one linear-attention layer: conv state (10240 ch x 4, fp16) + recurrent state
+# (48 value heads x 128 x 128, fp32 because mamba_ssm_dtype is float32). Fixed, independent of context.
+QWEN36_27B_LINEAR_STATE_BYTES = 10_240 * 4 * 2 + 48 * 128 * 128 * 4
+
+
+def qwen36_layer_types(num_layers: int = QWEN36_27B_LAYERS, interval: int = QWEN36_27B_FULL_INTERVAL) -> list[str]:
+    return ["full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(num_layers)]
+
+
+def plan_hybrid_split(layer_types, first_cost, second_cost, first: Member, second: Member, context_tokens: int,
+                      kv_per_token_per_full_layer: int, linear_state_bytes: int) -> SplitPlan:
+    """Split for a model whose layers differ in size and per-session memory.
+
+    first_cost / second_cost: {layer_type: weight bytes} in each member's format. A full-attention layer
+    adds KV (kv_per_token * context); a linear-attention layer adds a fixed state. member.layer_bytes is
+    not used here. Picks the split with the most headroom on the tighter member.
+    """
+    if context_tokens <= 0:
+        raise PlanError("context_tokens must be positive")
+    n = len(layer_types)
+
+    def per_layer(costs):
+        return [costs[t] + (kv_per_token_per_full_layer * context_tokens if t == "full_attention" else linear_state_bytes)
+                for t in layer_types]
+
+    c1, c2 = per_layer(first_cost), per_layer(second_cost)
+    best = None
+    for a in range(1, n):
+        u1 = first.fixed_bytes + sum(c1[:a])
+        u2 = second.fixed_bytes + sum(c2[a:])
+        if u1 > first.budget_bytes or u2 > second.budget_bytes:
+            continue
+        h = min(first.budget_bytes - u1, second.budget_bytes - u2)
+        if best is None or h > best[0]:
+            best = (h, a, u1, u2)
+    if best is None:
+        # capacity of each member if it took layers from its own end of the stack
+        def cap(m, c, rev):
+            used, k = m.fixed_bytes, 0
+            for x in (reversed(c) if rev else c):
+                if used + x > m.budget_bytes:
+                    break
+                used += x
+                k += 1
+            return k
+        k1, k2 = cap(first, c1, False), cap(second, c2, True)
+        raise PlanError(
+            f"no split of {n} layers fits at context {context_tokens}: {first.name} can hold at most {k1} "
+            f"layers and {second.name} at most {k2} ({k1 + k2} in total, short by {max(0, n - k1 - k2)} layers)"
+        )
+    _, a, u1, u2 = best
+    return SplitPlan(n, context_tokens, (
+        Assignment(first.name, 0, a, u1, first.budget_bytes),
+        Assignment(second.name, a, n, u2, second.budget_bytes),
+    ))
+
+
+def plan_qwen36_27b(mac_budget_gib: float = 11.0, pc_budget_gib: float = 6.5, *, context_tokens: int = 2048,
+                    kv_dtype_bytes: int = 2) -> SplitPlan:
+    """27B split: Mac (MLX 4-bit layers + 4-bit client) serves [0, a), PC (NF4 layers) serves [a, 64)."""
+    lt = qwen36_layer_types()
+    kv = kv_bytes_per_token_per_layer(QWEN36_27B_KV_HEADS, QWEN36_27B_HEAD_DIM, kv_dtype_bytes)
+    mac = Member("mac", "metal", int(mac_budget_gib * GiB), QWEN36_27B_MLX4_LINEAR_LAYER,
+                 fixed_bytes=QWEN36_27B_MLX4_CLIENT_BYTES)
+    pc = Member("pc", "cuda", int(pc_budget_gib * GiB), QWEN36_27B_NF4_LINEAR_LAYER)
+    return plan_hybrid_split(
+        lt,
+        {"linear_attention": QWEN36_27B_MLX4_LINEAR_LAYER, "full_attention": QWEN36_27B_MLX4_FULL_LAYER},
+        {"linear_attention": QWEN36_27B_NF4_LINEAR_LAYER, "full_attention": QWEN36_27B_NF4_FULL_LAYER},
+        mac, pc, context_tokens, kv, QWEN36_27B_LINEAR_STATE_BYTES,
+    )
+
+
 def _format(plan: SplitPlan) -> str:
     lines = []
     for a in plan.assignments:
@@ -236,15 +326,18 @@ def _format(plan: SplitPlan) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Plan the Qwen3 split from memory budgets.")
-    p.add_argument("--model", choices=["8b", "32b"], default="32b")
+    p.add_argument("--model", choices=["8b", "32b", "27b"], default="32b")
     p.add_argument("--mac-gib", type=float, default=11.0)
     p.add_argument("--pc-gib", type=float, default=6.5)
     p.add_argument("--ctx", type=int, default=2048, help="context tokens the KV cache must hold")
     p.add_argument("--client", choices=["mlx4", "fp16"], default="mlx4")
     args = p.parse_args(argv)
     try:
-        fn = plan_qwen3_8b if args.model == "8b" else plan_qwen3_32b
-        plan = fn(args.mac_gib, args.pc_gib, context_tokens=args.ctx, client=args.client)
+        if args.model == "27b":
+            plan = plan_qwen36_27b(args.mac_gib, args.pc_gib, context_tokens=args.ctx)
+        else:
+            fn = plan_qwen3_8b if args.model == "8b" else plan_qwen3_32b
+            plan = fn(args.mac_gib, args.pc_gib, context_tokens=args.ctx, client=args.client)
     except PlanError as e:
         print(f"REFUSED: {e}")
         return 1

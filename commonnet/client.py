@@ -16,6 +16,15 @@ import torch
 from torch import nn
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 
+
+def make_norm(arch, hidden, eps, prefix="model."):
+    """Final norm module. qwen3_5 HF checkpoints use (1 + weight) scaling, plain Qwen3 uses weight.
+    MLX conversions (prefix "language_model.model.") store the norm already as 1 + weight."""
+    if arch == "qwen3_5" and prefix != "language_model.model.":
+        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5RMSNorm
+        return Qwen3_5RMSNorm(hidden, eps=eps)
+    return Qwen3RMSNorm(hidden, eps=eps)
+
 from commonnet.block import BlockRange
 from commonnet.weights import CheckpointReader, build_module
 
@@ -75,18 +84,20 @@ class Client:
         self.device = torch.device(device)
         self.dtype = dtype
 
-        embed_name = "model.embed_tokens.weight"
-        head_name = "lm_head.weight" if reader.has("lm_head.weight") else embed_name  # tied embeddings
+        self.arch = reader.arch
+        embed_name = reader.prefix + "embed_tokens.weight"
+        norm_name = reader.prefix + "norm.weight"
+        head_name = reader.head_name  # tied embeddings fall back to the embedding
         tensors = reader.load(
-            [embed_name, "model.norm.weight", head_name], device=self.device, dtype=dtype
+            [embed_name, norm_name, head_name], device=self.device, dtype=dtype
         )
         vocab, hidden = self.config.vocab_size, self.config.hidden_size
         self.embed = build_module(
             partial(nn.Embedding, vocab, hidden), {"weight": tensors[embed_name]}
         )
         self.norm = build_module(
-            partial(Qwen3RMSNorm, hidden, eps=self.config.rms_norm_eps),
-            {"weight": tensors["model.norm.weight"]},
+            partial(make_norm, reader.arch, hidden, self.config.rms_norm_eps, reader.prefix),
+            {"weight": tensors[norm_name]},
         )
         self.head = build_module(
             partial(nn.Linear, hidden, vocab, bias=False), {"weight": tensors[head_name]}

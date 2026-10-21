@@ -67,6 +67,16 @@ It changes every time you restart.
 
 Leave the window open. To stop: press Ctrl+C once (it stops the server and the tunnel). Closing the window also stops it.
 
+## Later: the bigger model (Qwen3.6-27B), only if Miles asks
+
+Same steps, different command in step 4 (about 4.9 GB download, layers 39-63, about 4.7 GiB of GPU memory; needs about
+6 GB free VRAM, so close everything else). Keep the 8B command above as the fallback if this fails:
+
+```powershell
+python -m commonnet.member --repo samajlouis/Qwen3.6-27B-bnb-nf4 --layers 39 64 --backend nf4 --token-file $HOME\member.token --out $HOME\member.json
+```
+Untested on CUDA. If it fails, send Miles the last 20 lines and go back to the 8B command.
+
 ## If something fails
 
 Send Miles the last 20 lines of the window and of `$HOME\block-server.log` (next to `member.json`).
