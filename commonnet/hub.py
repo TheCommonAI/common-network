@@ -30,6 +30,8 @@ SMALL_FILES = ("config.json", "generation_config.json", "tokenizer.json", "token
 TIMEOUT = 60
 RETRIES = 5
 CHUNK = 1 << 20
+BRIDGE = 8 << 20      # merge tensors whose gap is at most this (gap bytes are fetched and discarded)
+MAX_SEGMENT = 256 << 20  # cap on one merged range so a failure costs one segment
 
 
 class HubError(RuntimeError):
@@ -243,23 +245,73 @@ class Hub:
                 out.truncate(0)
                 out.write(head)
                 have = len(head)
-            done, base, lastlog = have - len(head), 8 + n, 0.0
-            for k in names:
-                a, b = header[k]["data_offsets"]
-                s, e = new[k]["data_offsets"]
-                if e <= done:
+            done, base = have - len(head), 8 + n
+            items = [(base + header[k]["data_offsets"][0], base + header[k]["data_offsets"][1],
+                      new[k]["data_offsets"][0], new[k]["data_offsets"][1]) for k in names]
+            segs = plan_segments(items)
+            self.log(f"{out_name}: {len(items)} tensors in {len(segs)} range(s)")
+            prog = {"next": (len(head) + done) * 20 // total + 1}
+            for seg in segs:
+                seg = [t for t in seg if t[3] > done]  # resume per tensor
+                if not seg:
                     continue
-                skip = max(0, done - s)
-                self.stream_range(name, base + a + skip, base + b, out, out_name, quiet=True)
-                done = e
-                if time.monotonic() - lastlog > 2:
-                    lastlog = time.monotonic()
-                    self.log(f"{out_name}: {(len(head) + done) >> 20} MB of {total >> 20} MB")
+                self._stream_segment(name, seg, done, out, out_name, len(head), total, prog)
+                done = seg[-1][3]
+                self.log(f"{out_name}: {(len(head) + done) >> 20} MB of {total >> 20} MB")
         if os.path.getsize(part) != total:
             raise HubError(f"{out_name}: size mismatch after download")
         os.replace(part, final)
         self.log(f"{out_name}: {total >> 20} MB written ({len(names)} tensors)")
         return final
+
+    def _stream_segment(self, name, seg, done, out, label, headlen, total, prog):
+        """One Range request for the merged segment; writes only the tensors' bytes (gaps discarded).
+        `seg` = [(abs_start, abs_end, compact_start, compact_end)]; `done` = compact bytes already written."""
+        # first remaining tensor may be partly written
+        todo = []
+        for a, b, s, e in seg:
+            skip = max(0, done - s)
+            if b > a + skip:
+                todo.append((a + skip, b))
+        if not todo:
+            return
+        seg_end, i, written = todo[-1][1], 0, 0
+        out.seek(headlen + done)
+        pos = todo[0][0]
+        for attempt in range(RETRIES):
+            try:
+                with self._request(name, (max(pos, todo[i][0]), seg_end)) as r:
+                    pos = max(pos, todo[i][0])
+                    if r.status == 200 and pos > 0:
+                        raise HubError(f"{name}: server ignored Range")
+                    while i < len(todo):
+                        chunk = r.read(min(CHUNK, seg_end - pos))
+                        if not chunk:
+                            break
+                        lo, hi = pos, pos + len(chunk)
+                        pos = hi
+                        while i < len(todo) and todo[i][0] < hi:
+                            a, b = todo[i]
+                            x, y = max(a, lo), min(b, hi)
+                            if y > x:
+                                out.write(chunk[x - lo:y - lo])
+                                written += y - x
+                            if b <= hi:
+                                i += 1
+                            else:
+                                todo[i] = (max(a, hi), b)
+                                break
+                        cur = headlen + done + written
+                        if cur * 20 // total >= prog["next"]:
+                            prog["next"] = cur * 20 // total + 1
+                            self.log(f"{label}: {cur >> 20} MB of {total >> 20} MB")
+                if i >= len(todo):
+                    out.flush()
+                    return
+            except (OSError, http_incomplete()):
+                pass
+            self.sleep(min(2 ** attempt, 20))
+        raise HubError(f"{name}: incomplete download of merged range ({written} bytes written)")
 
     # ---- top level ---------------------------------------------------
     def fetch(self, layers=None, client=False):
@@ -296,6 +348,20 @@ class Hub:
         self.fetch_config()
         self.fetch_compact(SINGLE_NAME, lambda names: needed_prefixes(layers, client, detect_layout(names)))
         return self.dir
+
+
+def plan_segments(items, bridge=None, cap=None):
+    """Group (abs_start, abs_end, ...) tuples sorted by offset into merged ranges: gaps <= bridge are
+    bridged, a range stops growing at cap bytes."""
+    bridge = BRIDGE if bridge is None else bridge
+    cap = MAX_SEGMENT if cap is None else cap
+    segs = []
+    for t in sorted(items):
+        if segs and t[0] - segs[-1][-1][1] <= bridge and t[1] - segs[-1][0][0] <= cap:
+            segs[-1].append(t)
+        else:
+            segs.append([t])
+    return segs
 
 
 def http_incomplete():

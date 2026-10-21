@@ -209,5 +209,102 @@ class HubTest(unittest.TestCase):
         self.assertTrue(all(a is None for *_, a in log2))
 
 
+def many_tensor_file(n=40, size=1000, gap_every=None, gap=0):
+    """Single safetensors blob with n small tensors t.0..; optional big unneeded gap after every gap_every."""
+    import struct
+    header, blob = {}, b""
+    for i in range(n):
+        if gap_every and i and i % gap_every == 0:
+            header[f"skip.{i}"] = {"dtype": "U8", "shape": [gap], "data_offsets": [len(blob), len(blob) + gap]}
+            blob += b"\xee" * gap
+        header[f"model.layers.0.t{i}"] = {"dtype": "U8", "shape": [size], "data_offsets": [len(blob), len(blob) + size]}
+        blob += bytes([i % 251]) * size
+    hb = json.dumps(header).encode()
+    hb += b" " * (-len(hb) % 8)
+    return struct.pack("<Q", len(hb)) + hb + blob
+
+
+class CoalesceTest(HubTest):
+    def _prefix(self):
+        return ["model.layers.0."]
+
+    def test_requests_drop_to_segments(self):
+        files = {"model.safetensors": many_tensor_file()}
+        h, log, _ = self.hub(files)
+        h.fetch_compact("model.safetensors", self._prefix())
+        data_reqs = [r for _, n, r, _ in log if r and n == "model.safetensors"]
+        self.assertEqual(len(data_reqs), 2 + 1)  # 8-byte size, header, ONE merged range (was 40)
+        out = open(os.path.join(h.dir, "model.safetensors"), "rb").read()
+        self.assertEqual(out.count(bytes([7]) * 1000), 1)
+        self.assertTrue(any("40 tensors in 1 range" in m for m in self.logs))
+
+    def test_large_gap_not_fetched(self):
+        gap = 300
+        files = {"model.safetensors": many_tensor_file(20, 100, gap_every=10, gap=gap)}
+        h, log, _ = self.hub(files)
+        orig = hub.BRIDGE
+        hub.BRIDGE = 200
+        try:
+            h.fetch_compact("model.safetensors", self._prefix())
+        finally:
+            hub.BRIDGE = orig
+        import struct
+        blob = files["model.safetensors"]
+        base = 8 + struct.unpack("<Q", blob[:8])[0]
+        data = [tuple(map(int, r[6:].split("-"))) for _, n, r, _ in log if r and n == "model.safetensors"][2:]
+        self.assertEqual(len(data), 2)
+        skip = blob.index(b"\xee" * gap)
+        for lo, hi in data:
+            self.assertFalse(lo <= skip < hi, "gap was fetched")
+        out = open(os.path.join(h.dir, "model.safetensors"), "rb").read()
+        self.assertNotIn(b"\xee", out)
+
+    def test_resume_after_interrupted_segment(self):
+        files = {"model.safetensors": many_tensor_file()}
+        h, log, _ = self.hub(files)
+        h.fetch_compact("model.safetensors", self._prefix())
+        final = os.path.join(h.dir, "model.safetensors")
+        whole = open(final, "rb").read()
+        os.rename(final, final + ".part")
+        with open(final + ".part", "r+b") as f:
+            f.truncate(len(whole) // 2 + 123)  # mid-tensor
+        log.clear()
+        h.fetch_compact("model.safetensors", self._prefix())
+        self.assertEqual(open(final, "rb").read(), whole)
+        got = sum(int(r[6:].split("-")[1]) - int(r[6:].split("-")[0]) + 1 for _, n, r, _ in log if r and n == "model.safetensors")
+        self.assertLess(got, len(whole) * 3 // 4)
+
+    def test_mid_stream_drop_retries(self):
+        files = {"model.safetensors": many_tensor_file()}
+        h, log, _ = self.hub(files)
+        calls = {"n": 0}
+        orig = h._request
+
+        class Cut:
+            def __init__(s, r):
+                s.r, s.n = r, 0
+                s.status = r.status
+            def __enter__(s): return s
+            def __exit__(s, *a): s.r.close()
+            def read(s, k):
+                if s.n >= 1:
+                    raise ConnectionResetError()
+                s.n += 1
+                return s.r.read(min(k, 5000))
+
+        def req(name, rng=None, method="GET"):
+            r = orig(name, rng, method)
+            if rng and rng[0] > 100 and calls["n"] == 0:
+                calls["n"] = 1
+                return Cut(r)
+            return r
+        h._request = req
+        h.fetch_compact("model.safetensors", self._prefix())
+        ref = many_tensor_file()
+        out = open(os.path.join(h.dir, "model.safetensors"), "rb").read()
+        self.assertEqual(out[-40000:], ref[-40000:])
+
+
+
 if __name__ == "__main__":
     unittest.main()
