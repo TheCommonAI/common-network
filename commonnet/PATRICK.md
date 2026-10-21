@@ -25,7 +25,7 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install torch --index-url https://download.pytorch.org/whl/cu126
-pip install "transformers>=5" safetensors numpy bitsandbytes huggingface_hub
+pip install "transformers==5.8.0" safetensors numpy bitsandbytes huggingface_hub
 python -c "import torch;print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 python -c "import bitsandbytes as b;print(b.__version__)"
 ```

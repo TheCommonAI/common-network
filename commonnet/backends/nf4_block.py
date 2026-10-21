@@ -25,7 +25,7 @@ import torch
 from safetensors import safe_open
 from torch import nn
 
-from commonnet.block import BlockRange, layer_classes
+from commonnet.block import BlockRange, build_rotary, layer_classes
 from commonnet.weights import CheckpointReader, build_module
 
 NF4_SUFFIXES = (
@@ -77,7 +77,7 @@ class Nf4BlockRange(BlockRange):
         self.num_local = self.end - self.start
         self.arch = reader.arch
         layer_cls, rotary_cls = layer_classes(self.arch)
-        self.rotary_emb = rotary_cls(config, device=device)
+        self.rotary_emb = build_rotary(rotary_cls, config, device)
         self.layer_types = list(layer_types) if layer_types else ["full_attention"] * n
 
         layers = []
