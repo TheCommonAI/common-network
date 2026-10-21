@@ -64,8 +64,8 @@ def build_route(members: list[dict], num_layers: int):
 
 def generate(members, checkpoint, prompt_ids, max_new_tokens, fmt="fp32", transport_kwargs=None):
     from commonnet.client4 import Client4
-    from transformers import Qwen3Config
-    n = Qwen3Config.from_pretrained(checkpoint).num_hidden_layers
+    from commonnet.weights import load_text_config
+    n = load_text_config(checkpoint).num_hidden_layers
     route, urls, tokens = build_route(members, n)
     transport = HttpTransport(urls, tokens=tokens, **(transport_kwargs or {}))
     client = Client4(checkpoint, transport, fmt=fmt)
