@@ -76,18 +76,31 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="commonnet.coordinator", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--endpoints", required=True)
-    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--checkpoint", help="local checkpoint directory")
+    p.add_argument("--repo", help="Hugging Face repo id; downloads only embed, final norm and lm_head")
+    p.add_argument("--revision", default="main")
     p.add_argument("--prompt", required=True)
     p.add_argument("--max-new-tokens", type=int, default=64)
     p.add_argument("--client-format", choices=["fp32", "fp16", "mlx4"], default="fp16")
     args = p.parse_args(argv)
     try:
+        if not args.checkpoint:
+            if not args.repo:
+                print("error: give --checkpoint DIR or --repo REPO", file=sys.stderr)
+                return 2
+            from commonnet import hub
+            args.checkpoint = hub.Hub(args.repo, args.revision).fetch(client=True)
         from transformers import AutoTokenizer
         from commonnet.net.client import BlockError
         members = load_endpoints(args.endpoints)
         tok = AutoTokenizer.from_pretrained(args.checkpoint)
         ids = tok(args.prompt)["input_ids"]
         out = generate(members, args.checkpoint, ids, args.max_new_tokens, args.client_format)
+    except RuntimeError as e:
+        if type(e).__name__ != "HubError":
+            raise
+        print(f"error: download failed: {e}", file=sys.stderr)
+        return 1
     except (EndpointError, auth.TokenError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
