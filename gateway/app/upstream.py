@@ -79,7 +79,7 @@ async def forward(node: dict, body: dict[str, Any], stream: bool) -> httpx.Respo
     client stashed in `resp.extensions["_client"]`. Streaming responses have
     to outlive this function, so that client cannot be context-managed here.
     """
-    if node.get("transport", "http") == "android_ws":
+    if node.get("transport", "http") in {"android_ws", "ios_ws"}:
         return await manager.forward(node, body, stream)
 
     outgoing = dict(body)

@@ -40,7 +40,9 @@ async def lifespan(app: FastAPI):
     await db.connect()
     await mobile_manager.expire_stale()
     async with db.pool().acquire() as conn:
-        await conn.execute("update nodes set healthy = false where transport = 'android_ws'")
+        await conn.execute(
+            "update nodes set healthy = false where transport in ('android_ws', 'ios_ws')"
+        )
 
     # Seeding is best-effort. It refreshes rows that are already in the
     # database from the last deploy, so failing it is not a reason to refuse

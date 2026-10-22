@@ -1,4 +1,4 @@
--- Outbound-only Android workers use an authenticated gateway WebSocket rather
+-- Outbound-only mobile workers use an authenticated gateway WebSocket rather
 -- than a public endpoint. Keep the old HTTP transport as the default.
 alter table nodes add column if not exists transport text not null default 'http';
 alter table nodes alter column endpoint_url drop not null;
