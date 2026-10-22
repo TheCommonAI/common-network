@@ -19,6 +19,7 @@ The SQL itself needs Postgres and is exercised separately against a local
 database, not here.
 """
 import asyncio
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -219,6 +220,8 @@ class _HealthConn:
 
     async def fetch(self, sql, *args):
         await asyncio.sleep(0)
+        if "transport = 'android_ws'" in sql:
+            return []
         return self.rows
 
     async def execute(self, sql, *args):
@@ -270,6 +273,9 @@ class FakeRequest:
 
     async def json(self):
         return self._body
+
+    async def stream(self):
+        yield json.dumps(self._body).encode()
 
 
 class FakeResponse:

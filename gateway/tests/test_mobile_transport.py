@@ -253,7 +253,8 @@ class MobileTransportTests(unittest.TestCase):
             "last_heartbeat": None, "last_seen_healthy": None, "capability_text": "Bonsai",
             "domain_tags": ["general"], "catalogue_id": "bonsai2-4b",
             "transport": "android_ws", "node_token": "original-node-token",
-            "endpoint_url": None,
+            "endpoint_url": None, "group_status": None,
+            "group_members_total": None, "group_members_up": None,
         }
         db_connection = FakeDbConnection(None)
         db_connection.handlers["catalogue"] = lambda *_: catalogue_row

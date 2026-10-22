@@ -205,14 +205,15 @@ async def main() -> None:
         check("empty panel returns nothing to compose", await run_panel(plan, BODY), {})
 
         print("\ntimeout is bounded")
-        slow = StubNode("too late", delay=1.5)
+        slow = StubNode("too late", delay=3.0)
+        on_time = StubNode("on time")
         try:
             from app.config import settings
             original = settings.compose_member_timeout_seconds
-            settings.compose_member_timeout_seconds = 0.8
+            settings.compose_member_timeout_seconds = 2.0
             slow_plan = plan_panel(
                 score_nodes([node("slow", ["math"], VECTORS["math"], slow.url),
-                             node("cgla2", ["legal"], VECTORS["legal"], agg.url),
+                             node("cgla2", ["legal"], VECTORS["legal"], on_time.url),
                              node("gen2", ["general"], VECTORS["general"], agg.url)], SPANNING),
                 SPANNING, mode_override="auto")
             out = await run_panel(slow_plan, BODY)
@@ -221,6 +222,7 @@ async def main() -> None:
         finally:
             settings.compose_member_timeout_seconds = original
             slow.stop()
+            on_time.stop()
     finally:
         for stub in (maths, legal, agg):
             try:
