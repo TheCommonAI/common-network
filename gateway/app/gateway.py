@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app import compose, db, embedder, metrics, ratelimit, upstream
 from app.compose import PanelPlan
 from app.config import settings
+from app.mobile_transport import MAX_REQUEST_BYTES, manager
 from app.router import ScoredNode, best_matched_domain, score_nodes
 from app.verify import VerificationReport, verify
 
@@ -76,7 +77,11 @@ def _extract_routing_text(body: dict[str, Any]) -> str:
 async def _fetch_healthy_nodes() -> list[dict]:
     async with db.pool().acquire() as conn:
         rows = await conn.fetch("select * from nodes where healthy = true")
-    return [dict(r) for r in rows]
+    nodes = [dict(row) for row in rows]
+    return [
+        node for node in nodes
+        if node.get("transport", "http") != "android_ws" or manager.is_live(node["id"])
+    ]
 
 
 async def _fetch_restarting_groups() -> list[dict]:
@@ -315,13 +320,11 @@ def _proxy_response(resp: httpx.Response, headers: dict[str, str], stream: bool,
     """
     if stream:
         async def body_iter():
-            client = resp.extensions["_client"]
             try:
                 async for chunk in resp.aiter_raw():
                     yield chunk
             finally:
-                await resp.aclose()
-                await client.aclose()
+                await upstream.close_response(resp)
                 if on_done is not None:
                     on_done()
 
@@ -434,8 +437,7 @@ async def _handle_composed(
     except (httpx.HTTPError, httpx.HTTPStatusError):
         if resp is not None:
             try:
-                await resp.aclose()
-                await resp.extensions["_client"].aclose()
+                await upstream.close_response(resp)
             except (httpx.HTTPError, KeyError):
                 pass
         # The panel answered but the aggregator did not. Returning the
@@ -512,8 +514,7 @@ async def _handle_composed(
         return streamed
 
     content = await resp.aread()
-    await resp.aclose()
-    await resp.extensions["_client"].aclose()
+    await upstream.close_response(resp)
     metrics.record_request(
         **panel_metrics, total_ms=int((time.monotonic() - t0) * 1000))
     return Response(
@@ -597,7 +598,17 @@ async def chat_completions(request: Request):
     def route_ms() -> int:
         return int((time.monotonic() - t0) * 1000)
 
-    body = await request.json()
+    raw_body = bytearray()
+    async for chunk in request.stream():
+        if len(raw_body) + len(chunk) > MAX_REQUEST_BYTES:
+            raise HTTPException(status_code=413, detail="request body exceeds the 1 MiB limit")
+        raw_body.extend(chunk)
+    try:
+        body = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeError):
+        raise HTTPException(status_code=400, detail="request body must be valid JSON") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be a JSON object")
     stream = bool(body.get("stream", False))
 
     # Access control before any work: a request that isn't allowed must not
@@ -799,8 +810,7 @@ async def chat_completions(request: Request):
                 return streamed
 
             content = await resp.aread()
-            await resp.aclose()
-            await resp.extensions["_client"].aclose()
+            await upstream.close_response(resp)
             # Non-streaming: headers and body arrive together, so this is also
             # the end of the response. There is no earlier moment to have timed.
             metrics.record_request(

@@ -1,7 +1,10 @@
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
+
+
+RuntimeCapability = Annotated[str, Field(min_length=1, max_length=80)]
 
 
 # --- Registry ---
@@ -9,7 +12,7 @@ from pydantic import BaseModel, Field, model_validator
 class NodeCreate(BaseModel):
     name: str
     operator: str | None = None
-    endpoint_url: str
+    endpoint_url: str | None = None
     model_name: str
     api_key_ref: str | None = None
     capability_text: str
@@ -32,6 +35,11 @@ class NodeCreate(BaseModel):
     # in a text column straight from a stranger; not otherwise validated,
     # since an unrecognised client is data, not an error.
     client: str | None = Field(default=None, max_length=64)
+    transport: Literal["http", "android_ws"] = "http"
+    runtime_name: str | None = Field(default=None, max_length=80)
+    runtime_version: str | None = Field(default=None, max_length=80)
+    model_format: str | None = Field(default=None, max_length=40)
+    runtime_capabilities: list[RuntimeCapability] = Field(default_factory=list, max_length=32)
 
     # Distributed model groups (migration 015). Sent by a group's coordinator
     # and nobody else; omitted by every single node. Self-reported, so display
@@ -72,12 +80,13 @@ class NodePublicOut(BaseModel):
     group_status: str | None = None
     group_members_total: int | None = None
     group_members_up: int | None = None
+    transport: str = "http"
 
 
 class NodeOut(NodePublicOut):
     """Full node info including endpoint_url — only for internal use and
     admin endpoints. Never returned by the public GET /nodes."""
-    endpoint_url: str
+    endpoint_url: str | None
 
 
 class NodeRegisterOut(NodePublicOut):

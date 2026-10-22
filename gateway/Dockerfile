@@ -39,4 +39,4 @@ ENV HF_HUB_OFFLINE=1 \
     HF_HUB_DISABLE_TELEMETRY=1
 
 EXPOSE 8000
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --ws-max-size 65536 --ws-max-queue 8

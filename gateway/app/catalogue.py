@@ -5,14 +5,16 @@ Node onboarding assigns from it based on a machine's real hardware and the netwo
 current demand gaps, instead of an operator hand-declaring an arbitrary model.
 """
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlparse
 
 import yaml
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import db, embedder
 from app.config import settings
+from app.models import RuntimeCapability
 
 router = APIRouter()
 
@@ -35,6 +37,14 @@ async def seed_catalogue_from_file() -> None:
     models = data.get("models", [])
 
     for m in models:
+        if m.get("android_supported"):
+            filename = Path(urlparse(m["source"][5:].split("#", 1)[0]).path).name
+            expected_suffix = f"-{m.get('weight_format')}.gguf"
+            if not m["source"].startswith("gguf:") or not filename.endswith(expected_suffix):
+                raise ValueError(
+                    f"Android-supported catalogue entry {m['id']} must declare a weight_format "
+                    "matching its GGUF source filename"
+                )
         vec = embedder.embed(m["capability_text"])
         async with db.pool().acquire() as conn:
             await conn.execute(
@@ -43,8 +53,9 @@ async def seed_catalogue_from_file() -> None:
                     (id, display_name, source, domain_tags, capability_text,
                      params_b, min_ram_gb, min_vram_gb, needs_gpu,
                      verified_in_lane, lane_benchmark, licence,
-                     base_model, overlay)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                     base_model, overlay, weight_format, runtime_requirements,
+                     runtime_notes, android_supported)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                 on conflict (id) do update set
                     display_name = excluded.display_name,
                     source = excluded.source,
@@ -58,13 +69,19 @@ async def seed_catalogue_from_file() -> None:
                     lane_benchmark = excluded.lane_benchmark,
                     licence = excluded.licence,
                     base_model = excluded.base_model,
-                    overlay = excluded.overlay
+                    overlay = excluded.overlay,
+                    weight_format = excluded.weight_format,
+                    runtime_requirements = excluded.runtime_requirements,
+                    runtime_notes = excluded.runtime_notes,
+                    android_supported = excluded.android_supported
                 """,
                 m["id"], m["display_name"], m["source"], m["domain_tags"], m["capability_text"],
                 m.get("params_b"), m["min_ram_gb"], m.get("min_vram_gb", 0), m.get("needs_gpu", False),
                 m.get("verified_in_lane", False),
                 _to_jsonb(m.get("lane_benchmark")), m.get("licence"),
                 m.get("base_model"), _to_jsonb(m.get("overlay")),
+                m.get("weight_format"), m.get("runtime_requirements", []),
+                m.get("runtime_notes"), m.get("android_supported", False),
             )
 
     # The seed file is the source of truth for what the network offers, so an
@@ -121,6 +138,8 @@ class HardwareProfile(BaseModel):
 
 class AssignRequest(BaseModel):
     hardware: HardwareProfile
+    platform: Literal["generic", "android"] = "generic"
+    runtime_capabilities: list[RuntimeCapability] = Field(default_factory=list, max_length=32)
 
 
 class AssignResponse(BaseModel):
@@ -131,6 +150,9 @@ class AssignResponse(BaseModel):
     capability_text: str
     reason: str
     cold_start: bool
+    weight_format: str | None = None
+    runtime_requirements: list[str] = Field(default_factory=list)
+    runtime_notes: str | None = None
 
 
 def _runnable(model: dict, hw: HardwareProfile) -> bool:
@@ -176,6 +198,18 @@ async def assign(req: AssignRequest) -> AssignResponse:
         coverage = await _domain_coverage(conn)
 
     catalogue = [_row_to_dict(r) for r in catalogue_rows]
+    if req.platform == "android" and not req.runtime_capabilities:
+        raise HTTPException(
+            status_code=422,
+            detail="Android assignment requires the runtime capabilities this device supports",
+        )
+    supported_capabilities = set(req.runtime_capabilities)
+    if req.platform == "android":
+        catalogue = [
+            model for model in catalogue
+            if model.get("android_supported")
+            and set(model.get("runtime_requirements") or []).issubset(supported_capabilities)
+        ]
     runnable = [m for m in catalogue if _runnable(m, req.hardware)]
     if not runnable:
         raise HTTPException(status_code=422, detail="no catalogue model fits this machine's hardware")
@@ -200,6 +234,9 @@ async def assign(req: AssignRequest) -> AssignResponse:
                     f"best {domain} specialist your hardware can run."
                 ),
                 cold_start=True,
+                weight_format=chosen.get("weight_format"),
+                runtime_requirements=chosen.get("runtime_requirements") or [],
+                runtime_notes=chosen.get("runtime_notes"),
             )
         # Nothing in the default order fits -- fall back to whatever's runnable.
         chosen = runnable[0]
@@ -209,6 +246,9 @@ async def assign(req: AssignRequest) -> AssignResponse:
             capability_text=chosen["capability_text"],
             reason="Cold start, and no default-order domain fits this hardware — assigning the first runnable catalogue entry.",
             cold_start=True,
+            weight_format=chosen.get("weight_format"),
+            runtime_requirements=chosen.get("runtime_requirements") or [],
+            runtime_notes=chosen.get("runtime_notes"),
         )
 
     max_demand = max(demand.values()) if demand else 1
@@ -236,6 +276,9 @@ async def assign(req: AssignRequest) -> AssignResponse:
             capability_text=chosen["capability_text"],
             reason="No domain gap data available for any runnable model — assigning the first runnable catalogue entry.",
             cold_start=False,
+            weight_format=chosen.get("weight_format"),
+            runtime_requirements=chosen.get("runtime_requirements") or [],
+            runtime_notes=chosen.get("runtime_notes"),
         )
 
     scored.sort(key=lambda t: t[0], reverse=True)
@@ -251,6 +294,9 @@ async def assign(req: AssignRequest) -> AssignResponse:
         source=chosen["source"], domain_tags=chosen["domain_tags"],
         capability_text=chosen["capability_text"],
         reason=reason, cold_start=False,
+        weight_format=chosen.get("weight_format"),
+        runtime_requirements=chosen.get("runtime_requirements") or [],
+        runtime_notes=chosen.get("runtime_notes"),
     )
 
 

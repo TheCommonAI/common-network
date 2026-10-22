@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from app import db
 from app.config import settings
+from app.mobile_transport import HEARTBEAT_LEASE_SECONDS, manager
 from app.registry import validate_endpoint_url
 from app.upstream import auth_headers
 
@@ -81,7 +82,7 @@ async def run_health_checks_once() -> None:
     async with db.pool().acquire() as conn:
         rows = await conn.fetch(
             "select id, endpoint_url, api_key_ref, worker_token, model_name, group_status "
-            "from nodes where not paused"
+            "from nodes where not paused and transport = 'http'"
         )
 
     async with httpx.AsyncClient() as client:
@@ -139,6 +140,43 @@ async def run_health_checks_once() -> None:
                 """,
                 ok, row["id"], row["endpoint_url"],
             )
+
+    await manager.expire_stale()
+    async with db.pool().acquire() as conn:
+        rows = await conn.fetch(
+            "select id from nodes where not paused and transport = 'android_ws'"
+        )
+        for row in rows:
+            live = manager.is_live(row["id"])
+            await conn.execute(
+                """
+                update nodes
+                   set healthy = $1,
+                       last_heartbeat = now(),
+                       last_seen_healthy = case when $1 then now()
+                                                else last_seen_healthy end
+                 where id = $2 and not paused and transport = 'android_ws'
+                """,
+                live, row["id"],
+            )
+
+
+async def mobile_lease_loop() -> None:
+    while True:
+        try:
+            expired = await manager.expire_stale()
+            if expired:
+                async with db.pool().acquire() as conn:
+                    await conn.execute(
+                        "update nodes set healthy = false where id = any($1::uuid[]) "
+                        "and transport = 'android_ws'",
+                        expired,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Android worker lease sweep failed")
+        await asyncio.sleep(max(1, HEARTBEAT_LEASE_SECONDS // 12))
 
 
 async def health_check_loop() -> None:

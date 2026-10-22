@@ -21,6 +21,7 @@ replaced, and `app.embedder` imports sentence-transformers lazily so nothing
 downloads.
 """
 import asyncio
+import json
 import sys
 import time
 import unittest
@@ -55,6 +56,9 @@ class FakeRequest:
     async def json(self):
         return self._body
 
+    async def stream(self):
+        yield json.dumps(self._body).encode()
+
 
 class FakeResponse:
     """Enough of an httpx.Response for the non-streaming relay."""
@@ -79,7 +83,7 @@ async def no_op(*args, **kwargs):
 class EmbedOffTheLoop(unittest.IsolatedAsyncioTestCase):
     async def test_a_blocking_encode_does_not_stall_the_loop(self):
         def blocking_encode(text):
-            time.sleep(0.3)
+            time.sleep(0.5)
             return [0.0]
 
         ticks = 0
@@ -96,7 +100,7 @@ class EmbedOffTheLoop(unittest.IsolatedAsyncioTestCase):
             task.cancel()
 
         self.assertEqual(vector, [0.0])
-        # About 30 ticks in 0.3s if the loop was free. A blocked loop gets
+        # About 50 ticks in 0.5s if the loop was free. A blocked loop gets
         # one or two, so 10 separates the two with room to spare.
         self.assertGreater(ticks, 10)
 

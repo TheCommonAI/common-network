@@ -608,8 +608,7 @@ async def _call_specialist(member: PanelMember, original_body: dict[str, Any]) -
     finally:
         if resp is not None:
             try:
-                await resp.aclose()
-                await resp.extensions["_client"].aclose()
+                await upstream.close_response(resp)
             except (httpx.HTTPError, KeyError):
                 pass
 

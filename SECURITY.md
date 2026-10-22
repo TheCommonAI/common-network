@@ -34,6 +34,16 @@ they do not have.
 
 ## What a stranger cannot do
 
+Android contributors use an authenticated outbound WebSocket, not a public
+endpoint. The node token is sent in the upgrade header and remains scoped to
+the node. The gateway pins jobs to the registered catalogue model, limits
+mobile concurrency and payload sizes, and provides no arbitrary proxy route.
+Connection health is lease-based. Runtime capabilities are self-reported, not
+attested; the gateway validates them against explicit catalogue requirements
+but cannot prove which weights or inference engine are actually loaded. See
+[gateway/MOBILE-NODES.md](gateway/MOBILE-NODES.md) for the framing and current
+Bonsai format requirements.
+
 - **Use the network without contributing to it.** With
   `REQUIRE_CONTRIBUTION=true` (the shipped default), a request to
   `/v1/chat/completions` must carry the node token of a currently registered

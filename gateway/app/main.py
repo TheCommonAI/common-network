@@ -13,8 +13,9 @@ from app.config import settings
 from app.decisions import router as decisions_router
 from app.demand import router as demand_router
 from app.gateway import router as gateway_router
-from app.health import health_check_loop
+from app.health import health_check_loop, mobile_lease_loop
 from app.metrics import router as metrics_router
+from app.mobile_transport import manager as mobile_manager, router as mobile_router
 from app.registry import router as registry_router
 from app.seed import seed_from_file
 
@@ -37,6 +38,9 @@ async def lifespan(app: FastAPI):
     embedder.load()
     print("startup: connecting to database...", flush=True)
     await db.connect()
+    await mobile_manager.expire_stale()
+    async with db.pool().acquire() as conn:
+        await conn.execute("update nodes set healthy = false where transport = 'android_ws'")
 
     # Seeding is best-effort. It refreshes rows that are already in the
     # database from the last deploy, so failing it is not a reason to refuse
@@ -57,12 +61,14 @@ async def lifespan(app: FastAPI):
               f"serving with whatever is already in the database", flush=True)
 
     health_task = asyncio.create_task(health_check_loop())
+    mobile_lease_task = asyncio.create_task(mobile_lease_loop())
     retention_task = asyncio.create_task(retention_loop())
     print("startup: ready", flush=True)
     yield
     health_task.cancel()
+    mobile_lease_task.cancel()
     retention_task.cancel()
-    await asyncio.gather(health_task, retention_task, return_exceptions=True)
+    await asyncio.gather(health_task, mobile_lease_task, retention_task, return_exceptions=True)
     await db.disconnect()
 
 
@@ -78,6 +84,7 @@ app = FastAPI(
 )
 
 app.include_router(registry_router)
+app.include_router(mobile_router)
 app.include_router(gateway_router)
 app.include_router(decisions_router)
 app.include_router(metrics_router)

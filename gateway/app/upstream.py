@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.mobile_transport import manager
 
 
 def resolve_api_key(api_key_ref: str | None) -> str | None:
@@ -74,10 +75,13 @@ def chat_url(node: dict) -> str:
 async def forward(node: dict, body: dict[str, Any], stream: bool) -> httpx.Response:
     """Forward a request body to a node, rewriting only the model name.
 
-    The caller owns closing both the response and the client stashed in
-    `resp.extensions["_client"]` -- streaming responses have to outlive this
-    function, so the client cannot be context-managed here.
+    The caller owns closing the response and, for HTTP nodes, the optional
+    client stashed in `resp.extensions["_client"]`. Streaming responses have
+    to outlive this function, so that client cannot be context-managed here.
     """
+    if node.get("transport", "http") == "android_ws":
+        return await manager.forward(node, body, stream)
+
     outgoing = dict(body)
     outgoing["model"] = node["model_name"]
     # Connect and read are separated on purpose -- see the note in config.py.
@@ -97,3 +101,11 @@ async def forward(node: dict, body: dict[str, Any], stream: bool) -> httpx.Respo
     resp = await client.send(req, stream=stream)
     resp.extensions["_client"] = client
     return resp
+
+
+async def close_response(response: httpx.Response) -> None:
+    """Close both the response stream and its optional HTTP upstream client."""
+    client = response.extensions.get("_client")
+    await response.aclose()
+    if client is not None:
+        await client.aclose()

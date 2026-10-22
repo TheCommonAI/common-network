@@ -116,6 +116,10 @@ models:
     verified_in_lane: false
     lane_benchmark: null
     licence: apache-2.0
+    weight_format: Q2_0
+    runtime_requirements: [gguf:q2_0, ternary:hadamard-activations]
+    runtime_notes: "Stock upstream llama.cpp requires build b11555 or newer for Q2_0 ternary inference; PQ2_0 and PTQ1_0 are not supported by that runtime."
+    android_supported: true
 
   - id: bonsai2-4b
     display_name: Bonsai 2 4B
@@ -133,6 +137,10 @@ models:
     verified_in_lane: false
     lane_benchmark: null
     licence: apache-2.0
+    weight_format: Q2_0
+    runtime_requirements: [gguf:q2_0, ternary:hadamard-activations]
+    runtime_notes: "Stock upstream llama.cpp requires build b11555 or newer for Q2_0 ternary inference; PQ2_0 and PTQ1_0 are not supported by that runtime."
+    android_supported: true
 
   - id: bonsai-8b
     display_name: Bonsai 8B (1st gen)
@@ -153,6 +161,10 @@ models:
     verified_in_lane: false
     lane_benchmark: null
     licence: apache-2.0
+    weight_format: Q2_0_g64
+    runtime_requirements: [gguf:q2_0_g64]
+    runtime_notes: "Use the upstream-compatible Q2_0_g64 file; the similarly named non-g64 packing requires a fork and is not supported by stock upstream llama.cpp."
+    android_supported: true
 
   - id: bonsai2-9b
     display_name: Bonsai 2 9B
@@ -172,6 +184,10 @@ models:
     verified_in_lane: false
     lane_benchmark: null
     licence: apache-2.0
+    weight_format: Q2_0
+    runtime_requirements: [gguf:q2_0, ternary:hadamard-activations]
+    runtime_notes: "Stock upstream llama.cpp requires build b11555 or newer for Q2_0 ternary inference; PQ2_0 and PTQ1_0 are not supported by that runtime."
+    android_supported: true
 
   # --- Legal ------------------------------------------------------------
   #
