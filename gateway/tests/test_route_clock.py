@@ -21,6 +21,7 @@ replaced, and `app.embedder` imports sentence-transformers lazily so nothing
 downloads.
 """
 import asyncio
+import json
 import sys
 import time
 import unittest
@@ -54,6 +55,9 @@ class FakeRequest:
 
     async def json(self):
         return self._body
+
+    async def stream(self):
+        yield json.dumps(self._body).encode()
 
 
 class FakeResponse:

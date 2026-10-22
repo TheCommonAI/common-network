@@ -309,46 +309,20 @@ everything.
 | `GET /demand/gaps` | Under-served domains, and demand nothing in the catalogue covers. |
 | `GET /demand/plan?machines=20&ram_gb=8` | An install plan for a set of machines. |
 | `GET /catalogue`, `POST /assign` | The specialist catalogue, and what a given machine should run. |
+| `WS /nodes/{id}/connect` | Authenticated outbound-only Android worker channel; see [the protocol](gateway/MOBILE-NODES.md). |
 
 ## The catalogue
 
 `catalogue/catalogue.seed.yaml` is the source of truth for what the network will
-auto-install. v0.1 listed five general-purpose models; **five generalists cannot
-compose**, so v0.1.1 is built around narrow specialists — models clearly worse
-than a generalist at most things and clearly better at one. Every `ollama:` tag
-was verified against `registry.ollama.ai` before being listed.
-
-`ollama:` in a catalogue entry names a model in **that registry**, which the CLI
-reads directly — it is not a statement that Ollama is installed. Ollama's
-registry is an OCI registry serving GGUF blobs, so a `source:` of
-`ollama:mathstral:7b` means "that tag, fetched from registry.ollama.ai and
-content-addressed by the digest in its manifest". An `ollama:` tag in the
-catalogue and a machine that has Ollama installed are independent facts.
-
-Generalists are still there for two jobs, neither of which is being on a panel:
-answering requests that don't span domains, and **aggregating**. The `general`
-tag is excluded from panel seats entirely — a generalist sitting next to a
-specialist in that specialist's own lane is the pairing that lost in
-Experiment 2.
-
-**CGLA-Legal is temporarily commented out** of `catalogue.seed.yaml` (2026-08-25).
-Uncomment the block to restore it; nothing else needs changing. While it is out,
-the network has **no legal coverage at all** — a legal question routes to a
-generalist that will answer confidently and without grounding, which is the
-failure CGLA exists to prevent.
-
-It is worth restoring, because it is the catalogue's only genuinely
-non-dominated specialist. It is not a plain model download and not an API: it is
-a causal graph over South Australian and federal statute plus a local Llama model
-that only extracts facts and narrates outcomes. Its own benchmark shows it
-answering *fewer* legal questions correctly than a frontier model (35/46 vs
-Claude Sonnet's 40/46) while refusing **7/7** out-of-scope questions where Claude
-refused **0/7**.
-
-Worse on one axis, better on another is exactly what *non-dominated* means — the
-precondition v0.1 concluded no available model pair satisfied. Note that
-`testing/compose-test/` is built around SA-law cases and needs this entry back
-before its result means what it is designed to mean.
+auto-install. The live catalogue currently contains Bonsai 2 2B/4B/9B and the
+distinct first-generation Bonsai 8B. Bonsai 2 uses ternary `Q2_0` GGUF; the 8B
+entry uses the upstream-compatible `Q2_0_g64` GGUF. Stock upstream llama.cpp
+needs build b11555 or later for Bonsai 2's Hadamard-activation runtime and does
+not support the smaller `PQ2_0`/`PTQ1_0` packings. The non-`g64` Bonsai 8B
+layout is fork-only. Catalogue requirements and format caveats are exposed by
+`GET /catalogue` and `POST /assign`; do not substitute standard Ollama models.
+Android contribution eligibility and its protocol are documented in
+[gateway/MOBILE-NODES.md](gateway/MOBILE-NODES.md).
 
 ## Security
 

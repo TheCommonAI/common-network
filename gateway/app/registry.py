@@ -11,6 +11,7 @@ from fastapi import APIRouter, Header, HTTPException
 from app import db, embedder
 from app.config import settings
 from app.models import NodeCreate, NodeOut, NodePublicOut, NodeRegisterOut
+from app.mobile_transport import manager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -183,6 +184,7 @@ def _row_to_node_public_out(row) -> NodePublicOut:
         group_status=row["group_status"],
         group_members_total=row["group_members_total"],
         group_members_up=row["group_members_up"],
+        transport=row["transport"] if "transport" in row else "http",
     )
 
 
@@ -209,7 +211,33 @@ def _row_to_node_out(row) -> NodeOut:
         group_status=row["group_status"],
         group_members_total=row["group_members_total"],
         group_members_up=row["group_members_up"],
+        transport=row["transport"] if "transport" in row else "http",
     )
+
+
+def validate_android_node(node: NodeCreate, catalogue_model) -> None:
+    """Enforce the catalogue's explicit mobile eligibility and runtime policy."""
+    if node.endpoint_url is not None:
+        raise HTTPException(status_code=400, detail="Android WebSocket nodes must not register an endpoint_url.")
+    if node.api_key_ref or node.worker_token:
+        raise HTTPException(status_code=400, detail="Android WebSocket nodes cannot use API-key or HTTP-worker credentials.")
+    if not node.catalogue_id or node.catalogue_id != node.model_name:
+        raise HTTPException(status_code=400, detail="Android nodes must pin model_name to their catalogue_id.")
+    if not node.runtime_name or not node.runtime_version or not node.model_format:
+        raise HTTPException(status_code=400, detail="Android nodes must declare runtime name, version, and model format.")
+    if (
+        catalogue_model is None or not catalogue_model["android_supported"]
+        or not str(catalogue_model["source"]).startswith("gguf:")
+        or not catalogue_model["weight_format"]
+        or node.model_format != catalogue_model["weight_format"]
+    ):
+        raise HTTPException(status_code=422, detail="model is not an Android-supported catalogue format.")
+    required = set(catalogue_model["runtime_requirements"] or [])
+    if not required.issubset(set(node.runtime_capabilities)):
+        raise HTTPException(
+            status_code=422,
+            detail="declared runtime capabilities do not satisfy this catalogue model's requirements.",
+        )
 
 
 @router.post("/nodes", response_model=NodeRegisterOut)
@@ -240,7 +268,18 @@ async def register_node(
     # that just opened a fresh quick tunnel may be registering a hostname
     # whose DNS has not propagated yet, and rejecting them there costs them
     # the whole join. Defaults to the configured window.
-    await validate_endpoint_url(node.endpoint_url)
+    if node.transport == "http":
+        if not node.endpoint_url:
+            raise HTTPException(status_code=400, detail="HTTP nodes require endpoint_url.")
+        await validate_endpoint_url(node.endpoint_url)
+    else:
+        async with db.pool().acquire() as conn:
+            catalogue_model = await conn.fetchrow(
+                "select id, source, weight_format, runtime_requirements, android_supported "
+                "from catalogue_models where id = $1",
+                node.catalogue_id,
+            )
+        validate_android_node(node, catalogue_model)
     vec = embedder.embed(node.capability_text)
 
     # Body field first, X-Common-Client header second. The desktop app sends
@@ -287,7 +326,9 @@ async def register_node(
                     -- that an earlier registration set.
                     group_status = coalesce($15, group_status),
                     group_members_total = coalesce($16, group_members_total),
-                    group_members_up = coalesce($17, group_members_up)
+                    group_members_up = coalesce($17, group_members_up),
+                    transport = $18, runtime_name = $19, runtime_version = $20,
+                    model_format = $21, runtime_capabilities = $22
                 where name = $1
                 returning *
                 """,
@@ -295,6 +336,8 @@ async def register_node(
                 node.capability_text, vec, node.region, node.cost_per_1k,
                 node.domain_tags, node.catalogue_id, new_token, node.worker_token, client,
                 node.group_status, node.group_members_total, node.group_members_up,
+                node.transport, node.runtime_name, node.runtime_version,
+                node.model_format, node.runtime_capabilities,
             )
         else:
             row = await conn.fetchrow(
@@ -304,16 +347,21 @@ async def register_node(
                      capability_text, capability_embed, region, cost_per_1k,
                      domain_tags, catalogue_id, node_token, worker_token, client, healthy,
                      group_status, group_members_total, group_members_up)
+                     group_status, group_members_total, group_members_up,
+                     transport, runtime_name, runtime_version, model_format, runtime_capabilities)
                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, false,
-                        $15, $16, $17)
+                        $15, $16, $17, $18, $19, $20, $21, $22)
                 returning *
                 """,
                 node.name, node.operator, node.endpoint_url, node.model_name, node.api_key_ref,
                 node.capability_text, vec, node.region, node.cost_per_1k,
                 node.domain_tags, node.catalogue_id, new_token, node.worker_token, client,
                 node.group_status, node.group_members_total, node.group_members_up,
+                node.transport, node.runtime_name, node.runtime_version,
+                node.model_format, node.runtime_capabilities,
             )
 
+    await manager.disconnect_node(row["id"], "node re-registered")
     out = _row_to_node_public_out(row)
     # node_token reaches only whoever proved they own the name: fresh inserts
     # (nobody owned it before) and token-holding re-registrations.
@@ -345,4 +393,5 @@ async def delete_node(node_id: UUID, x_common_node_token: str | None = Header(de
         )
     if result == "DELETE 0":
         raise HTTPException(status_code=404, detail="node not found, or X-Common-Node-Token doesn't match")
+    await manager.disconnect_node(node_id)
     return {"deleted": str(node_id)}

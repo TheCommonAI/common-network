@@ -209,7 +209,7 @@ async def main() -> None:
         try:
             from app.config import settings
             original = settings.compose_member_timeout_seconds
-            settings.compose_member_timeout_seconds = 0.3
+            settings.compose_member_timeout_seconds = 0.8
             slow_plan = plan_panel(
                 score_nodes([node("slow", ["math"], VECTORS["math"], slow.url),
                              node("cgla2", ["legal"], VECTORS["legal"], agg.url),
