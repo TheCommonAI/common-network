@@ -62,13 +62,15 @@ def build_route(members: list[dict], num_layers: int):
     return route, urls, tokens
 
 
-def generate(members, checkpoint, prompt_ids, max_new_tokens, fmt="fp32", transport_kwargs=None):
+def generate(members, checkpoint, prompt_ids, max_new_tokens, fmt="fp32", transport_kwargs=None,
+             hidden_dtype=None):
     from commonnet.client4 import Client4
     from commonnet.weights import load_text_config
     n = load_text_config(checkpoint).num_hidden_layers
     route, urls, tokens = build_route(members, n)
     transport = HttpTransport(urls, tokens=tokens, **(transport_kwargs or {}))
-    client = Client4(checkpoint, transport, fmt=fmt)
+    extra = {} if hidden_dtype is None else {"hidden_dtype": hidden_dtype}
+    client = Client4(checkpoint, transport, fmt=fmt, **extra)
     return client.generate(route, prompt_ids, max_new_tokens)
 
 
@@ -82,6 +84,9 @@ def main(argv=None) -> int:
     p.add_argument("--prompt", required=True)
     p.add_argument("--max-new-tokens", type=int, default=64)
     p.add_argument("--client-format", choices=["fp32", "fp16", "mlx4"], default="fp16")
+    p.add_argument("--hidden-dtype", choices=["float16", "float32"], default="float16",
+                   help="what crosses between members (mlx4 client); float32 with COMMONNET_DTYPE=bfloat16 "
+                        "on the members matches a bfloat16 model exactly")
     args = p.parse_args(argv)
     try:
         if not args.checkpoint:
@@ -95,7 +100,9 @@ def main(argv=None) -> int:
         members = load_endpoints(args.endpoints)
         tok = AutoTokenizer.from_pretrained(args.checkpoint)
         ids = tok(args.prompt)["input_ids"]
-        out = generate(members, args.checkpoint, ids, args.max_new_tokens, args.client_format)
+        import torch
+        out = generate(members, args.checkpoint, ids, args.max_new_tokens, args.client_format,
+                       hidden_dtype=getattr(torch, args.hidden_dtype))
     except RuntimeError as e:
         if type(e).__name__ != "HubError":
             raise

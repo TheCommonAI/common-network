@@ -83,7 +83,7 @@ class _MlxQuantized:
 
 class Client4(Client):
     def __init__(self, checkpoint_dir: str, transport, fmt: str = "fp16", device="cpu",
-                 bits: int = 4, group_size: int = 64):
+                 bits: int = 4, group_size: int = 64, hidden_dtype=torch.float16):
         if fmt not in FORMATS:
             raise ValueError(f"fmt must be one of {FORMATS}, got {fmt!r}")
         if fmt != "mlx4":
@@ -99,7 +99,7 @@ class Client4(Client):
         self.config = reader.config
         self.transport = transport
         self.device = torch.device("cpu")
-        self.dtype = torch.float16
+        self.dtype = hidden_dtype  # what crosses the wire: float32 avoids float16 overflow on Qwen
         self.fmt = fmt
         self.arch = reader.arch
         embed_name = reader.prefix + "embed_tokens.weight"

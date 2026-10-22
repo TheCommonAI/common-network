@@ -5,8 +5,11 @@ tensors, quantizes the linears to 4 bits (or uses an already-quantized MLX
 checkpoint), keeps a KV cache per session, and implements the BlockRange
 interface: forward(session_id, hidden, start_pos), close(session_id).
 
-Hidden states cross the boundary as float16 bytes (commonnet.wire). Inside, the
-block computes in float16.
+Hidden states cross the boundary as float16 bytes (commonnet.wire) or, when the
+caller sends float32, as float32. Inside, the block computes in float16 unless
+dtype says otherwise. Qwen checkpoints are trained in bfloat16 and carry
+activations beyond float16's range on some prompts, which come out as NaN; for
+those, compute in bfloat16 (COMMONNET_DTYPE=bfloat16) and send float32.
 """
 
 from __future__ import annotations
@@ -153,9 +156,13 @@ class MlxBlockRange:
     def forward(self, session_id: str, hidden_states: torch.Tensor, start_pos: int) -> torch.Tensor:
         if hidden_states.dim() != 3 or hidden_states.shape[-1] != self.hidden_size:
             raise ValueError(f"expected (batch, seq, {self.hidden_size}), got {tuple(hidden_states.shape)}")
-        data, shape = encode_fp16(hidden_states)
-        x = mx.array(np.frombuffer(data, dtype=np.float16).reshape(shape))
-        q_len = shape[1]
+        wide = hidden_states.dtype == torch.float32
+        if wide:
+            x = mx.array(hidden_states.detach().cpu().numpy()).astype(self.dtype)
+        else:
+            data, shape = encode_fp16(hidden_states)
+            x = mx.array(np.frombuffer(data, dtype=np.float16).reshape(shape)).astype(self.dtype)
+        q_len = hidden_states.shape[1]
 
         if start_pos == 0:
             if self.qwen35:
@@ -191,6 +198,8 @@ class MlxBlockRange:
             for blk, cache in zip(self.layers, sess.caches):
                 x = blk(x, mask, cache)
         sess.length += q_len
+        if wide:
+            return torch.from_numpy(np.array(x.astype(mx.float32)))
         out = np.array(x.astype(mx.float16))
         out_bytes, out_shape = out.tobytes(), out.shape
         return decode_fp16(out_bytes, out_shape)
