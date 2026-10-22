@@ -1,4 +1,4 @@
-"""Authenticated, outbound-only transport for Android model workers.
+"""Authenticated, outbound-only transport for mobile model workers.
 
 The registry and inference routes share one process-local WebSocket broker.
 Connections are leases: a process restart or a missed heartbeat makes the node
@@ -26,6 +26,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 1
+MOBILE_TRANSPORTS = frozenset({"android_ws", "ios_ws"})
 HEARTBEAT_LEASE_SECONDS = 60
 HEARTBEAT_INTERVAL_SECONDS = 20
 HELLO_TIMEOUT_SECONDS = 15
@@ -99,7 +100,7 @@ class MobileResponseStream(httpx.AsyncByteStream):
                 yield f"data: {chunk}\n\n".encode("utf-8")
                 frame = None
         except asyncio.TimeoutError as exc:
-            raise httpx.ReadTimeout("Android worker response timed out") from exc
+            raise httpx.ReadTimeout("mobile worker response timed out") from exc
         finally:
             await self.manager.finish_request(
                 self.connection, self.pending, cancel=not self.finished,
@@ -175,9 +176,9 @@ class MobileConnectionManager:
     async def forward(self, node: dict, body: dict[str, Any], streaming: bool) -> httpx.Response:
         connection = self.connections.get(node["id"])
         if connection is None or not self.is_live(node["id"]):
-            raise httpx.ConnectError("Android worker is offline")
+            raise httpx.ConnectError("mobile worker is offline")
         if connection.inflight >= MAX_CONCURRENT_REQUESTS:
-            raise httpx.ConnectError("Android worker is at its concurrency limit")
+            raise httpx.ConnectError("mobile worker is at its concurrency limit")
 
         outgoing = dict(body)
         outgoing["model"] = connection.model_name
@@ -187,7 +188,7 @@ class MobileConnectionManager:
         outgoing["n"] = 1
         encoded = json.dumps(outgoing, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         if len(encoded) > MAX_REQUEST_BYTES:
-            raise httpx.WriteError("request exceeds the Android worker payload limit")
+            raise httpx.WriteError("request exceeds the mobile worker payload limit")
 
         request_id = str(uuid4())
         pending = PendingRequest(request_id, streaming, asyncio.Queue(RESPONSE_QUEUE_SIZE))
@@ -218,7 +219,7 @@ class MobileConnectionManager:
             )
         except asyncio.TimeoutError as exc:
             await self.finish_request(connection, pending, cancel=True)
-            raise httpx.ReadTimeout("Android worker did not start responding") from exc
+            raise httpx.ReadTimeout("mobile worker did not start responding") from exc
         except asyncio.CancelledError:
             await self.finish_request(connection, pending, cancel=True)
             raise
@@ -241,11 +242,11 @@ class MobileConnectionManager:
 
         try:
             if first.get("type") != "response.result":
-                raise httpx.ProtocolError("Android worker returned a stream for a non-stream request")
+                raise httpx.ProtocolError("mobile worker returned a stream for a non-stream request")
             result = first.get("result")
             content = json.dumps(result, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
             if len(content) > MAX_RESPONSE_BYTES:
-                raise httpx.ReadError("Android worker response exceeds the payload limit")
+                raise httpx.ReadError("mobile worker response exceeds the payload limit")
             return httpx.Response(200, content=content, headers={"content-type": "application/json"})
         finally:
             await self.finish_request(connection, pending, cancel=False)
@@ -263,16 +264,16 @@ class MobileConnectionManager:
     async def _send(self, connection: MobileConnection, payload: dict[str, Any]) -> None:
         wire = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         if len(wire.encode("utf-8")) > MAX_MESSAGE_BYTES:
-            raise httpx.WriteError("outbound Android protocol frame exceeds the message limit")
+            raise httpx.WriteError("outbound mobile protocol frame exceeds the message limit")
         try:
             await asyncio.wait_for(
                 connection.websocket.send_text(wire),
                 settings.forward_write_timeout_seconds,
             )
         except asyncio.TimeoutError as exc:
-            raise httpx.WriteTimeout("Android worker channel stopped accepting data") from exc
+            raise httpx.WriteTimeout("mobile worker channel stopped accepting data") from exc
         except (RuntimeError, WebSocketDisconnect) as exc:
-            raise httpx.WriteError("Android worker channel closed during send") from exc
+            raise httpx.WriteError("mobile worker channel closed during send") from exc
 
     async def receive(self, connection: MobileConnection, message: str) -> bool:
         if len(message.encode("utf-8")) > MAX_MESSAGE_BYTES:
@@ -312,7 +313,7 @@ class MobileConnectionManager:
             pending.response_bytes += len(encoded)
             if pending.response_bytes > MAX_RESPONSE_BYTES:
                 await self._queue_response(
-                    pending, MobileTransportError("response exceeds the Android worker payload limit"),
+                    pending, MobileTransportError("response exceeds the mobile worker payload limit"),
                 )
             else:
                 await self._queue_response(pending, {"type": frame_type, "chunk": chunk})
@@ -417,14 +418,14 @@ class MobileConnectionManager:
         except WebSocketDisconnect:
             pass
         except ValueError as exc:
-            logger.info("closing malformed Android worker channel for node %s: %s",
+            logger.info("closing malformed mobile worker channel for node %s: %s",
                         connection.node_id, exc)
             try:
                 await connection.websocket.close(code=1009 if "oversized" in str(exc) else 1008)
             except RuntimeError:
                 pass
         except RuntimeError:
-            logger.info("closing Android worker channel for node %s after invalid message type",
+            logger.info("closing mobile worker channel for node %s after invalid message type",
                         connection.node_id)
             try:
                 await connection.websocket.close(code=1003)
@@ -435,8 +436,9 @@ class MobileConnectionManager:
             if was_current:
                 async with db.pool().acquire() as conn:
                     await conn.execute(
-                        "update nodes set healthy = false where id = $1 and transport = 'android_ws'",
-                        connection.node_id,
+                        "update nodes set healthy = false where id = $1 "
+                        "and transport = any($2::text[])",
+                        connection.node_id, list(MOBILE_TRANSPORTS),
                     )
 
 
@@ -469,7 +471,7 @@ def _valid_hello(frame: Any, row: Any) -> bool:
 
 
 @router.websocket("/nodes/{node_id}/connect")
-async def android_node_connect(websocket: WebSocket, node_id: UUID) -> None:
+async def mobile_node_connect(websocket: WebSocket, node_id: UUID) -> None:
     token = _bearer_token(websocket)
     async with db.pool().acquire() as conn:
         row = await conn.fetchrow(
@@ -478,7 +480,7 @@ async def android_node_connect(websocket: WebSocket, node_id: UUID) -> None:
             node_id,
         )
     if (
-        row is None or row["transport"] != "android_ws" or not token
+        row is None or row["transport"] not in MOBILE_TRANSPORTS or not token
         or not secrets.compare_digest((row["node_token"] or "").encode(), token.encode())
     ):
         await websocket.close(code=4401, reason="node authorization failed")
@@ -507,9 +509,9 @@ async def android_node_connect(websocket: WebSocket, node_id: UUID) -> None:
         async with db.pool().acquire() as conn:
             await conn.execute(
                 "update nodes set healthy = true, last_heartbeat = now(), "
-                "last_seen_healthy = now() where id = $1 and transport = 'android_ws' "
+                "last_seen_healthy = now() where id = $1 and transport = any($3::text[]) "
                 "and node_token = $2",
-                node_id, token,
+                node_id, token, list(MOBILE_TRANSPORTS),
             )
         await manager._send(connection, {
             "type": "ready",
@@ -526,6 +528,7 @@ async def android_node_connect(websocket: WebSocket, node_id: UUID) -> None:
         if connection is not None and await manager.detach(connection):
             async with db.pool().acquire() as conn:
                 await conn.execute(
-                    "update nodes set healthy = false where id = $1 and transport = 'android_ws'",
-                    node_id,
+                    "update nodes set healthy = false where id = $1 "
+                    "and transport = any($2::text[])",
+                    node_id, list(MOBILE_TRANSPORTS),
                 )

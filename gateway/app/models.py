@@ -35,7 +35,7 @@ class NodeCreate(BaseModel):
     # in a text column straight from a stranger; not otherwise validated,
     # since an unrecognised client is data, not an error.
     client: str | None = Field(default=None, max_length=64)
-    transport: Literal["http", "android_ws"] = "http"
+    transport: Literal["http", "android_ws", "ios_ws"] = "http"
     runtime_name: str | None = Field(default=None, max_length=80)
     runtime_version: str | None = Field(default=None, max_length=80)
     model_format: str | None = Field(default=None, max_length=40)

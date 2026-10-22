@@ -309,7 +309,7 @@ everything.
 | `GET /demand/gaps` | Under-served domains, and demand nothing in the catalogue covers. |
 | `GET /demand/plan?machines=20&ram_gb=8` | An install plan for a set of machines. |
 | `GET /catalogue`, `POST /assign` | The specialist catalogue, and what a given machine should run. |
-| `WS /nodes/{id}/connect` | Authenticated outbound-only Android worker channel; see [the protocol](gateway/MOBILE-NODES.md). |
+| `WS /nodes/{id}/connect` | Authenticated outbound-only Android/iOS worker channel; see [the protocol](gateway/MOBILE-NODES.md). |
 
 ## The catalogue
 
@@ -321,7 +321,7 @@ needs build b11555 or later for Bonsai 2's Hadamard-activation runtime and does
 not support the smaller `PQ2_0`/`PTQ1_0` packings. The non-`g64` Bonsai 8B
 layout is fork-only. Catalogue requirements and format caveats are exposed by
 `GET /catalogue` and `POST /assign`; do not substitute standard Ollama models.
-Android contribution eligibility and its protocol are documented in
+Mobile contribution eligibility and its protocol are documented in
 [gateway/MOBILE-NODES.md](gateway/MOBILE-NODES.md).
 
 ## Security

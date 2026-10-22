@@ -80,7 +80,8 @@ async def _fetch_healthy_nodes() -> list[dict]:
     nodes = [dict(row) for row in rows]
     return [
         node for node in nodes
-        if node.get("transport", "http") != "android_ws" or manager.is_live(node["id"])
+        if node.get("transport", "http") not in {"android_ws", "ios_ws"}
+        or manager.is_live(node["id"])
     ]
 
 

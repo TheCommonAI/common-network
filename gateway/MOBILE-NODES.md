@@ -1,26 +1,29 @@
-# Android worker protocol
+# Mobile worker protocol
 
-This is a network-side contract for an Android runtime; it does not implement
-model download or inference in `common-android`. A compliant app runs inference
-locally and initiates an authenticated WebSocket to the gateway. The phone
-opens no inbound port, publishes no endpoint, and does not need a tunnel.
+This is a network-side contract for Android and iOS runtimes; it does not
+implement model download or inference in either mobile app. A compliant app
+runs inference locally and initiates an authenticated WebSocket to the gateway.
+The device opens no inbound port, publishes no endpoint, and does not need a
+tunnel.
 
 ## Catalogue and registration
 
-`POST /assign` accepts the existing `hardware` profile plus:
+`POST /assign` accepts the existing `hardware` profile plus `platform` set to
+`android` or `ios` and runtime capabilities, for example:
 
 ```json
 {
-  "platform": "android",
+  "platform": "ios",
   "runtime_capabilities": ["gguf:q2_0", "ternary:hadamard-activations"]
 }
 ```
 
-The result is restricted to entries explicitly marked `android_supported` in
-`catalogue/catalogue.seed.yaml`, whose `runtime_requirements` are all present in
-the supplied capabilities and whose existing RAM/GPU requirements fit. It
-returns `weight_format`, requirements, and `runtime_notes`. Capability values
-are runtime claims, not hardware attestation.
+The result is restricted to entries explicitly marked `android_supported` or
+`ios_supported` for the requested platform in `catalogue/catalogue.seed.yaml`,
+whose `runtime_requirements` are all present in the supplied capabilities and
+whose existing RAM/GPU requirements fit. It returns `weight_format`,
+requirements, and `runtime_notes`. Capability values are runtime claims, not
+hardware attestation; eligibility does not attest a working device runtime.
 
 The current supported entries and declared formats are:
 
@@ -38,9 +41,10 @@ by stock upstream llama.cpp. Bonsai 8B must use the `_g64` source: the ordinary
 requirements must not advertise that capability or register that model.
 
 Register with the ordinary `POST /nodes` endpoint, setting `transport` to
-`android_ws`, omitting `endpoint_url`, and setting both `model_name` and
-`catalogue_id` to the assigned catalogue ID. Include `runtime_name`,
-`runtime_version`, `model_format`, and the same `runtime_capabilities` used for
+`android_ws` or `ios_ws` to match the platform, omitting `endpoint_url`, and
+setting both `model_name` and `catalogue_id` to the assigned catalogue ID.
+Include `runtime_name`, `runtime_version`, `model_format`, and the same
+`runtime_capabilities` used for
 assignment. The gateway rejects unlisted models/formats, mismatched catalogue
 IDs, missing runtime requirements, API-key refs, and HTTP worker tokens.
 Registration returns the usual node-scoped `node_token`. Existing-name
@@ -51,8 +55,9 @@ channel completes its handshake.
 
 Connect to `wss://<gateway>/nodes/<node-id>/connect`, passing the token only as
 `Authorization: Bearer <node_token>` (or `X-Common-Node-Token`), never in the
-URL. The gateway verifies the node ID, `android_ws` transport, and token before
-accepting the socket. The first frame must be a JSON `hello` matching the
+URL. The gateway verifies the node ID, mobile transport, and token before accepting
+the socket. Android and iOS use the same protocol-v1 `hello`, heartbeat, and
+inference frames. The first frame must be a JSON `hello` matching the
 registered model, format, runtime name/version, and capabilities:
 
 ```json
@@ -73,8 +78,8 @@ heartbeat interval, 60-second lease, one-request concurrency limit, and
 every 20 seconds, including while inference is running. The app must tolerate
 socket closure, OS suspension/termination, radio changes, and reconnects; the
 gateway drops health after lease expiry and requires a fresh authenticated
-connection. This protocol makes no promise that Android will keep an app
-running in the background.
+connection. This protocol makes no promise that Android or iOS will keep an app running
+in the background.
 
 Use `DELETE /nodes/{id}` with `X-Common-Node-Token` for explicit
 deregistration. It removes the registry entry and closes its active channel.
@@ -85,7 +90,7 @@ unchanged.
 ## Inference framing
 
 The gateway pins every request to the registered model; the device is not a
-general-purpose proxy. One request may be in flight per phone. A second request
+general-purpose proxy. One request may be in flight per device. A second request
 is rejected as busy so the existing gateway candidate fallback can choose a
 different healthy node rather than queueing unbounded work.
 
@@ -110,9 +115,8 @@ zero-based contiguous sequence numbers. For a non-streaming request, send `respo
 length, ordered `response.result.data` frames containing base64 chunks of at
 most 8 KiB, then `response.result.end`; the assembled object must be valid
 OpenAI-compatible JSON. `response.error` carries a short error message. Frames
-must repeat the
-exact request UUID; unknown or late IDs are ignored and cannot complete a
-different request.
+must repeat the exact request UUID; unknown or late IDs are ignored and cannot
+complete a different request.
 
 If the client disconnects, the read timeout elapses, or the stream is
 abandoned, the gateway sends `request.cancel` for that UUID and releases the
@@ -127,12 +131,16 @@ handshake mismatch close the channel rather than being treated as success.
 The gateway currently runs as one Uvicorn worker and the WebSocket broker is
 process-local. It safely routes requests only when the device connection and
 inference request reach that same gateway process. Do not horizontally scale
-gateway workers/replicas for Android nodes without adding a shared broker and
+gateway workers/replicas for mobile nodes without adding a shared broker and
 connection ownership/routing; the database health row is not that broker.
 HTTP/Cloudflare-tunnel contributors keep their existing endpoint, worker
 authentication, health probes, and streaming path.
 
 The current `common-android` app is a chat client: it sends requests to the
-gateway and does not download models, register a node, or infer locally. A
-contribution client and a Bonsai-capable Android inference runtime must
-implement this protocol before Android contribution is available to users.
+gateway and does not download models, register a node, or infer locally. The
+`common-ios` repository currently has no runtime implementation beyond its
+README. Both apps still need a contribution client and a Bonsai-capable local
+inference runtime before mobile contribution is available to users. iOS
+eligibility means the backend will accept a matching runtime capability claim;
+it does not assert that the current iOS app or any particular iOS runtime has
+been built or validated.

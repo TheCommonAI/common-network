@@ -34,10 +34,10 @@ they do not have.
 
 ## What a stranger cannot do
 
-Android contributors use an authenticated outbound WebSocket, not a public
-endpoint. The node token is sent in the upgrade header and remains scoped to
-the node. The gateway pins jobs to the registered catalogue model, limits
-mobile concurrency and payload sizes, and provides no arbitrary proxy route.
+Android and iOS contributors use an authenticated outbound WebSocket, not a
+public endpoint. The node token is sent in the upgrade header and remains
+scoped to the node. The gateway pins jobs to the registered catalogue model,
+limits mobile concurrency and payload sizes, and provides no arbitrary proxy route.
 Connection health is lease-based. Runtime capabilities are self-reported, not
 attested; the gateway validates them against explicit catalogue requirements
 but cannot prove which weights or inference engine are actually loaded. See

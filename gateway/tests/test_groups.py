@@ -220,7 +220,7 @@ class _HealthConn:
 
     async def fetch(self, sql, *args):
         await asyncio.sleep(0)
-        if "transport = 'android_ws'" in sql:
+        if "transport in ('android_ws', 'ios_ws')" in sql:
             return []
         return self.rows
 

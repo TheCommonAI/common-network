@@ -37,12 +37,12 @@ async def seed_catalogue_from_file() -> None:
     models = data.get("models", [])
 
     for m in models:
-        if m.get("android_supported"):
+        if m.get("android_supported") or m.get("ios_supported"):
             filename = Path(urlparse(m["source"][5:].split("#", 1)[0]).path).name
             expected_suffix = f"-{m.get('weight_format')}.gguf"
             if not m["source"].startswith("gguf:") or not filename.endswith(expected_suffix):
                 raise ValueError(
-                    f"Android-supported catalogue entry {m['id']} must declare a weight_format "
+                    f"Mobile-supported catalogue entry {m['id']} must declare a weight_format "
                     "matching its GGUF source filename"
                 )
         vec = embedder.embed(m["capability_text"])
@@ -54,8 +54,8 @@ async def seed_catalogue_from_file() -> None:
                      params_b, min_ram_gb, min_vram_gb, needs_gpu,
                      verified_in_lane, lane_benchmark, licence,
                      base_model, overlay, weight_format, runtime_requirements,
-                     runtime_notes, android_supported)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                     runtime_notes, android_supported, ios_supported)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                 on conflict (id) do update set
                     display_name = excluded.display_name,
                     source = excluded.source,
@@ -73,7 +73,8 @@ async def seed_catalogue_from_file() -> None:
                     weight_format = excluded.weight_format,
                     runtime_requirements = excluded.runtime_requirements,
                     runtime_notes = excluded.runtime_notes,
-                    android_supported = excluded.android_supported
+                    android_supported = excluded.android_supported,
+                    ios_supported = excluded.ios_supported
                 """,
                 m["id"], m["display_name"], m["source"], m["domain_tags"], m["capability_text"],
                 m.get("params_b"), m["min_ram_gb"], m.get("min_vram_gb", 0), m.get("needs_gpu", False),
@@ -82,6 +83,7 @@ async def seed_catalogue_from_file() -> None:
                 m.get("base_model"), _to_jsonb(m.get("overlay")),
                 m.get("weight_format"), m.get("runtime_requirements", []),
                 m.get("runtime_notes"), m.get("android_supported", False),
+                m.get("ios_supported", False),
             )
 
     # The seed file is the source of truth for what the network offers, so an
@@ -138,7 +140,7 @@ class HardwareProfile(BaseModel):
 
 class AssignRequest(BaseModel):
     hardware: HardwareProfile
-    platform: Literal["generic", "android"] = "generic"
+    platform: Literal["generic", "android", "ios"] = "generic"
     runtime_capabilities: list[RuntimeCapability] = Field(default_factory=list, max_length=32)
 
 
@@ -198,16 +200,18 @@ async def assign(req: AssignRequest) -> AssignResponse:
         coverage = await _domain_coverage(conn)
 
     catalogue = [_row_to_dict(r) for r in catalogue_rows]
-    if req.platform == "android" and not req.runtime_capabilities:
+    if req.platform in ("android", "ios") and not req.runtime_capabilities:
         raise HTTPException(
             status_code=422,
-            detail="Android assignment requires the runtime capabilities this device supports",
+            detail=f"{req.platform.capitalize()} assignment requires the runtime capabilities "
+                   "this device supports",
         )
     supported_capabilities = set(req.runtime_capabilities)
-    if req.platform == "android":
+    if req.platform in ("android", "ios"):
+        platform_flag = f"{req.platform}_supported"
         catalogue = [
             model for model in catalogue
-            if model.get("android_supported")
+            if model.get(platform_flag)
             and set(model.get("runtime_requirements") or []).issubset(supported_capabilities)
         ]
     runnable = [m for m in catalogue if _runnable(m, req.hardware)]

@@ -215,23 +215,25 @@ def _row_to_node_out(row) -> NodeOut:
     )
 
 
-def validate_android_node(node: NodeCreate, catalogue_model) -> None:
+def validate_mobile_node(node: NodeCreate, catalogue_model) -> None:
     """Enforce the catalogue's explicit mobile eligibility and runtime policy."""
+    platform = "Android" if node.transport == "android_ws" else "iOS"
     if node.endpoint_url is not None:
-        raise HTTPException(status_code=400, detail="Android WebSocket nodes must not register an endpoint_url.")
+        raise HTTPException(status_code=400, detail=f"{platform} WebSocket nodes must not register an endpoint_url.")
     if node.api_key_ref or node.worker_token:
-        raise HTTPException(status_code=400, detail="Android WebSocket nodes cannot use API-key or HTTP-worker credentials.")
+        raise HTTPException(status_code=400, detail=f"{platform} WebSocket nodes cannot use API-key or HTTP-worker credentials.")
     if not node.catalogue_id or node.catalogue_id != node.model_name:
-        raise HTTPException(status_code=400, detail="Android nodes must pin model_name to their catalogue_id.")
+        raise HTTPException(status_code=400, detail=f"{platform} nodes must pin model_name to their catalogue_id.")
     if not node.runtime_name or not node.runtime_version or not node.model_format:
-        raise HTTPException(status_code=400, detail="Android nodes must declare runtime name, version, and model format.")
+        raise HTTPException(status_code=400, detail=f"{platform} nodes must declare runtime name, version, and model format.")
+    platform_flag = "android_supported" if node.transport == "android_ws" else "ios_supported"
     if (
-        catalogue_model is None or not catalogue_model["android_supported"]
+        catalogue_model is None or not catalogue_model.get(platform_flag, False)
         or not str(catalogue_model["source"]).startswith("gguf:")
         or not catalogue_model["weight_format"]
         or node.model_format != catalogue_model["weight_format"]
     ):
-        raise HTTPException(status_code=422, detail="model is not an Android-supported catalogue format.")
+        raise HTTPException(status_code=422, detail=f"model is not an {platform}-supported catalogue format.")
     required = set(catalogue_model["runtime_requirements"] or [])
     if not required.issubset(set(node.runtime_capabilities)):
         raise HTTPException(
@@ -275,11 +277,11 @@ async def register_node(
     else:
         async with db.pool().acquire() as conn:
             catalogue_model = await conn.fetchrow(
-                "select id, source, weight_format, runtime_requirements, android_supported "
+                "select id, source, weight_format, runtime_requirements, android_supported, ios_supported "
                 "from catalogue_models where id = $1",
                 node.catalogue_id,
             )
-        validate_android_node(node, catalogue_model)
+        validate_mobile_node(node, catalogue_model)
     vec = embedder.embed(node.capability_text)
 
     # Body field first, X-Common-Client header second. The desktop app sends

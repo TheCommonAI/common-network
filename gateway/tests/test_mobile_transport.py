@@ -1,4 +1,4 @@
-"""Protocol and lifecycle tests for the outbound Android worker transport."""
+"""Protocol and lifecycle tests for the outbound mobile worker transport."""
 import asyncio
 import base64
 import json
@@ -20,7 +20,7 @@ from app import health as health_module  # noqa: E402
 from app.catalogue import AssignRequest, HardwareProfile  # noqa: E402
 from app.models import NodeCreate  # noqa: E402
 from app import registry as registry_module  # noqa: E402
-from app.registry import validate_android_node  # noqa: E402
+from app.registry import validate_mobile_node  # noqa: E402
 from app.config import settings  # noqa: E402
 
 
@@ -129,7 +129,7 @@ class MobileTransportTests(unittest.TestCase):
             manager = mobile_transport.MobileConnectionManager()
             bad_socket = FakeWebSocket({"authorization": "Bearer wrong"}, [])
             with mock.patch.object(mobile_transport.db, "pool", return_value=FakePool(db_connection)):
-                await mobile_transport.android_node_connect(bad_socket, node_id)
+                await mobile_transport.mobile_node_connect(bad_socket, node_id)
                 self.assertEqual(bad_socket.closed[0], 4401)
                 self.assertFalse(bad_socket.accepted)
 
@@ -139,7 +139,7 @@ class MobileTransportTests(unittest.TestCase):
                      json.dumps({"type": "disconnect"})],
                 )
                 with mock.patch.object(mobile_transport, "manager", manager):
-                    await mobile_transport.android_node_connect(socket, node_id)
+                    await mobile_transport.mobile_node_connect(socket, node_id)
             self.assertTrue(socket.accepted)
             self.assertEqual(socket.sent[0]["type"], "ready")
             self.assertEqual(socket.sent[1]["type"], "heartbeat.ack")
@@ -165,6 +165,39 @@ class MobileTransportTests(unittest.TestCase):
         hello["model_format"] = "PTQ1_0"
         self.assertFalse(mobile_transport._valid_hello(hello, row))
 
+    def test_ios_node_uses_authenticated_mobile_channel(self):
+        token = "ios-node-token-0123456789"
+        node_id = uuid4()
+        row = {
+            "id": node_id, "node_token": token, "transport": "ios_ws",
+            "model_name": "bonsai2-4b", "model_format": "Q2_0",
+            "runtime_name": "llama.cpp-ios", "runtime_version": "b11555",
+            "runtime_capabilities": ["gguf:q2_0", "ternary:hadamard-activations"],
+        }
+        hello = {
+            "type": "hello", "protocol_version": 1,
+            "model_name": row["model_name"], "model_format": row["model_format"],
+            "runtime_name": row["runtime_name"], "runtime_version": row["runtime_version"],
+            "runtime_capabilities": row["runtime_capabilities"],
+        }
+        db_connection = FakeDbConnection(row)
+        socket = FakeWebSocket(
+            {"authorization": f"Bearer {token}"},
+            [json.dumps(hello), json.dumps({"type": "disconnect"})],
+        )
+
+        async def exercise():
+            manager = mobile_transport.MobileConnectionManager()
+            with mock.patch.object(mobile_transport.db, "pool", return_value=FakePool(db_connection)), \
+                 mock.patch.object(mobile_transport, "manager", manager):
+                await mobile_transport.mobile_node_connect(socket, node_id)
+            self.assertTrue(socket.accepted)
+            self.assertEqual(socket.sent[0]["type"], "ready")
+            self.assertTrue(any("healthy = true" in query[0] for query in db_connection.executed))
+            self.assertFalse(manager.is_live(node_id))
+
+        self.run_async(exercise())
+
     def test_catalogue_gates_android_models_and_formats(self):
         common = dict(
             name="phone", model_name="bonsai2-4b", catalogue_id="bonsai2-4b",
@@ -179,7 +212,7 @@ class MobileTransportTests(unittest.TestCase):
             "weight_format": "Q2_0", "android_supported": True,
             "runtime_requirements": ["gguf:q2_0", "ternary:hadamard-activations"],
         }
-        validate_android_node(node, model)
+        validate_mobile_node(node, model)
         for invalid, catalogue in (
             (NodeCreate(**{**common, "model_format": "PTQ1_0"}), model),
             (node, {**model, "android_supported": False}),
@@ -187,12 +220,21 @@ class MobileTransportTests(unittest.TestCase):
             (NodeCreate(**{**common, "endpoint_url": "https://phone.example"}), model),
         ):
             with self.assertRaises(HTTPException):
-                validate_android_node(invalid, catalogue)
+                validate_mobile_node(invalid, catalogue)
 
         self.assertEqual(AssignRequest(
             hardware=HardwareProfile(total_ram_gb=8, available_ram_gb=8),
             platform="android", runtime_capabilities=["gguf:q2_0"],
         ).platform, "android")
+        ios_node = NodeCreate(**{**common, "transport": "ios_ws"})
+        ios_model = {**model, "android_supported": False, "ios_supported": True}
+        validate_mobile_node(ios_node, ios_model)
+        with self.assertRaises(HTTPException):
+            validate_mobile_node(ios_node, model)
+        self.assertEqual(AssignRequest(
+            hardware=HardwareProfile(total_ram_gb=8, available_ram_gb=8),
+            platform="ios", runtime_capabilities=["gguf:q2_0"],
+        ).platform, "ios")
 
     def test_assign_filters_android_runtime_and_preserves_catalogue_format(self):
         models = [
@@ -206,6 +248,7 @@ class MobileTransportTests(unittest.TestCase):
                 "weight_format": "Q2_0",
                 "runtime_requirements": ["gguf:q2_0", "ternary:hadamard-activations"],
                 "runtime_notes": "stock llama.cpp b11555+", "android_supported": True,
+                "ios_supported": True,
             },
             {
                 "id": "ordinary-model", "display_name": "Unsupported",
@@ -215,7 +258,7 @@ class MobileTransportTests(unittest.TestCase):
                 "needs_gpu": False, "verified_in_lane": True,
                 "lane_benchmark": None, "licence": "apache-2.0", "added_at": None,
                 "weight_format": "Q4_K_M", "runtime_requirements": [],
-                "runtime_notes": None, "android_supported": False,
+                "runtime_notes": None, "android_supported": False, "ios_supported": False,
             },
         ]
         db_connection = FakeDbConnection(None)
@@ -236,6 +279,10 @@ class MobileTransportTests(unittest.TestCase):
                 with self.assertRaises(HTTPException) as raised:
                     await catalogue_module.assign(unsupported)
                 self.assertEqual(raised.exception.status_code, 422)
+
+                ios_request = request.model_copy(update={"platform": "ios"})
+                ios_assigned = await catalogue_module.assign(ios_request)
+                self.assertEqual(ios_assigned.catalogue_id, "bonsai2-2b")
 
         self.run_async(exercise())
 
@@ -314,7 +361,7 @@ class MobileTransportTests(unittest.TestCase):
         node_id = uuid4()
         db_connection = FakeDbConnection(None)
         db_connection.handlers["fetch"] = lambda query, *_: (
-            [{"id": node_id}] if "transport = 'android_ws'" in query else []
+            [{"id": node_id}] if "transport in ('android_ws', 'ios_ws')" in query else []
         )
 
         class OfflineManager:
@@ -330,7 +377,7 @@ class MobileTransportTests(unittest.TestCase):
                 await health_module.run_health_checks_once()
             mobile_updates = [
                 call for call in db_connection.executed
-                if "transport = 'android_ws'" in call[0]
+                if "transport in ('android_ws', 'ios_ws')" in call[0]
             ]
             self.assertEqual(len(mobile_updates), 1)
             self.assertFalse(mobile_updates[0][1])
@@ -502,6 +549,18 @@ class MobileTransportTests(unittest.TestCase):
             self.run_async(exercise())
         finally:
             settings.forward_read_timeout_seconds = original_timeout
+
+    def test_ios_worker_routes_through_shared_mobile_broker(self):
+        response = httpx.Response(200, json={"ios": True})
+
+        async def mobile_forward(node, body, stream):
+            self.assertEqual(node["transport"], "ios_ws")
+            return response
+
+        with mock.patch.object(upstream.manager, "forward", new=mobile_forward):
+            actual = self.run_async(upstream.forward(
+                {"transport": "ios_ws", "model_name": "bonsai2-4b"}, {"model": "auto"}, False))
+        self.assertEqual(actual.json(), {"ios": True})
 
     def test_http_worker_forwarding_path_remains(self):
         class FakeClient:
