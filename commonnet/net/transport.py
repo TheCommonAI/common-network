@@ -77,3 +77,23 @@ class HttpTransport:
             self._client(endpoint.name).close(self._url(endpoint), session_id)
         except Exception:  # best effort: the server also drops sessions with the process
             pass
+
+    def stats(self) -> dict:
+        """Per endpoint: forward calls, mean total_ms, mean server_ms, and connections reused."""
+        out = {}
+        for name, client in self._clients.items():
+            rows = [t for t in client.timings if t["path"] == "/forward" and t["status"] == 200]
+            if not rows:
+                continue
+            served = [t["server_ms"] for t in rows if t["server_ms"] is not None]
+            out[name] = {
+                "calls": len(rows),
+                "total_ms": sum(t["total_ms"] for t in rows) / len(rows),
+                "server_ms": sum(served) / len(served) if served else None,
+                "reused": sum(1 for t in rows if t["reused"]),
+            }
+        return out
+
+    def shutdown(self) -> None:
+        for client in self._clients.values():
+            client.close_connections()

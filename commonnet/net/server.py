@@ -228,6 +228,11 @@ def _error(message: str) -> dict:
 class _Handler(BaseHTTPRequestHandler):
     server_version = "commonnet-block/0.1"
     sys_version = ""
+    # HTTP/1.1 keeps the connection open between requests, so a client pays the TCP and
+    # TLS setup (several tunnel round trips) once instead of on every token. Every reply
+    # carries a Content-Length, and a reply sent while a request body is still unread
+    # closes the connection (see _send).
+    protocol_version = "HTTP/1.1"
     timeout = HANDLER_TIMEOUT_SECONDS
 
     def log_message(self, format, *args):  # keep the launcher's log clean
@@ -242,6 +247,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        compute_ms = getattr(self, "_compute_ms", None)
+        if compute_ms is not None:
+            self.send_header("Server-Timing", f"compute;dur={compute_ms:.2f}")
+        if getattr(self, "_unread", False):
+            self.send_header("Connection", "close")
+            self.close_connection = True
         self.end_headers()
         self.wfile.write(body)
 
@@ -255,6 +266,7 @@ class _Handler(BaseHTTPRequestHandler):
         return self.path.split("?", 1)[0]
 
     def do_GET(self) -> None:
+        self._unread, self._compute_ms = False, None
         path = self._path()
         if not self._authorized():
             self._send(401, _error("missing or wrong bearer token"))
@@ -267,6 +279,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, _error(f"no endpoint {path}"))
 
     def do_POST(self) -> None:
+        self._unread, self._compute_ms = True, None  # a body follows until _read_body has it
         path = self._path()
         if path == "/health":
             self._send(405, _error("/health takes GET"))
@@ -306,7 +319,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._block.close(protocol.decode_session_request(obj))
             return protocol.encode_ok()
         session_id, start_pos, hidden = protocol.decode_forward_request(obj)
+        started = time.perf_counter()
         out = self._block.forward(session_id, hidden, start_pos)
+        self._compute_ms = (time.perf_counter() - started) * 1000
         return protocol.encode_forward_reply(out)
 
     def _read_body(self) -> bytes | None:
@@ -328,13 +343,14 @@ class _Handler(BaseHTTPRequestHandler):
         limit = self._block.max_request_bytes
         if length > limit:
             # Refused without reading the body. The connection closes after this
-            # reply (HTTP/1.0), so the unread bytes are never waited for.
+            # reply (see _send), so the unread bytes are never waited for.
             self._send(413, _error(f"request is {length} bytes; the limit is {limit}"))
             return None
         body = self.rfile.read(length)
         if len(body) != length:
             self._send(400, _error("body is shorter than its Content-Length"))
             return None
+        self._unread = False
         return body
 
 
