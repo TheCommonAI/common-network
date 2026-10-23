@@ -93,6 +93,21 @@ class MlxTiny(unittest.TestCase):
                 print(f"\n[mlx split {boundaries}] max|split - single| = {diff:.4e} (tol {TOL_BOUNDARY})")
                 self.assertLess(diff, TOL_BOUNDARY)
 
+    def test_float32_hidden_with_bfloat16_compute_is_exact_across_splits_and_survives_large_values(self):
+        # Qwen activations can pass float16's range (65504). float32 on the wire plus bfloat16 compute avoids that.
+        ids = torch.tensor([PROMPT])
+        def chain(boundaries):
+            route = route_for(boundaries)
+            blocks = {ep.name: MlxBlockRange(self.ckpt, ep.start, ep.end, bits=4, dtype=mx.bfloat16) for ep in route}
+            return Client(self.ckpt, LocalTransport(blocks), device="cpu", dtype=torch.float32), route, blocks
+        c1, r1, _ = chain([0, 4])
+        c2, r2, b2 = chain([0, 2, 4])
+        self.assertEqual(float((c1.logits(r1, ids) - c2.logits(r2, ids)).abs().max()), 0.0)
+        big = torch.full((1, 3, b2[r2[0].name].hidden_size), 1.0e5)
+        out = b2[r2[0].name].forward("big", big, 0)
+        self.assertEqual(out.dtype, torch.float32)
+        self.assertTrue(bool(torch.isfinite(out).all()))
+
     def test_generate_matches_single_block(self):
         client1, route1, _ = self.build([0, 4])
         single = client1.generate(route1, PROMPT, NEW_TOKENS)

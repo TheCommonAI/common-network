@@ -5,6 +5,7 @@ Environment:
   COMMONNET_BACKEND     torch (default) | mlx | nf4
   COMMONNET_DEVICE      torch backend device (default cpu)
   COMMONNET_DTYPE       torch backend dtype: float32 (default) | float16 | bfloat16
+                        mlx backend compute dtype: float16 (default) | bfloat16
 """
 from __future__ import annotations
 
@@ -60,7 +61,11 @@ def build_block(start: int, end: int, backend: str | None = None, checkpoint: st
     if backend == "mlx":
         from commonnet.backends.mlx_block import MlxBlockRange, OnWorkerThread
         # MLX streams are per-thread and the server runs each request on a new thread.
-        inner = OnWorkerThread(MlxBlockRange, checkpoint_dir=checkpoint, start=start, end=end)
+        extra = {}
+        if env.get("COMMONNET_DTYPE"):
+            import mlx.core as mx
+            extra["dtype"] = getattr(mx, env["COMMONNET_DTYPE"])
+        inner = OnWorkerThread(MlxBlockRange, checkpoint_dir=checkpoint, start=start, end=end, **extra)
         return ServedBlock(inner, start, end, "metal")
     from commonnet.backends.nf4_block import Nf4BlockRange  # refuses without CUDA
     return ServedBlock(Nf4BlockRange(checkpoint_dir=checkpoint, start=start, end=end), start, end, "cuda")

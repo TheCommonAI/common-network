@@ -282,3 +282,52 @@ class StatusRetries(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeepAlive(Served):
+    def _forward(self, n=1):
+        self.client.open(self.endpoint, "k")
+        for i in range(n):
+            self.client.forward(self.endpoint, "k", hidden_tensor(seed=i, shape=(1, 1, 32), dtype="float32"), i)
+
+    def test_calls_after_the_first_reuse_the_connection(self):
+        self._forward(3)
+        reused = [t["reused"] for t in self.client.timings]
+        self.assertEqual(reused, [False, True, True, True])  # open, then three forwards
+
+    def test_forward_timings_carry_server_compute_time(self):
+        self._forward(1)
+        row = [t for t in self.client.timings if t["path"] == "/forward"][0]
+        self.assertIsNotNone(row["server_ms"])
+        self.assertLessEqual(row["server_ms"], row["total_ms"])
+        self.assertGreater(row["bytes_out"], 0)
+        self.assertGreater(row["bytes_in"], 0)
+
+    def test_a_connection_the_server_dropped_is_replaced_without_a_retry(self):
+        self._forward(1)
+        for conn in list(self.client._idle.values()):
+            conn.sock.close()  # as if the far side timed it out while idle
+        self.client.forward(self.endpoint, "k", hidden_tensor(seed=5, shape=(1, 1, 32), dtype="float32"), 1)
+        self.assertEqual(self.sleeps, [])  # no backoff was needed
+
+    def test_a_refused_oversize_request_closes_the_connection_and_the_next_call_works(self):
+        small = BlockServer(StubBlock(0, 8), "127.0.0.1", 0, max_request_bytes=2048).start()
+        self.addCleanup(small.stop)
+        raw = http_post_oversize(small.url)
+        self.assertEqual(raw, 413)
+        self.assertEqual(self.client.health(small.url), ((0, 8), "stub"))
+
+    def test_close_connections_empties_the_pool(self):
+        self._forward(1)
+        self.client.close_connections()
+        self.assertEqual(self.client._idle, {})
+
+
+def http_post_oversize(url):
+    import http.client
+    host, port = url[len("http://"):].split(":")
+    conn = http.client.HTTPConnection(host, int(port), timeout=5)
+    conn.request("POST", "/forward", body=b"x" * 5000, headers={"Content-Type": "application/json"})
+    status = conn.getresponse().status
+    conn.close()
+    return status

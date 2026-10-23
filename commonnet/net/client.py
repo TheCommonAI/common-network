@@ -17,12 +17,13 @@ that as the member being down for now.
 """
 from __future__ import annotations
 
+import collections
 import http.client
 import json
 import socket
+import threading
 import time
-import urllib.error
-import urllib.request
+import urllib.parse
 
 from commonnet.net import auth, dns, protocol
 from commonnet.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
@@ -62,16 +63,26 @@ def _reason(error: BaseException) -> str:
     return str(getattr(error, "reason", None) or error) or type(error).__name__
 
 
-def _error_text(error: urllib.error.HTTPError) -> str:
+def _error_text(raw: bytes, reason: str) -> str:
     try:
-        obj = json.loads(error.read().decode("utf-8"))
+        obj = json.loads(raw.decode("utf-8"))
         if isinstance(obj, dict) and isinstance(obj.get("error"), str):
             return obj["error"]
-    except (OSError, ValueError):
+    except ValueError:
         pass
-    finally:
-        error.close()
-    return str(error.reason)
+    return reason
+
+
+def _server_ms(header) -> float | None:
+    """The block's own compute time from a Server-Timing header, if it sent one."""
+    for part in (header or "").split(","):
+        name, _, rest = part.strip().partition(";")
+        if name == "compute" and rest.startswith("dur="):
+            try:
+                return float(rest[4:])
+            except ValueError:
+                return None
+    return None
 
 
 def _connect_resolved(conn, tls: bool) -> None:
@@ -97,21 +108,21 @@ class _HTTPSConnection(http.client.HTTPSConnection):
         _connect_resolved(self, True)
 
 
-class _HTTPHandler(urllib.request.HTTPHandler):
-    def http_open(self, req):
-        return self.do_open(_HTTPConnection, req)
-
-
-class _HTTPSHandler(urllib.request.HTTPSHandler):
-    def https_open(self, req):
-        return self.do_open(_HTTPSConnection, req)
-
-
 _TOKEN_FROM_ENV = object()
 
 
 class BlockClient:
-    """Calls one block server per call. Holds no connection between calls.
+    """Calls block servers, keeping one connection open per endpoint between calls.
+
+    A new connection to a tunnel costs several round trips (TCP, TLS), so the
+    connection is reused for the next call. A reused connection the far side has
+    closed since (idle timeout, restart) is replaced and the call sent again at once,
+    without using up a retry. Safe for the same reason retries are: see the module note.
+
+    Every call is timed into self.timings (the newest 4096): path, total_ms, whether the
+    connection was reused, request and reply bytes, and server_ms (the block's own
+    compute time, when the server reports it). total_ms - server_ms is the network and
+    client cost of that hop.
 
     The token defaults to the one the server reads (COMMONNET_BLOCK_TOKEN). Pass
     token=None to send no Authorization header, which a real server refuses with 401.
@@ -133,8 +144,9 @@ class BlockClient:
         self.max_backoff = max_backoff
         self.max_request_bytes = max_request_bytes
         self._sleep = sleep
-        self._opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}), _HTTPHandler, _HTTPSHandler)
+        self._idle: dict[tuple, http.client.HTTPConnection] = {}
+        self._lock = threading.Lock()
+        self.timings: collections.deque = collections.deque(maxlen=4096)
 
     def health(self, endpoint: str, timeout: float = CONTROL_TIMEOUT_SECONDS) -> tuple:
         """Returns (layers, device)."""
@@ -161,9 +173,61 @@ class BlockClient:
             )
         return out
 
+    def close_connections(self) -> None:
+        with self._lock:
+            idle, self._idle = list(self._idle.values()), {}
+        for conn in idle:
+            conn.close()
+
+    def _take(self, key: tuple, timeout: float):
+        with self._lock:
+            conn = self._idle.pop(key, None)
+        if conn is None:
+            cls = _HTTPSConnection if key[0] == "https" else _HTTPConnection
+            return cls(key[1], key[2], timeout=timeout), False
+        conn.timeout = timeout
+        try:
+            if conn.sock is not None:
+                conn.sock.settimeout(timeout)
+        except OSError:
+            conn.close()
+            return self._take(key, timeout)[0], False
+        return conn, True
+
+    def _keep(self, key: tuple, conn) -> None:
+        with self._lock:
+            old, self._idle[key] = self._idle.get(key), conn
+        if old is not None and old is not conn:
+            old.close()
+
+    def _once(self, method: str, parts, path: str, data, headers: dict, timeout: float):
+        """One request, over the kept connection when there is one. Returns (status, reason, raw, reused, server_ms)."""
+        key = (parts.scheme, parts.hostname, parts.port or (443 if parts.scheme == "https" else 80))
+        target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+        for _ in range(2):
+            conn, reused = self._take(key, timeout)
+            try:
+                conn.request(method, target, body=data, headers=headers)
+                response = conn.getresponse()
+                raw = response.read()
+            except (OSError, http.client.HTTPException):
+                conn.close()
+                if reused:
+                    continue  # went stale while idle: send again on a fresh connection
+                raise
+            if response.will_close:
+                conn.close()
+            else:
+                self._keep(key, conn)
+            return (response.status, response.reason, raw, reused,
+                    _server_ms(response.getheader("Server-Timing")))
+        raise AssertionError("unreachable")
+
     def _call(self, method: str, endpoint: str, path: str, body: dict | None, timeout: float) -> dict:
         url = _join_url(endpoint, path)
+        parts = urllib.parse.urlsplit(url)
         data = None
+        headers = dict(auth.authorization_headers(self.token))
         if body is not None:
             data = json.dumps(body, separators=(",", ":")).encode("utf-8")
             if len(data) > self.max_request_bytes:
@@ -171,29 +235,31 @@ class BlockClient:
                     f"request is {len(data)} bytes; the limit is {self.max_request_bytes}. "
                     "Send the prefill in smaller pieces."
                 )
+            headers["Content-Type"] = "application/json"
         attempts = self.retries + 1
         reason = ""
         for attempt in range(attempts):
-            request = urllib.request.Request(url, data=data, method=method)
-            if data is not None:
-                request.add_header("Content-Type", "application/json")
-            for name, value in auth.authorization_headers(self.token).items():
-                request.add_header(name, value)
+            started = time.perf_counter()
             try:
-                with self._opener.open(request, timeout=timeout) as response:
-                    raw = response.read()
-            except urllib.error.HTTPError as e:
-                message = _error_text(e)
-                if e.code not in RETRY_STATUSES:
-                    raise RemoteError(e.code, message) from None
-                reason = f"HTTP {e.code}: {message}"
+                status, status_reason, raw, reused, server_ms = self._once(
+                    method, parts, path, data, headers, timeout)
             except (OSError, http.client.HTTPException) as e:
                 reason = _reason(e)
             else:
-                try:
-                    return json.loads(raw.decode("utf-8"))
-                except ValueError:
-                    raise ProtocolError(f"{url} did not answer with JSON") from None
+                self.timings.append({
+                    "path": path, "status": status, "reused": reused,
+                    "total_ms": (time.perf_counter() - started) * 1000, "server_ms": server_ms,
+                    "bytes_out": len(data or b""), "bytes_in": len(raw)})
+                if status >= 400:
+                    message = _error_text(raw, status_reason)
+                    if status not in RETRY_STATUSES:
+                        raise RemoteError(status, message) from None
+                    reason = f"HTTP {status}: {message}"
+                else:
+                    try:
+                        return json.loads(raw.decode("utf-8"))
+                    except ValueError:
+                        raise ProtocolError(f"{url} did not answer with JSON") from None
             if attempt + 1 < attempts:
                 self._sleep(min(self.backoff * (2 ** attempt), self.max_backoff))
         raise Unreachable(f"{method} {url} failed {attempts} times; last: {reason}")
