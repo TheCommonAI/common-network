@@ -166,6 +166,8 @@ if command -v cloudflared >/dev/null 2>&1 || [ -x "$BIN_DIR/cloudflared" ]; then
   # group.py is imported by join.py only for --group-token, but it is part of the
   # same install: a member cannot join a group without it.
   curl -fsSL "$RAW/join/group.py" -o "$INSTALL_DIR/group.py"
+  # layers.py runs `common join --network` (the decentralised layer network).
+  curl -fsSL "$RAW/join/layers.py" -o "$INSTALL_DIR/layers.py"
 
   write_wrapper "$INSTALL_DIR/join.py" "$BIN_DIR/common-join"
   JOIN_INSTALLED=1

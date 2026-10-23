@@ -114,6 +114,8 @@ if ($cloudflared -or (Test-Path "$BinDir\cloudflared.exe")) {
     Invoke-WebRequest -Uri "$Raw/join/worker.py" -OutFile "$InstallDir\worker.py"
     Invoke-WebRequest -Uri "$Raw/join/runtime.py" -OutFile "$InstallDir\runtime.py"
     Invoke-WebRequest -Uri "$Raw/join/group.py" -OutFile "$InstallDir\group.py"
+    # layers.py runs `common join --network` (the decentralised layer network).
+    Invoke-WebRequest -Uri "$Raw/join/layers.py" -OutFile "$InstallDir\layers.py"
 
     $joinWrapper = @"
 @echo off

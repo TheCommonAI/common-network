@@ -136,9 +136,15 @@ class BlockServer:
     """
 
     def __init__(self, block, host: str = LOOPBACK, port: int = 0, *,
-                 max_request_bytes: int = MAX_REQUEST_BYTES, token: str | None = None):
+                 max_request_bytes: int = MAX_REQUEST_BYTES, token: str | None = None,
+                 extra_handlers: dict | None = None):
         """token=None serves without authentication. Only tests and --stub do that;
-        the command line refuses to start a real block without a token."""
+        the command line refuses to start a real block without a token.
+
+        extra_handlers maps ("GET" | "POST", path) to callable(body_or_None) -> (status, obj).
+        They are public (no bearer token): a node uses them for the manifest and gossip, whose
+        contents are signed. They share the request-size limit. The dict may be changed after
+        construction."""
         if host != LOOPBACK:
             raise ValueError("the block server listens on 127.0.0.1 only; the tunnel is what reaches it")
         if max_request_bytes < 1:
@@ -148,6 +154,7 @@ class BlockServer:
         self.layers = protocol.check_layers(block.layers)
         self.device = str(block.device)
         self.max_request_bytes = max_request_bytes
+        self.extra_handlers = dict(extra_handlers or {})
         self._lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
         self._httpd = _Httpd((host, port), _Handler)
@@ -265,9 +272,25 @@ class _Handler(BaseHTTPRequestHandler):
     def _path(self) -> str:
         return self.path.split("?", 1)[0]
 
+    def _extra(self, method: str, path: str):
+        return self._block.extra_handlers.get((method, path))
+
+    def _run_extra(self, handler, body) -> None:
+        try:
+            status, obj = handler(body)
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            self._send(500, _error(f"handler failed: {type(e).__name__}"[:300]))
+        else:
+            self._send(status, obj)
+
     def do_GET(self) -> None:
         self._unread, self._compute_ms = False, None
         path = self._path()
+        handler = self._extra("GET", path)
+        if handler is not None:
+            self._run_extra(handler, None)
+            return
         if not self._authorized():
             self._send(401, _error("missing or wrong bearer token"))
             return
@@ -281,6 +304,18 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._unread, self._compute_ms = True, None  # a body follows until _read_body has it
         path = self._path()
+        handler = self._extra("POST", path)
+        if handler is not None:
+            body = self._read_body()
+            if body is None:
+                return  # the reply has already been sent
+            try:
+                obj = json.loads(body.decode("utf-8"))
+            except ValueError:
+                self._send(400, _error("body is not JSON"))
+                return
+            self._run_extra(handler, obj)
+            return
         if path == "/health":
             self._send(405, _error("/health takes GET"))
             return

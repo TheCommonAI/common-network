@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from functools import partial
-from typing import Protocol, Sequence
+from typing import Iterator, Protocol, Sequence
 
 import torch
 from torch import nn
@@ -68,6 +68,21 @@ class LocalTransport:
 
     def close(self, endpoint: BlockEndpoint, session_id: str) -> None:
         self._block(endpoint).close(session_id)
+
+
+def sample_token(logits: torch.Tensor, temperature: float = 0.0, top_p: float = 1.0,
+                 rng: torch.Generator | None = None) -> int:
+    """Pick one token id from a 1-D logits vector. temperature <= 0 is greedy (argmax)."""
+    if temperature <= 0:
+        return int(logits.argmax())
+    probs = torch.softmax(logits.float() / temperature, dim=-1)
+    if top_p < 1.0:
+        sorted_probs, order = torch.sort(probs, descending=True)
+        before = torch.cumsum(sorted_probs, dim=-1) - sorted_probs  # probability mass ahead of each token
+        sorted_probs = torch.where(before < top_p, sorted_probs, torch.zeros_like(sorted_probs))
+        choice = torch.multinomial(sorted_probs / sorted_probs.sum(), 1, generator=rng)
+        return int(order[choice])
+    return int(torch.multinomial(probs, 1, generator=rng))
 
 
 class Client:
@@ -138,18 +153,38 @@ class Client:
                 self.transport.close(ep, session_id)
 
     @torch.inference_mode()
-    def generate(
+    def generate_stream(
         self,
         endpoints: Sequence[BlockEndpoint],
         prompt_ids: Sequence[int],
         max_new_tokens: int,
-    ) -> list[int]:
-        """Greedy decoding. The prompt goes through the blocks once. Each later step sends one token."""
+        *,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        seed: int | None = None,
+        stop_ids: Sequence[int] | None = None,
+    ) -> Iterator[int]:
+        """Yield new token ids one at a time. The prompt goes through the blocks once; each later step sends one token.
+
+        temperature 0 (the default) is greedy. Above 0, tokens are sampled from softmax(logits / temperature),
+        cut to the smallest set whose probability reaches top_p; seed makes that reproducible. A token in
+        stop_ids ends the stream and is not yielded. The session is closed when the stream ends or is closed.
+        """
         self.check_route(endpoints, self.config.num_hidden_layers)
         if not prompt_ids:
             raise ValueError("prompt is empty")
+        if max_new_tokens < 1:
+            return
+        stops = frozenset(stop_ids or ())
+        rng = None
+        if temperature > 0:
+            rng = torch.Generator()
+            if seed is not None:
+                rng.manual_seed(seed)
+            else:
+                rng.seed()
         session_id = uuid.uuid4().hex
-        new_tokens: list[int] = []
+        produced = 0
         try:
             ids = torch.tensor([list(prompt_ids)], dtype=torch.long, device=self.device)
             pos = 0
@@ -158,12 +193,25 @@ class Client:
                 hidden = self._run_blocks(endpoints, session_id, hidden, pos)
                 pos += ids.shape[1]
                 # The last position's logits pick the next token.
-                logits = self._logits(hidden[:, -1:])
-                next_id = int(logits[0, -1].argmax())
-                new_tokens.append(next_id)
-                if len(new_tokens) == max_new_tokens:
-                    return new_tokens
+                logits = self._logits(hidden[:, -1:])[0, -1]
+                next_id = sample_token(logits, temperature, top_p, rng)
+                if next_id in stops:
+                    return
+                produced += 1
+                yield next_id
+                if produced == max_new_tokens:
+                    return
                 ids = torch.tensor([[next_id]], dtype=torch.long, device=self.device)
         finally:
             for ep in endpoints:
                 self.transport.close(ep, session_id)
+
+    def generate(
+        self,
+        endpoints: Sequence[BlockEndpoint],
+        prompt_ids: Sequence[int],
+        max_new_tokens: int,
+        **sampling,
+    ) -> list[int]:
+        """Decoding to a list (greedy unless temperature/top_p/seed/stop_ids are given): see generate_stream."""
+        return list(self.generate_stream(endpoints, prompt_ids, max_new_tokens, **sampling))

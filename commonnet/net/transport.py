@@ -32,6 +32,8 @@ def from_wire(t: Tensor) -> torch.Tensor:
 
 
 DEAD_SECONDS = 60.0
+REVIVE_AFTER_SECONDS = 5.0   # a server the mesh still lists is retried once it has been dead this long
+WAIT_POLL_SECONDS = 1.0
 
 
 class HttpTransport:
@@ -41,19 +43,33 @@ class HttpTransport:
     (URL, token) pair. When the server in use stops answering (or has lost the session),
     the transport moves to the next one, opens the session there and replays every piece
     it already sent, exactly as sent, so the new server's cache is the one the old server
-    held. The call that failed is then sent again. With no replicas nothing is kept and a
-    dead server raises Unreachable as before.
+    held. The call that failed is then sent again. With no replicas and no on_exhausted nothing
+    is kept and a dead server raises Unreachable as before.
+
+    on_exhausted(name) -> [(url, token), ...] makes the transport survive running out of servers.
+    It must return the servers the network now lists for the SAME layers as `name`. When every
+    known server of an endpoint is dead the transport calls it, adds any new servers to the
+    candidates (a known server it lists again is retried once it has been dead
+    REVIVE_AFTER_SECONDS) and tries them. If none works it waits and asks again, up to wait_s
+    seconds, before raising Unreachable. A newcomer gets the session replayed exactly as the dead
+    one held it. Because the replay needs the history, it is kept whenever on_exhausted is set.
     """
 
     def __init__(self, urls: dict[str, str], *, token=None, tokens: dict[str, str] | None = None,
                  replicas: dict[str, list] | None = None, max_request_bytes: int = MAX_REQUEST_BYTES,
-                 now=time.monotonic, **client_kwargs):
+                 now=time.monotonic, on_exhausted=None, wait_s: float = 30.0,
+                 wait_sleep=time.sleep, wait_poll_s: float = WAIT_POLL_SECONDS, **client_kwargs):
         self.urls = dict(urls)
         self.max_request_bytes = max_request_bytes
         self._tokens = tokens or {}
         self._default_token = token
         self._kw = client_kwargs
         self._now = now
+        self._on_exhausted = on_exhausted
+        self._wait_s = wait_s
+        self._wait_sleep = wait_sleep
+        self._wait_poll_s = wait_poll_s
+        self._last_error: Exception | None = None
         self._replicas = {n: list(r) for n, r in (replicas or {}).items()}
         self._clients: dict[tuple[str, int], BlockClient] = {}
         self._open: set[tuple[str, str]] = set()
@@ -75,7 +91,7 @@ class HttpTransport:
             entry, self._tokens.get(name, self._default_token))
         if (name, index) not in self._clients:
             kw = dict(self._kw)
-            if self._replicas.get(name):
+            if self._replicas.get(name) or self._on_exhausted:
                 kw.setdefault("retries", 1)  # another server can take over, so do not wait out the full backoff
             self._clients[(name, index)] = BlockClient(
                 token=token, max_request_bytes=self.max_request_bytes, **kw)
@@ -96,12 +112,39 @@ class HttpTransport:
         client.open(url, session_id)
         self._active[(name, session_id)] = index
 
-    def _recover(self, name: str, session_id: str, failed: int, error: Exception) -> None:
-        """Move the session to the next live server and replay what it held. Raises if none is left."""
+    @staticmethod
+    def _entry_url(entry) -> str:
+        return entry[0] if isinstance(entry, tuple) else entry
+
+    def _merge_servers(self, name: str, fresh) -> int:
+        """Add servers the network lists for this endpoint's layers. Returns how many are new or revived."""
+        known = {self._entry_url(e): i for i, e in enumerate(self._candidates(name))}
+        changed = 0
+        for entry in fresh or []:
+            url, token = entry if isinstance(entry, tuple) else (entry, None)
+            index = known.get(url)
+            if index is None:
+                self._replicas.setdefault(name, []).append((url, token))
+                known[url] = len(known)
+                changed += 1
+            elif (name, index) in self._dead and self._now() - self._dead[(name, index)] >= REVIVE_AFTER_SECONDS:
+                del self._dead[(name, index)]
+                changed += 1
+        return changed
+
+    def refresh_replicas(self, name: str) -> None:
+        """Ask the network for the current servers of this endpoint's layers (no-op without on_exhausted)."""
+        if self._on_exhausted is None:
+            return
+        try:
+            self._merge_servers(name, self._on_exhausted(name))
+        except Exception:  # a failed refresh must never break a request that may not need it
+            pass
+
+    def _try_candidates(self, name: str, session_id: str, failed: int) -> bool:
+        """Try each other live server in turn. True once one holds the session; failures set _last_error."""
         key = (name, session_id)
-        self._dead[(name, failed)] = self._now()
         count = len(self._candidates(name))
-        last = error
         for step in range(1, count + 1):
             index = (failed + step) % count
             if index != failed and not self._alive(name, index):
@@ -113,11 +156,32 @@ class HttpTransport:
                     client.forward(url, session_id, piece, start_pos)
             except BlockError as e:
                 self._dead[(name, index)] = self._now()
-                last = e
+                self._last_error = e
                 continue
             self.failovers.append((name, failed, index))
+            return True
+        return False
+
+    def _recover(self, name: str, session_id: str, failed: int, error: Exception) -> None:
+        """Move the session to the next live server and replay what it held. Raises if none is left."""
+        self._dead[(name, failed)] = self._now()
+        self._last_error = error
+        if self._try_candidates(name, session_id, failed):
             return
-        raise last
+        if self._on_exhausted is None:
+            raise self._last_error
+        deadline = self._now() + self._wait_s
+        while True:
+            try:
+                self._merge_servers(name, self._on_exhausted(name))
+            except Exception:  # the lookup failing is not the end: keep waiting for the network
+                pass
+            if self._try_candidates(name, session_id, failed):
+                return
+            if self._now() >= deadline:
+                break
+            self._wait_sleep(self._wait_poll_s)
+        raise Unreachable(f"no live server for {name} after waiting {self._wait_s:g}s; last error: {self._last_error}")
 
     def _send(self, name: str, session_id: str, piece: Tensor, start_pos: int) -> Tensor:
         key = (name, session_id)
@@ -127,7 +191,7 @@ class HttpTransport:
             try:
                 return client.forward(url, session_id, piece, start_pos)
             except (Unreachable, RemoteError) as e:
-                if len(self._candidates(name)) < 2:
+                if len(self._candidates(name)) < 2 and self._on_exhausted is None:
                     raise
                 if isinstance(e, RemoteError) and e.status != 404:
                     raise  # an answer from a live server, not a lost one (404: it forgot the session)
@@ -136,9 +200,16 @@ class HttpTransport:
     def forward(self, endpoint, session_id: str, hidden: torch.Tensor, start_pos: int) -> torch.Tensor:
         name, key = endpoint.name, (endpoint.name, session_id)
         if key not in self._open:
-            self._start(name, session_id, self._first_alive(name))
+            self.refresh_replicas(name)
+            index = self._first_alive(name)
+            try:
+                self._start(name, session_id, index)
+            except Unreachable as e:  # an answer with an error status (401, 400...) is a live server: raise it
+                if len(self._candidates(name)) < 2 and self._on_exhausted is None:
+                    raise
+                self._recover(name, session_id, index, e)  # nothing to replay yet: just find a live server
             self._open.add(key)
-        keep = len(self._candidates(name)) > 1
+        keep = len(self._candidates(name)) > 1 or self._on_exhausted is not None
         batch, seq, width = hidden.shape
         wire_name = "float32" if hidden.dtype == torch.float32 else "float16"
         per_token = batch * width * DTYPE_WIDTH[wire_name] * 4 // 3 + 4

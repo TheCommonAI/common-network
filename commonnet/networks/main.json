@@ -1,0 +1,7 @@
+{"id": "common-main-8b-v1", "version": 1,
+ "model": {"name": "Qwen3-8B", "num_layers": 36,
+           "repos": {"mlx": "mlx-community/Qwen3-8B-4bit", "nf4": "unsloth/Qwen3-8B-bnb-4bit"},
+           "client_repo": "mlx-community/Qwen3-8B-4bit"},
+ "boundaries": [0, 9, 18, 27, 36],
+ "gib_per_layer": {"mlx": 0.125, "nf4": 0.17}, "fixed_gib": 0.3,
+ "min_replicas": 2, "seeds": []}
