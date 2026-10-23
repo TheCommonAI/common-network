@@ -12,7 +12,6 @@ Usage:
     common ask "<prompt>"          route one question through the network
     common join                    put this machine on the commons as a node
     common serve <model>           contribute a specific model
-    common rpc <runtime flags>     launch a private RPC worker or inspect a v0.2 group
     common leave                   take this machine off the commons
     common status                  this node: health, position, requests served
     common demand                  live domain coverage gaps
@@ -2184,7 +2183,7 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
         # join.py imports worker and runtime from its own directory, so a first run
         # installs all three from the bundle, not just join.py.
         bundle = Path(__file__).resolve().parent
-        for name in ("join.py", "worker.py", "runtime.py", "group.py"):
+        for name in ("join.py", "worker.py", "runtime.py"):
             target = INSTALL_DIR / name
             if target.exists():
                 continue
@@ -2213,8 +2212,7 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
         print(dim(f"putting {extra_model} out to graze on the commons.\n"))
 
     argv = [sys.executable, str(join_py)]
-    if "--local-only" not in (args.rest or []):
-        argv += ["--gateway", gateway]
+    argv += ["--gateway", gateway]
     if args.no_update or join_py == checkout_join:
         argv += ["--no-update"]
     if extra_model:
@@ -4064,10 +4062,6 @@ def main() -> None:
     parser.add_argument("--version", action="store_true")
     args = parser.parse_args()
 
-    if args.verb == "join" and "--local-only" in args.rest:
-        # Local experiments must not download/execute a different join script.
-        args.no_update = True
-
     _ARGS_NO_COLOR[0] = args.no_color
 
     if not args.no_update:
@@ -4134,10 +4128,9 @@ def main() -> None:
     elif args.verb == "join":
         cmd_join_or_serve("join", gateway, args)
     elif args.verb == "rpc":
-        runtime_py = Path(__file__).resolve().parent.parent / "join" / "runtime.py"
-        if not runtime_py.is_file():
-            runtime_py = INSTALL_DIR / "runtime.py"
-        os.execv(sys.executable, [sys.executable, str(runtime_py), *args.rest])
+        print(red("✗ `common rpc` was removed: the v0.2 RPC-group prototype was replaced by the layer network."), file=sys.stderr)
+        print(dim("  → common join --network    (see docs/layer-network.md)"), file=sys.stderr)
+        sys.exit(2)
     elif args.verb == "serve":
         model = args.rest[0] if args.rest else args.model
         if not model:

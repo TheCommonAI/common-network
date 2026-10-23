@@ -205,26 +205,31 @@ class JoinFlag(unittest.TestCase):
         return subprocess.run([sys.executable, str(JOIN_PY), "--no-update", *args], capture_output=True, text=True, timeout=60)
 
     def test_network_flag_is_refused_with_incompatible_options(self):
-        for other in (["--group-token", "cng1.x.y"], ["--distributed-config", "c.json"], ["--model", "m"],
-                      ["--local-only"], ["--lan"], ["--list-catalogue"], ["--permanent"], ["--remove-permanent"],
-                      ["--port", "5"]):
+        for other in (["--model", "m"], ["--lan"], ["--list-catalogue"], ["--legacy"], ["--remove-permanent"]):
             with self.subTest(other=other):
                 out = self._run("--network", *other)
                 self.assertEqual(out.returncode, 2)
-                if other != ["--port", "5"]:  # --port without --local-only is refused by an older check first
-                    self.assertIn("--network cannot be combined", out.stderr)
+                self.assertIn("--network cannot be combined", out.stderr)
 
     def test_help_lists_the_option(self):
         self.assertIn("--network", self._run("--help").stdout)
 
-    def test_api_is_only_valid_with_network(self):
-        out = self._run("--api")
-        self.assertEqual(out.returncode, 2)
-        self.assertIn("--api is only used with --network", out.stderr)
-        out = self._run("--api", "12345", "--model", "m")
-        self.assertEqual(out.returncode, 2)
-        self.assertIn("--api is only used with --network", out.stderr)
+    def test_api_is_only_valid_with_the_layer_network(self):
+        for other in (["--model", "m"], ["--legacy"], ["--lan"], ["--remove-permanent"]):
+            with self.subTest(other=other):
+                out = self._run("--api", "12345", *other)
+                self.assertEqual(out.returncode, 2)
+                self.assertTrue("--api is only used with the layer network" in out.stderr
+                                or "cannot be combined" in out.stderr, out.stderr)
         self.assertIn("--api", self._run("--help").stdout)
+
+    def test_a_plain_join_with_api_goes_to_the_layer_network(self):
+        with mock.patch.object(join, "run_network_member") as run, \
+                mock.patch.object(join, "choose_mode", return_value="network"), \
+                mock.patch.object(join, "announce_layer_first"), \
+                mock.patch.object(sys, "argv", ["join.py", "--no-update", "--api"]):
+            join.main()
+        run.assert_called_once_with(None, ["--api", "11440"])
 
     def test_api_is_passed_to_the_node(self):
         for argv, expected in ((["--network"], []), (["--network", "--api"], ["--api", "11440"]),
@@ -240,8 +245,8 @@ class JoinFlag(unittest.TestCase):
         self.assertIn("if args.network is not None:", source)
         top_level = [l for l in source.splitlines() if l.startswith(("import layers", "from layers"))]
         self.assertEqual(top_level, [])  # layers is imported lazily, inside run_network_member only
-        body = source[source.index("def run_network_member"):source.index("def main()")]
-        self.assertEqual(source.count("import_module(\"layers\")"), body.count("import_module(\"layers\")"))
+        body = source[source.index("def _load_layers"):source.index("def layer_network_supported")]
+        self.assertEqual(source.count("import_module(\"layers\")"), body.count("import_module(\"layers\")"))  # only the loader imports it
 
 
 class BackendImportCheck(unittest.TestCase):
