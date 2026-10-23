@@ -58,7 +58,7 @@ class LauncherError(RuntimeError):
 
 
 def _join():
-    """join/join.py, imported the way group.py imports it: join/ goes on the path first."""
+    """join/join.py, imported by putting join/ on the path first."""
     if str(JOIN_DIR) not in sys.path:
         sys.path.insert(0, str(JOIN_DIR))
     import join

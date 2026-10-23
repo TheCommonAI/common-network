@@ -185,6 +185,12 @@ class TextTests(unittest.TestCase):
         self.assertEqual(text.push(99), "")  # replacement character: wait
         self.assertEqual(text.flush(), "�")
 
+    def test_thinking_is_off_by_default_and_a_request_can_turn_it_on(self):
+        msgs = [{"role": "user", "content": "hi"}]
+        self.assertEqual(parse_request({"messages": msgs})["template_kwargs"], {"enable_thinking": False})
+        on = parse_request({"messages": msgs, "chat_template_kwargs": {"enable_thinking": True, "x": 1}})
+        self.assertEqual(on["template_kwargs"], {"enable_thinking": True, "x": 1})
+
     def test_parse_request_defaults(self):
         req = parse_request({"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]})
         self.assertEqual(req["messages"][0]["content"], "hi")

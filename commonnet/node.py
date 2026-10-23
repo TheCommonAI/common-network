@@ -36,7 +36,7 @@ from commonnet.mesh import placement
 from commonnet.mesh import gossip as mesh_gossip
 from commonnet.mesh.gossip import Gossiper, GossipError, PeerTable
 from commonnet.mesh.manifest import Manifest, ManifestError
-from commonnet.mesh.records import Identity, RecordError
+from commonnet.mesh.records import LIVE_SECONDS, Identity, RecordError
 from commonnet.net.server import BlockServer, StubBlock
 
 HOME = Path(os.environ.get("COMMON_NETWORK_HOME") or Path.home() / ".common-network")
@@ -57,6 +57,10 @@ VRAM_RESERVE_GIB = 1.5
 MAC_MEMORY_FRACTION = 0.62
 MAX_GOSSIP_RECORDS = 500
 STUB_GIB = 100.0
+
+STATUS_ENV = "COMMONNET_STATUS_FILE"
+STATUS_SECONDS = 2.0
+DEFAULT_API_PORT = 11440
 
 
 class NodeError(RuntimeError):
@@ -162,6 +166,85 @@ def resolve_network(network: str | None, seeds: list[str], environ=None) -> tupl
     return manifest, seeds
 
 
+def default_status_path(environ=None) -> Path:
+    environ = os.environ if environ is None else environ
+    return Path(environ.get(STATUS_ENV) or HOME / "net" / "status.json")
+
+
+def friendly(message: str) -> str:
+    """One sentence for a person: first letter capitalised, no trailing whitespace."""
+    message = str(message).strip()
+    return message[:1].upper() + message[1:] if message else "Something went wrong."
+
+
+def blank_status(state: str, **fields) -> dict:
+    """A status document with every field of the contract (frozen: the desktop app reads it)."""
+    status = {"v": 1, "state": state, "network": "", "model": "", "peer": "", "window": None, "backend": None,
+              "gib": 0.0, "url": None, "download": None, "stages": [], "coverage": [], "peers": [], "error": None,
+              "api": None, "pid": os.getpid(), "ts": time.time()}
+    status.update(fields)
+    return status
+
+
+class StatusFile:
+    """Writes the status document atomically (temp file + rename) into a private directory."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self._lock = threading.Lock()
+
+    def write(self, status: dict) -> None:
+        data = json.dumps(status, separators=(",", ":")).encode("utf-8")
+        with self._lock:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                try:
+                    os.write(fd, data)
+                finally:
+                    os.close(fd)
+                os.replace(tmp, self.path)
+            except OSError:
+                pass  # a status file is a convenience; never stop a peer over it
+
+
+_PROGRESS = re.compile(r"^(?P<label>.+?): (?P<done>\d+) MB of (?P<total>\d+) MB$")
+_WRITTEN = re.compile(r"^(?P<label>.+?): (?P<total>\d+) MB written")
+
+
+class Progress:
+    """Adds up the hub's own progress lines ("model.safetensors: 1277 MB of 4394 MB") over every file it fetches."""
+
+    def __init__(self) -> None:
+        self._files: dict[str, tuple[int, int]] = {}
+        self._lock = threading.Lock()
+
+    def feed(self, line: str) -> None:
+        line = str(line).strip()
+        found = _PROGRESS.match(line)
+        if found:
+            done, total = int(found["done"]), int(found["total"])
+        else:
+            found = _WRITTEN.match(line)
+            if not found:
+                return
+            done = total = int(found["total"])
+        with self._lock:
+            self._files[found["label"]] = (done, max(done, total))
+
+    def snapshot(self) -> dict | None:
+        with self._lock:
+            if not self._files:
+                return None
+            return {"bytes": sum(d for d, _ in self._files.values()) << 20,
+                    "total": sum(t for _, t in self._files.values()) << 20}
+
+    def reset(self) -> None:
+        with self._lock:
+            self._files.clear()
+
+
 class Node:
     """One peer. Construct, start(), later stop(). Everything slow or external is injectable for tests."""
 
@@ -169,7 +252,9 @@ class Node:
                  port: int = 0, stub: bool = False, tunnel: bool = True, advertise: str | None = None,
                  log=print, tunnel_opener=None, block_builder=None, fetcher=None,
                  resign_s: float = RESIGN_SECONDS, rebalance_s: float = REBALANCE_SECONDS,
-                 cooldown_s: float = MOVE_COOLDOWN_SECONDS, gossip_s: float | None = None, clock=time.time):
+                 cooldown_s: float = MOVE_COOLDOWN_SECONDS, gossip_s: float | None = None, clock=time.time,
+                 status: StatusFile | None = None, status_s: float = STATUS_SECONDS,
+                 api_port: int | None = None, api_backend=None):
         self.manifest, self.seeds, self.identity, self.hw = manifest, list(seeds), identity, hardware
         self.port, self.stub, self.use_tunnel, self.advertise = port, stub, tunnel, advertise
         self.log = log
@@ -181,6 +266,17 @@ class Node:
         self.table = PeerTable(manifest.id)
         self.token = secrets.token_urlsafe(24)
         self.state = "loading"
+        # What the status file says; the signed record keeps its own three states (loading | up | leaving).
+        self.phase = "starting"
+        self._moving = False
+        self.error: str | None = None
+        self.progress = Progress()
+        self._status, self.status_s = status, status_s
+        self._status_window: tuple[int, int] | None = None
+        self._api_port, self._api_backend = api_port, api_backend
+        self._api: dict | None = None  # {"port": int, "ready": bool} once --api is on
+        self._api_server = None
+        self._api_error: str | None = None
         self.window: tuple[int, int] | None = None
         self.url: str | None = None
         self.server: BlockServer | None = None
@@ -211,6 +307,57 @@ class Node:
 
         return {("GET", "/manifest"): manifest, ("GET", "/peers"): peers, ("POST", "/gossip"): gossip}
 
+    # -- the status file (read by the desktop app; see docs/layer-network.md) ------------------------
+
+    def set_phase(self, phase: str, error: str | None = None) -> None:
+        with self._lock:
+            if self._moving and phase in ("downloading", "loading"):
+                phase = "moving"  # a move says `moving` throughout, including its download
+            self.phase = phase
+            if error is not None or phase == "error":
+                self.error = error
+        self.write_status()
+
+    def fail(self, message: str) -> None:
+        """Record a failure the person can read; the status file then says `error` until the process ends."""
+        self.set_phase("error", friendly(message))
+
+    def status_snapshot(self) -> dict:
+        with self._lock:
+            phase, window, url, error = self.phase, self._status_window, self.url, self.error
+            api = dict(self._api) if self._api else None
+            if api is not None and self._api_error and error is None:
+                error = self._api_error
+        now = self.clock()
+        manifest = self.manifest
+        live = self.table.live()
+        peers = []
+        for r in self.table.export():
+            age = now - r.get("ts", now)
+            if r.get("state") == "leaving" or age > LIVE_SECONDS:
+                continue
+            peers.append({"peer": r["peer"], "window": r.get("window"), "backend": r.get("backend"),
+                          "state": r.get("state"), "age_s": round(max(0.0, age), 1), "me": r["peer"] == self.identity.peer})
+        peers.sort(key=lambda p: (not p["me"], p["window"] or [99, 99], p["peer"]))
+        download = self.progress.snapshot() if phase in ("downloading", "moving") else None
+        return {"v": 1, "state": phase, "network": manifest.id, "model": manifest.model.get("name", manifest.id),
+                "peer": self.identity.peer, "window": None if window is None else list(window),
+                "backend": self.hw.backend, "gib": self.hw.gib, "url": url, "download": download,
+                "stages": [list(w) for w in manifest.stages()], "coverage": placement.coverage(manifest, live),
+                "peers": peers, "error": error, "api": api, "pid": os.getpid(), "ts": time.time()}
+
+    def write_status(self) -> None:
+        if self._status is None:
+            return
+        try:
+            self._status.write(self.status_snapshot())
+        except Exception:  # never let a status write take a peer down
+            pass
+
+    def _status_loop(self) -> None:
+        while not self._stop.wait(self.status_s):
+            self.write_status()
+
     # -- the signed record ---------------------------------------------------------------------
 
     def record(self) -> dict:
@@ -229,6 +376,11 @@ class Node:
 
     def start(self) -> "Node":
         self.log(f"peer {self.identity.peer}: {self.hw.name}, offering {self.hw.gib:.1f} GiB on {self.hw.backend}")
+        if self._api_port is not None:
+            self._api = {"port": self._api_port, "ready": False}
+        if self._status is not None:
+            self.write_status()
+            self._spawn(self._status_loop, "node-status")
         self._learn()
         self._gossiper = Gossiper(self.table, self.manifest, self.record, self.seeds)
         if self.gossip_s is not None:
@@ -237,14 +389,19 @@ class Node:
         self._gossiper.start()
         self._spawn(self._maintain, "node-maintain")
         window = self._choose()
+        with self._lock:
+            self._status_window = window
         self.log(f"serving layers {window[0]}-{window[1]} as {self.identity.peer}")
         self._serve(window)
         with self._lock:
-            self.window, self.state = window, "up"
+            self.window, self.state, self.phase = window, "up", "up"
         self.publish()
         self._push_to_peers()
+        self.write_status()
         self.log(f"up at {self.url}")
         self.log(f"you are part of the network. A friend can join through you with:  common join --network {self.url}")
+        if self._api_port is not None:
+            self._start_api()
         return self
 
     def stop(self) -> None:
@@ -254,6 +411,9 @@ class Node:
         self._leave.set()
         with self._lock:
             self.state = "leaving"
+            if self.phase != "error":
+                self.phase = "leaving"
+        self.write_status()
         try:
             self.publish()
             self._push_to_peers()
@@ -261,11 +421,17 @@ class Node:
             self.log(f"could not announce leaving ({type(e).__name__})")
         if self._gossiper is not None:
             self._gossiper.stop()
+        self._teardown_api()
         self._teardown_server()
         self._close_tunnel()
         for t in self._threads:
             if t is not threading.current_thread():
                 t.join(timeout=5)
+        with self._lock:
+            if self.phase != "error":
+                self.phase = "stopped"
+            self.url = None
+        self.write_status()
 
     def request_leave(self) -> None:
         self._leave.set()
@@ -309,8 +475,10 @@ class Node:
 
     def _make_block(self, window):
         if self._build_block is not None:
+            self.set_phase("loading")
             return self._build_block(window, self.manifest, self.hw)
         if self.stub:
+            self.set_phase("loading")
             return StubBlock(*window)
         repo = self.manifest.repo(self.hw.backend)
         if not repo:
@@ -321,12 +489,15 @@ class Node:
             fetch = lambda r, w: local  # noqa: E731
         if fetch is None:
             from commonnet import hub
-            fetch = lambda r, w: hub.Hub(r).fetch(layers=tuple(w))  # noqa: E731
+            fetch = lambda r, w: hub.Hub(r, log=self._hub_log).fetch(layers=tuple(w))  # noqa: E731
         self.log(f"downloading layers {window[0]}-{window[1]} of {repo} (only these)...")
+        self.progress.reset()
+        self.set_phase("downloading")
         try:
             checkpoint = fetch(repo, window)
         except Exception as e:
             raise NodeError(f"the download failed ({e}); join again to resume") from None
+        self.set_phase("loading")
         # Qwen activations pass float16's range on some prompts (NaN logits), so the MLX block computes in
         # bfloat16 and the hidden state between peers is float32. An explicit COMMONNET_DTYPE wins, then the
         # manifest's per-backend dtype. COMMONNET_MLX_CACHE_MB is left to the environment untouched.
@@ -337,6 +508,10 @@ class Node:
             os.environ["COMMONNET_DTYPE"] = dtype
         from commonnet.net import factory
         return factory.build_block(window[0], window[1], backend=self.hw.backend, checkpoint=checkpoint)
+
+    def _hub_log(self, message: str) -> None:
+        self.progress.feed(message)
+        self.log(message)
 
     def _serve(self, window) -> None:
         block = self._make_block(window)
@@ -361,6 +536,85 @@ class Node:
         if stop:
             try:
                 stop()
+            except Exception:
+                pass
+
+
+    # -- the local chat API (--api): the OpenAI-compatible server, in this process --------------------
+
+    def localize(self, transport) -> None:
+        """Send requests for this node's own window to its loopback block server, not out through the tunnel."""
+        with self._lock:
+            own, local = self.url, (self.server.url if self.server is not None else None)
+        if not own or not local:
+            return
+
+        def swap(entry):
+            if isinstance(entry, tuple):
+                return (local, entry[1]) if entry[0] == own else entry
+            return local if entry == own else entry
+
+        transport.urls = {name: swap(url) for name, url in transport.urls.items()}
+        transport._replicas = {name: [swap(e) for e in entries] for name, entries in transport._replicas.items()}
+
+    def _default_api_backend(self, network):
+        import torch
+        from commonnet.serve import NetworkBackend
+        fmt = "mlx4" if self.hw.backend == "mlx" else "fp16"  # mlx4 needs Apple silicon; the fp16 path is untested on NVIDIA
+        return NetworkBackend(network, os.environ.get("COMMONNET_LOCAL_CHECKPOINT"), fmt=fmt, hidden_dtype=torch.float32)
+
+    def _start_api(self) -> None:
+        from commonnet import serve
+        from commonnet.netclient import Network
+
+        node = self
+
+        class NodeNetwork(Network):
+            def transport(self, **kw):
+                transport = super().transport(**kw)
+                node.localize(transport)
+                return transport
+
+        # The node's own gossip keeps its table fresh, so the client side never runs a second exchange loop.
+        network = NodeNetwork(seeds=self.seeds, manifest=self.manifest, table=self.table,
+                              exchange=lambda table, url, timeout: None, now=self.clock)
+        lazy = serve.LazyBackend(network)
+        try:
+            server = serve.make_server(lazy, self._api_port)
+        except OSError as e:
+            self._api_error = friendly(f"the chat API could not start on port {self._api_port} ({e.strerror or e})")
+            self.log(self._api_error)
+            self.write_status()
+            return
+        with self._lock:
+            self._api_server = server
+        self._spawn(server.serve_forever, "node-api")
+        self.log(f"chat API on http://127.0.0.1:{self._api_port}/v1 (loading the client part in the background)")
+        self._spawn(lambda: self._load_api_backend(lazy, network), "node-api-load")
+        self.write_status()
+
+    def _load_api_backend(self, lazy, network) -> None:
+        try:
+            backend = (self._api_backend or self._default_api_backend)(network)
+        except (Exception, SystemExit) as e:  # NetworkBackend exits (not raises) when the manifest names no client repo
+            lazy.fail(friendly(f"the chat API could not load its model part ({type(e).__name__}: {e})"))
+            self._api_error = lazy.error
+            self.log(lazy.error)
+        else:
+            lazy.set(backend)
+            with self._lock:
+                if self._api is not None:
+                    self._api["ready"] = True
+            self.log("chat API ready")
+        self.write_status()
+
+    def _teardown_api(self) -> None:
+        with self._lock:
+            server, self._api_server = self._api_server, None
+        if server is not None:
+            try:
+                server.shutdown()
+                server.server_close()
             except Exception:
                 pass
 
@@ -466,16 +720,23 @@ class Node:
         """Serve a different window: say `loading`, swap the block, say `up` again at the same address."""
         self.log(f"moving to layers {window[0]}-{window[1]} (a stage lost every peer)")
         with self._lock:
-            self.state, self.window = "loading", None
+            self.state, self.window, self._status_window = "loading", None, tuple(window)
+            self.phase, self._moving = "moving", True
+        self.write_status()
         self.publish()
         self._push_to_peers()
         self._teardown_server()
         self._last_move = self.clock()
-        self._serve(tuple(window))
+        self.progress.reset()
+        try:
+            self._serve(tuple(window))
+        finally:
+            self._moving = False
         with self._lock:
-            self.window, self.state = tuple(window), "up"
+            self.window, self.state, self.phase = tuple(window), "up", "up"
         self.publish()
         self._push_to_peers()
+        self.write_status()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -490,6 +751,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stub", action="store_true", help="serve an identity block with no weights (tests)")
     p.add_argument("--no-tunnel", action="store_true", help="do not open a tunnel; publish --advertise or the loopback URL")
     p.add_argument("--advertise", metavar="URL", help="with --no-tunnel: the URL to publish")
+    p.add_argument("--status-file", type=Path, metavar="PATH",
+                   help=f"where to write the status JSON the desktop app reads every 2 s (or set {STATUS_ENV}; "
+                        "default: ~/.common-network/net/status.json)")
+    p.add_argument("--api", nargs="?", const=DEFAULT_API_PORT, default=None, type=int, metavar="PORT",
+                   help=f"also serve the OpenAI-compatible chat API on 127.0.0.1:PORT (default {DEFAULT_API_PORT}) "
+                        "from this process. The client part of the model (about 1 GB for Qwen3-8B) loads in the background")
     return p
 
 
@@ -498,8 +765,11 @@ def main(argv=None) -> int:
     if args.advertise and not args.no_tunnel:
         print("error: --advertise is only for --no-tunnel", file=sys.stderr)
         return 2
+    status = StatusFile(args.status_file or default_status_path())
+    status.write(blank_status("starting"))
     try:
         manifest, seeds = resolve_network(args.network, args.seed)
+        status.write(blank_status("starting", network=manifest.id, model=manifest.model.get("name", manifest.id)))
         if args.stub:
             hardware = Hardware("stub", args.stage_gib or STUB_GIB, "stub")
         else:
@@ -512,9 +782,10 @@ def main(argv=None) -> int:
         identity = Identity.load_or_create(Path(directory) / "identity.key")
     except (NodeError, RecordError, ManifestError) as e:
         print(f"error: {e}", file=sys.stderr)
+        status.write(blank_status("error", error=friendly(e)))
         return 2
     node = Node(manifest, seeds, identity, hardware, port=args.port, stub=args.stub, tunnel=not args.no_tunnel,
-                advertise=args.advertise)
+                advertise=args.advertise, status=status, api_port=args.api)
 
     def leave(signum, frame):
         node.request_leave()
@@ -526,6 +797,7 @@ def main(argv=None) -> int:
         node.wait()
     except NodeError as e:
         print(f"error: {e}", file=sys.stderr)
+        node.fail(str(e))
         node.stop()
         return 1
     finally:

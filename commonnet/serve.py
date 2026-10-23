@@ -106,7 +106,10 @@ def parse_request(body: dict) -> dict:
             "temperature": number("temperature", DEFAULT_TEMPERATURE, 0.0, 2.0),
             "top_p": number("top_p", 1.0, 0.0001, 1.0), "seed": number("seed", None, 0, 2 ** 63 - 1, int),
             "stream": bool(body.get("stream", False)),
-            "template_kwargs": body.get("chat_template_kwargs") if isinstance(body.get("chat_template_kwargs"), dict) else {}}
+            # Qwen3 opens every answer with a <think> block. On a network that runs at a few tokens a second a chat
+            # wants the answer, so thinking is off unless the request turns it on (chat_template_kwargs).
+            "template_kwargs": {"enable_thinking": False,
+                                **(body.get("chat_template_kwargs") if isinstance(body.get("chat_template_kwargs"), dict) else {})}}
 
 
 # --- backends -------------------------------------------------------------------------------------
@@ -160,6 +163,59 @@ class NetworkBackend:
 
     def health(self) -> dict:
         return self.network.status()
+
+
+class LazyBackend:
+    """Stands in for the real backend while its client part loads: requests get a 503 until `set()`.
+
+    The node's --api starts the HTTP server at once and loads the embedding and head in the background, so the
+    port answers (and /health says `ready: false`) instead of refusing connections for a minute.
+    """
+
+    def __init__(self, network):
+        self.network = network
+        self._backend = None
+        self.error: str | None = None
+
+    @property
+    def ready(self) -> bool:
+        return self._backend is not None
+
+    def set(self, backend) -> None:
+        self._backend = backend
+
+    def fail(self, message: str) -> None:
+        self.error = message
+
+    def _need(self):
+        if self._backend is None:
+            raise ApiError(503, self.error or "The model is still loading on this machine; try again in a minute.",
+                           "service_unavailable", "loading")
+        return self._backend
+
+    @property
+    def model_name(self) -> str:
+        if self._backend is not None:
+            return self._backend.model_name
+        manifest = self.network.manifest
+        return manifest.model.get("name", manifest.id)
+
+    @property
+    def tokenizer(self):
+        return self._need().tokenizer
+
+    def encode_chat(self, messages, template_kwargs):
+        return self._need().encode_chat(messages, template_kwargs)
+
+    def stream(self, prompt_ids, max_tokens, temperature, top_p, seed):
+        return self._need().stream(prompt_ids, max_tokens, temperature, top_p, seed)
+
+    def health(self) -> dict:
+        status = dict(self.network.status())
+        status["ready"] = self.ready
+        if self.error:
+            status["error"] = self.error
+        return status
 
 
 class _NoTransport:

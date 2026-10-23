@@ -5,15 +5,19 @@ Each peer holds a few layers; only the small activations travel between peers (a
 There is no central server: peers find each other by gossip, build their own routes, and replace a peer
 that drops out in the middle of a generation.
 
-This is separate from the original `common join` network (one whole model per node, routed by the gateway),
-which is unchanged. Layer-network commands all take `--network`.
+`common join` joins this network by default. The original whole-model gateway node is still there as
+`common join --legacy` (and anything that only makes sense for it, such as `--model` or `--lan`, implies
+it), and a machine that cannot serve layers (no Apple silicon or NVIDIA GPU) keeps running as a
+whole-model node. A background service keeps the mode it was installed with.
 
 ## Join (any machine with a supported GPU)
 
 ```bash
-common join --network            # the built-in network
+common join                      # the built-in network (same as --network)
 common join --network URL        # a network a friend runs: any peer's URL
 common join --network manifest.json
+common join --permanent          # keep serving after reboots (records the mode)
+common join --legacy             # the original whole-model gateway node instead
 ```
 
 The first run sets itself up: it makes a private Python environment, installs the model runtime, fetches
@@ -31,6 +35,53 @@ python -m commonnet.serve --network URL     # OpenAI-compatible API on http://12
 ```
 
 Any OpenAI-compatible app can point at it. Each request builds a fresh route from the live peers.
+
+## Status file (for apps that show what a peer is doing)
+
+`commonnet.node` (so `common join --network`) writes a JSON status document every 2 s and on every change,
+atomically (temp file + rename), to `~/.common-network/net/status.json` — or `--status-file PATH`, or the
+`COMMONNET_STATUS_FILE` environment variable. The directory is private (0700), the file 0600. Read it; never
+write it. It never contains tokens or keys.
+
+```json
+{"v":1,"state":"up","network":"common-main-8b-v1","model":"Qwen3-8B","peer":"<32 hex>","window":[9,18],
+ "backend":"mlx","gib":9.92,"url":"https://....trycloudflare.com","download":null,
+ "stages":[[0,9],[9,18],[18,27],[27,36]],"coverage":[1,1,1,1],
+ "peers":[{"peer":"<32 hex>","window":[9,18],"backend":"mlx","state":"up","age_s":0.4,"me":true}],
+ "error":null,"api":{"port":11440,"ready":true},"pid":4242,"ts":1761200000.5}
+```
+
+- `state`: `starting` -> `downloading` -> `loading` -> `up`; also `moving` (switching to a stage that lost every
+  peer, through its own download and load), `leaving`, `stopped` (clean exit) and `error`.
+- `window` is the layer range this peer serves, or is about to (it is set while downloading); `null` until chosen.
+- `download` is `{"bytes","total"}` while `downloading`/`moving`, from the hub's own progress lines, else `null`.
+- `coverage[i]` is how many live peers hold stage `stages[i]`; `peers` lists live peers (fresh in the last 60 s,
+  not leaving), this one first (`me`). 0 in `coverage` means the network cannot answer until someone joins.
+- `error` is one sentence meant for a person, or `null`. With `state: "error"` the peer is down; a failed chat API
+  also fills it while `state` stays `up`.
+- Before the network is known `network`, `model` and `peer` are `""` and `backend`, `window` and `url` are `null`.
+- **A crashed peer** never writes `stopped`: treat the file as dead when `ts` is older than 15 s and `pid` is not a
+  running process.
+
+`scripts/fake_status.py` plays a realistic changing file (download 0-100%, peers joining and leaving, a stage losing its
+last peer, a move, the API loading; `--scenario error|crash`) for developing a UI without a model.
+
+## Local chat API (`--api`)
+
+```bash
+common join --network --api          # peer + OpenAI-compatible API on http://127.0.0.1:11440/v1
+common join --network --api 12000    # another port
+```
+
+The same process that serves layers also answers `GET /v1/models`, `GET /health` and `POST /v1/chat/completions`
+(stream and non-stream). It binds 127.0.0.1 only and uses this peer's own view of the network: no second gossip loop,
+no second copy of any weights, and requests for this peer's own layers go to its local block server rather than out
+through the tunnel. The port answers straight away; chat requests get `503 loading` (and `/health` says
+`"ready": false`) until the client part of the model — the embedding, final norm and head, **about 1 GB for
+Qwen3-8B on a 16 GB Mac, on top of the layers this peer serves** — has downloaded and loaded in the background.
+`status.json` shows `api: {"port", "ready"}`. If the port is taken or the model part fails to load, the peer keeps
+serving and the status `error` says so. On NVIDIA the client part runs from CPU in fp16; that path is untested.
+`python -m commonnet.serve` still runs the API alone, without serving layers.
 
 ## Start a network (be a seed)
 
