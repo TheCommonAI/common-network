@@ -1,129 +1,63 @@
-import asyncio
-from contextlib import asynccontextmanager
+"""The Common gateway, retired to a signpost.
+
+Everything this service used to do (node registry, routing, composition, the catalogue, the mobile
+transport) now happens inside the layer network, with no central server. What is left:
+
+  GET /health      liveness, for the host
+  GET /manifest    the default network's manifest
+  GET /seeds       peers that are normally up (same list `common join` fetches from the repository)
+  GET /            a short page saying where things went
+  anything else    410 Gone with a plain sentence, so an old node or app version learns why it stopped working
+"""
+from __future__ import annotations
+
+import json
+import os
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 
-from app import db, embedder
-from app.client_observability import router as client_router, retention_loop
-from app.admin import router as admin_router
-from app.catalogue import router as catalogue_router, seed_catalogue_from_file
-from app.config import settings
-from app.decisions import router as decisions_router
-from app.demand import router as demand_router
-from app.gateway import router as gateway_router
-from app.health import health_check_loop, mobile_lease_loop
-from app.metrics import router as metrics_router
-from app.mobile_transport import manager as mobile_manager, router as mobile_router
-from app.registry import router as registry_router
-from app.seed import seed_from_file
+NETWORKS = Path(os.environ.get("COMMON_NETWORKS_DIR", Path(__file__).resolve().parent.parent / "networks"))
+MOVED = ("The Common gateway has been retired. The network now runs peer to peer: install or update the "
+         "`common` command and run `common join`. See https://github.com/TheCommonAI/common-network")
+
+app = FastAPI(title="Common gateway (retired)", docs_url=None, redoc_url=None, openapi_url=None)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Each step is announced before it runs, not after.
-    #
-    # This startup once hung on `embedder.load()` -- SentenceTransformer
-    # checking huggingface.co for a newer snapshot on a container that could
-    # not reach it -- and the only evidence anywhere was uvicorn's "Waiting for
-    # application startup." followed by silence. Diagnosing it needed an
-    # external check of the database's connection count to prove the hang was
-    # before db.connect(). A log line would have said so immediately.
-    #
-    # Announcing *before* rather than after is the whole point: a step that
-    # never completes only shows up in the log if its start was already
-    # printed.
-    print("startup: loading embedding model...", flush=True)
-    embedder.load()
-    print("startup: connecting to database...", flush=True)
-    await db.connect()
-    await mobile_manager.expire_stale()
-    async with db.pool().acquire() as conn:
-        await conn.execute(
-            "update nodes set healthy = false where transport in ('android_ws', 'ios_ws')"
-        )
-
-    # Seeding is best-effort. It refreshes rows that are already in the
-    # database from the last deploy, so failing it is not a reason to refuse
-    # to serve -- and a gateway that serves a slightly stale catalogue is
-    # strictly better than one that will not start.
-    #
-    # This gateway hung here once, mid-seed, and took the whole service down
-    # with it. The db-level timeouts now turn that into an exception; this
-    # turns the exception into a degraded start rather than an outage.
+def _load(name: str) -> dict:
     try:
-        if settings.seed_on_startup:
-            print("startup: seeding nodes...", flush=True)
-            await seed_from_file()
-        print("startup: seeding catalogue...", flush=True)
-        await seed_catalogue_from_file()
-    except Exception as exc:
-        print(f"startup: WARNING seeding failed ({type(exc).__name__}: {exc}) — "
-              f"serving with whatever is already in the database", flush=True)
-
-    health_task = asyncio.create_task(health_check_loop())
-    mobile_lease_task = asyncio.create_task(mobile_lease_loop())
-    retention_task = asyncio.create_task(retention_loop())
-    print("startup: ready", flush=True)
-    yield
-    health_task.cancel()
-    mobile_lease_task.cancel()
-    retention_task.cancel()
-    await asyncio.gather(health_task, mobile_lease_task, retention_task, return_exceptions=True)
-    await db.disconnect()
-
-
-app = FastAPI(
-    title="Common Network Gateway — The Common Network Alpha (v0.1.6)",
-    description=(
-        "Permissionless, transparent routing and composition across contributed AI nodes. "
-        "A request that spans domains is answered by a panel of specialists in parallel, "
-        "verified deterministically, and synthesised into one reply."
-    ),
-    version="0.1.6",
-    lifespan=lifespan,
-)
-
-app.include_router(registry_router)
-app.include_router(mobile_router)
-app.include_router(gateway_router)
-app.include_router(decisions_router)
-app.include_router(metrics_router)
-app.include_router(catalogue_router)
-app.include_router(demand_router)
-app.include_router(admin_router)
-app.include_router(client_router)
+        return json.loads((NETWORKS / name).read_text())
+    except (OSError, ValueError):
+        return {}
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+def health() -> dict:
+    return {"ok": True, "service": "common-gateway", "mode": "retired"}
 
 
-# AGPL section 13: users interacting with this software over a network must be
-# offered its source. A public repository URL satisfies that for an unmodified
-# deployment. If you fork and run this as a service, point SOURCE_URL at *your*
-# source -- leaving it at ours would be a licence violation, not a courtesy
-# problem, because your users would be offered code you are not running.
-@app.get("/source")
-async def source():
-    return {
-        "source": settings.source_url,
-        "licence": "AGPL-3.0",
-        "copyright": "Copyright (C) 2026 Common AI Inc",
-        "version": app.version,
-        "note": (
-            "AGPL-3.0 section 13: if you run a modified version of this "
-            "software as a network service, you must offer its users your "
-            "modified source. Set SOURCE_URL to your own repository."
-        ),
-    }
+@app.get("/manifest")
+def manifest() -> dict:
+    return _load("main.json")
 
 
-DASHBOARD_PATH = Path(__file__).parent / "static" / "dashboard.html"
+@app.get("/seeds")
+def seeds() -> dict:
+    data = _load("seeds.json")
+    extra = [s.strip() for s in os.environ.get("COMMON_SEEDS", "").split(",") if s.strip()]
+    return {"network": data.get("network"), "seeds": list(dict.fromkeys([*data.get("seeds", []), *extra]))}
 
 
-@app.get("/dashboard")
-async def dashboard():
-    return FileResponse(DASHBOARD_PATH)
+@app.get("/", response_class=HTMLResponse)
+def home() -> str:
+    return ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<title>Common</title><body style='font-family:system-ui;max-width:34rem;margin:4rem auto;padding:0 1rem'>"
+            "<h1>Common</h1><p>The network now runs peer to peer, with no central gateway.</p>"
+            "<p>Install or update the <code>common</code> command, then run <code>common join</code>.</p>"
+            "<p><a href='https://github.com/TheCommonAI/common-network'>github.com/TheCommonAI/common-network</a></p>")
+
+
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
+async def gone(path: str, request: Request) -> JSONResponse:
+    return JSONResponse({"error": MOVED}, status_code=410)
