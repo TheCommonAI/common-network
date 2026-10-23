@@ -74,8 +74,11 @@ class HttpTransport:
         url, token = entry if isinstance(entry, tuple) else (
             entry, self._tokens.get(name, self._default_token))
         if (name, index) not in self._clients:
+            kw = dict(self._kw)
+            if self._replicas.get(name):
+                kw.setdefault("retries", 1)  # another server can take over, so do not wait out the full backoff
             self._clients[(name, index)] = BlockClient(
-                token=token, max_request_bytes=self.max_request_bytes, **self._kw)
+                token=token, max_request_bytes=self.max_request_bytes, **kw)
         return self._clients[(name, index)], url
 
     def _alive(self, name: str, index: int) -> bool:

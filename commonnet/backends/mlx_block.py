@@ -79,6 +79,10 @@ class MlxBlockRange:
     def __post_init__(self):
         if self.require_metal and not mx.metal.is_available():
             raise RuntimeError("MLX block needs the Metal GPU; none is available")
+        # MLX keeps freed buffers for reuse. Long prompts make large attention temporaries, and left
+        # alone the cache grew to ~11 GB per block at 16k tokens, swapping a 16 GB Mac. Cap it.
+        cache_mb = int(os.environ.get("COMMONNET_MLX_CACHE_MB", "1024"))
+        (getattr(mx, "set_cache_limit", None) or mx.metal.set_cache_limit)(cache_mb * 1024 * 1024)
         with open(os.path.join(self.checkpoint_dir, "config.json")) as f:
             cfg = json.load(f)
         wrapper = cfg
