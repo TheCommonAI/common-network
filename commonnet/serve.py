@@ -106,7 +106,10 @@ def parse_request(body: dict) -> dict:
             "temperature": number("temperature", DEFAULT_TEMPERATURE, 0.0, 2.0),
             "top_p": number("top_p", 1.0, 0.0001, 1.0), "seed": number("seed", None, 0, 2 ** 63 - 1, int),
             "stream": bool(body.get("stream", False)),
-            "template_kwargs": body.get("chat_template_kwargs") if isinstance(body.get("chat_template_kwargs"), dict) else {}}
+            # Qwen3 opens every answer with a <think> block. On a network that runs at a few tokens a second a chat
+            # wants the answer, so thinking is off unless the request turns it on (chat_template_kwargs).
+            "template_kwargs": {"enable_thinking": False,
+                                **(body.get("chat_template_kwargs") if isinstance(body.get("chat_template_kwargs"), dict) else {})}}
 
 
 # --- backends -------------------------------------------------------------------------------------
