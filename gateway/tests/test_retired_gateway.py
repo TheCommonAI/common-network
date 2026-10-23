@@ -41,5 +41,12 @@ class Retired(unittest.TestCase):
                 self.assertIn("common join", r.json()["error"])
 
 
+class PreDeploy(unittest.TestCase):
+    def test_the_railway_predeploy_command_succeeds(self):
+        import subprocess
+        out = subprocess.run([sys.executable, "-m", "app.migrate"], cwd=ROOT / "gateway", capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
