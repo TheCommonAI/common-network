@@ -1703,6 +1703,38 @@ def run_group_member(token: str, relay_url: str | None = None) -> None:
         signal.signal(signal.SIGTERM, previous)
 
 
+def run_network_member(network: str | None, node_args: list[str] | None = None) -> None:
+    """Join the decentralised layer network: set up a runtime, then serve a slice of the shared model.
+
+    layers.py (beside this file) does the work; a copy of join.py that predates it fetches it
+    here, so this path never changes how a plain `join.py` behaves.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        layers = importlib.import_module("layers")
+    except ImportError:
+        try:
+            with urllib.request.urlopen(SIBLING_UPDATE_URL.format("layers.py"), timeout=10) as resp:
+                body = resp.read()
+            with open(os.path.join(here, "layers.py"), "wb") as f:
+                f.write(body)
+            importlib.invalidate_caches()
+            layers = importlib.import_module("layers")
+        except (OSError, ImportError):
+            die_with_fix("layers.py is missing.",
+                         f"join.py needs layers.py beside it to join the layer network. Fetch it from\n"
+                         f"  https://github.com/{REPO}/tree/main/join")
+    try:
+        code = layers.run(network or None, node_args or [])
+    except layers.LayersError as e:
+        die(str(e))
+    except KeyboardInterrupt:
+        code = 0
+    sys.exit(code)
+
+
 def main() -> None:
     _force_utf8_output()
     sys.stdout.reconfigure(line_buffering=True)
@@ -1715,6 +1747,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=None, help="With --local-only: the loopback port for the model API (default 11436)")
     parser.add_argument("--group-token", default=None, help="Join a distributed model group with a one-time token from its coordinator, and run this machine's RPC worker; no gateway registration")
     parser.add_argument("--relay", default=None, help="With --group-token, on a machine already enrolled in that group: the relay's current tunnel URL, as the coordinator printed it after a restart. The machine rejoins there with its member key; no new token is needed")
+    parser.add_argument("--network", nargs="?", const="", default=None, metavar="URL|FILE", help="Join the decentralised layer network: serve a slice of the shared model as a peer. Optionally a seed peer's URL or a manifest file (default: COMMONNET_NETWORK or the built-in seeds). No gateway registration")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
     # The name and operator are published to the whole network (`GET /nodes`
@@ -1747,6 +1780,10 @@ def main() -> None:
         parser.error("--group-token cannot be combined with --local-only, --distributed-config, --model, --lan, --port, service installation/removal, or --list-catalogue")
     if args.relay is not None and args.group_token is None:
         parser.error("--relay is only used with --group-token")
+    if args.network is not None and (args.group_token is not None or args.distributed_config or args.model
+                                     or args.local_only or args.lan or args.list_catalogue
+                                     or args.port is not None or args.permanent or args.remove_permanent):
+        parser.error("--network cannot be combined with --group-token, --distributed-config, --model, --local-only, --lan, --port, --list-catalogue, or service installation/removal")
     if args.local_only:
         if (not args.distributed_config or args.model or args.lan or args.permanent
                 or args.remove_permanent or args.list_catalogue):
@@ -1774,6 +1811,10 @@ def main() -> None:
 
     if args.group_token is not None:
         run_group_member(args.group_token, relay_url=args.relay)
+        return
+
+    if args.network is not None:
+        run_network_member(args.network or None)
         return
 
     gateway = args.gateway.rstrip("/")
