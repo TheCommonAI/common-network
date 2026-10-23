@@ -136,7 +136,7 @@ UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
 
 # Everything join.py drives that lives beside it, and has to be refreshed when
 # join.py refreshes itself. See refresh_siblings().
-SIBLING_MODULES = ("worker.py", "runtime.py", "group.py")
+SIBLING_MODULES = ("worker.py", "runtime.py")
 SIBLING_UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/{{}}"
 
 # The schemes a `--model` value may name explicitly. Anything else is read as a
@@ -686,7 +686,7 @@ def sleep_idle_seconds(mod) -> int:
         return mod.DEFAULT_SLEEP_IDLE_SECONDS
 
 
-def start_llama_server(gguf: Path, wire_name: str, distributed=None, port: int = LLAMA_PORT) -> subprocess.Popen:
+def start_llama_server(gguf: Path, wire_name: str, port: int = LLAMA_PORT) -> subprocess.Popen:
     """Start llama-server on `gguf`, and block until it is actually serving.
 
     Returns the process, which the main loop watches and cleanup() stops.
@@ -705,9 +705,7 @@ def start_llama_server(gguf: Path, wire_name: str, distributed=None, port: int =
     """
     mod = _require_runtime()
     try:
-        if distributed:
-            distributed.preflight()
-        binary = distributed.binary if distributed else mod.ensure_llama_server()
+        binary = mod.ensure_llama_server()
     except mod.FetchFailed as e:
         die_with_fix(f"could not set up the model runtime: {e}",
                      f"Nothing was changed on this machine. Run this again to retry,\n"
@@ -717,8 +715,6 @@ def start_llama_server(gguf: Path, wire_name: str, distributed=None, port: int =
 
     argv = mod.llama_server_argv(binary, gguf, port, alias=wire_name,
                                  sleep_idle_seconds=sleep_idle)
-    if distributed:
-        argv = distributed.argv(port, sleep_idle_seconds=sleep_idle)
     print(f"{GLYPH_ROUTE} {dim('starting the model runtime...')}")
     log_path = Path.home() / ".common-network" / "runtime.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1180,8 +1176,8 @@ def tunnel_is_healthy(tunnel_url: str, worker_token: str | None, path: str = "/v
     Needs the token now: the worker 401s an unauthenticated /v1/models, and a
     401 travelling back through the tunnel would prove the tunnel is fine
     while reading as a failure -- so send the credential and treat only a
-    transport error as unhealthy. `path` lets the group relay (group.py) use
-    the same check against its own route; it has no token, so pass None.
+    transport error as unhealthy. `path` lets the layer-network block tunnel
+    (commonnet.net.tunnel) use the same check against its own route; it has no token, so pass None.
     """
     headers = {"Authorization": f"Bearer {worker_token}"} if worker_token else {}
     try:
@@ -1380,8 +1376,8 @@ def start_tunnel(target_url: str = WORKER_URL,
                  host_header: str = f"127.0.0.1:{WORKER_PORT}") -> tuple[subprocess.Popen, str]:
     # By default this points at the worker, never at the model backend: the worker
     # is what requires the gateway's token and refuses everything but the two
-    # inference routes. The group relay (group.py) passes its own loopback
-    # address instead, and reuses this tunnel and its health check unchanged.
+    # inference routes. The layer-network block tunnel (commonnet.net.tunnel)
+    # passes its own loopback address instead, and reuses this tunnel and its health check unchanged.
     #
     # Cloudflare's quick tunnel forwards the public tunnel hostname as the Host
     # header by default, and this pins it to 127.0.0.1 instead. That used to be
@@ -1445,7 +1441,7 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
     argv = [
         sys.executable, os.path.abspath(__file__),
         "--gateway", args.gateway,
-        *([] if getattr(args, "distributed_config", None) else ["--model", args.model]),
+        "--model", args.model,
         "--name", args.name,
         "--operator", args.operator,
         "--cost", str(args.cost),
@@ -1461,8 +1457,6 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
     # network blocks -- and silently drops out of the lab.
     if args.lan:
         argv += ["--lan"]
-    if getattr(args, "distributed_config", None):
-        argv += ["--distributed-config", str(Path(args.distributed_config).expanduser().resolve())]
     return argv
 
 
@@ -1601,108 +1595,6 @@ def remove_permanent() -> None:
         die(f"--permanent isn't supported on {system}")
 
 
-# Backoff between restarts of the local coordinator's runtime, and how long a
-# runtime must stay up before its restart budget is restored.
-LOCAL_RESTART_DELAYS_SECONDS = (5, 15, 30, 60, 120)
-LOCAL_RESTART_RESET_SECONDS = 600
-
-
-def run_local_coordinator(config_path: str, port: int = LLAMA_PORT) -> None:
-    """Run only the loopback model API, without gateway or identity side effects.
-
-    Deliberately bypass the Common worker: it binds on all interfaces and runs
-    background warm-up inference. Local benchmarks should only run explicit
-    requests and must never publish a node or replace its contribution identity.
-    """
-    mod = _require_runtime()
-    try:
-        distributed = mod.DistributedConfig(config_path)
-    except mod.FetchFailed as e:
-        die(str(e))
-    proc = None
-    previous_handlers = {}
-    restarts = 0
-
-    def interrupted(signum, frame):
-        raise KeyboardInterrupt
-
-    try:
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            previous_handlers[signum] = signal.signal(signum, interrupted)
-        # A dropped RPC worker takes the runtime down with it. Restart it with
-        # backoff so the coordinator recovers once the worker is back, and give
-        # up only after the restarts stop helping: a runtime that stays up for
-        # LOCAL_RESTART_RESET_SECONDS earns its restart budget back.
-        while True:
-            started = time.monotonic()
-            proc = start_llama_server(distributed.target, distributed.name, distributed=distributed, port=port)
-            if wait_for_llama(proc, distributed.target, port=port):
-                print(f"{GLYPH_DONE} local coordinator ready at http://127.0.0.1:{port}/v1")
-                print(comment("no gateway registration, tunnel, identity changes, or background inference"))
-                print(comment("ctrl+c stops this coordinator; existing RPC workers stay running"))
-                code = proc.wait()
-                reason = f"the local model runtime exited with code {code}"
-            else:
-                code = proc.poll()
-                reason = "the local coordinator never became ready"
-                stop_process(proc)
-            down = mod.unreachable_rpc_servers(distributed.peers)
-            if down:
-                reason = f"{reason}; RPC worker not accepting connections at {', '.join(down)}"
-            if time.monotonic() - started >= LOCAL_RESTART_RESET_SECONDS:
-                restarts = 0
-            if restarts >= len(LOCAL_RESTART_DELAYS_SECONDS):
-                die(f"{reason}; giving up after {restarts} restarts. See ~/.common-network/runtime.log")
-            delay = LOCAL_RESTART_DELAYS_SECONDS[restarts]
-            restarts += 1
-            print(f"{GLYPH_FORMING} {red(reason)}; restart {restarts} of {len(LOCAL_RESTART_DELAYS_SECONDS)} in {delay}s")
-            time.sleep(delay)
-    except KeyboardInterrupt:
-        print(f"\n{GLYPH_WORK} {dim('stopping the local coordinator...')}")
-    finally:
-        stop_process(proc)
-        for signum, handler in previous_handlers.items():
-            signal.signal(signum, handler)
-
-
-def run_group_member(token: str, relay_url: str | None = None) -> None:
-    """Enrol this machine in a distributed group and run its RPC worker, in the foreground.
-
-    Nothing listens on this machine and nothing is registered with a gateway: the
-    worker dials out to the coordinator over TLS, and its ggml-rpc-server stays on
-    127.0.0.1. Ctrl+C stops the worker and the RPC server together.
-
-    `relay_url` is for a machine already enrolled in the group, whose relay has
-    restarted on a new tunnel URL: it rejoins there with its member key.
-    """
-    try:
-        group = importlib.import_module("group")
-    except ImportError:
-        die_with_fix("the group module is missing.",
-                     f"join.py needs group.py beside it. Run the installer again, or fetch it from\n"
-                     f"  https://github.com/{REPO}/tree/main/join")
-    rt = _require_runtime()
-
-    def interrupted(signum, frame):
-        raise KeyboardInterrupt
-
-    # SIGTERM (a service manager's stop) must unwind like Ctrl+C, so that the
-    # worker's ggml-rpc-server is stopped with it rather than left running.
-    previous = signal.signal(signal.SIGTERM, interrupted)
-    try:
-        rpc_binary = rt.ensure_rpc_server()
-        group.join_group(token, rpc_binary=rpc_binary, log=lambda text: print(f"{GLYPH_WORK} {text}"),
-                         relay_url=relay_url)
-    except KeyboardInterrupt:
-        print(f"\n{GLYPH_WORK} {dim('stopping the group worker...')}")
-    except (group.GroupError, rt.FetchFailed) as e:
-        die(str(e))
-    except OSError as e:  # ssl.SSLError is an OSError
-        die(f"could not reach the coordinator ({e})")
-    finally:
-        signal.signal(signal.SIGTERM, previous)
-
-
 def run_network_member(network: str | None, node_args: list[str] | None = None) -> None:
     """Join the decentralised layer network: set up a runtime, then serve a slice of the shared model.
 
@@ -1742,11 +1634,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--gateway", default=os.environ.get("COMMON_GATEWAY_URL", DEFAULT_GATEWAY), help="Gateway base URL (default: the shared Common Network gateway)")
     parser.add_argument("--model", default=None, help="Catalogue id (e.g. qwen2.5-coder-14b) or a raw model tag (e.g. mathstral:7b). Default: probe hardware and ask the network what it needs most (see --auto, --list-catalogue)")
-    parser.add_argument("--distributed-config", help="v0.2 distributed model group JSON; bypasses specialist model assignment")
-    parser.add_argument("--local-only", action="store_true", help="Run only the distributed model API on loopback; no gateway, worker, warm-up, tunnel, or identity changes")
-    parser.add_argument("--port", type=int, default=None, help="With --local-only: the loopback port for the model API (default 11436)")
-    parser.add_argument("--group-token", default=None, help="Join a distributed model group with a one-time token from its coordinator, and run this machine's RPC worker; no gateway registration")
-    parser.add_argument("--relay", default=None, help="With --group-token, on a machine already enrolled in that group: the relay's current tunnel URL, as the coordinator printed it after a restart. The machine rejoins there with its member key; no new token is needed")
+    # The v0.2 RPC-group prototype was removed; the layer network (--network) replaced it. These stay
+    # parseable, hidden, only so that a script or service that still passes one gets a clear message.
+    for removed_flag in ("--distributed-config", "--group-token", "--relay"):
+        parser.add_argument(removed_flag, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--local-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--network", nargs="?", const="", default=None, metavar="URL|FILE", help="Join the decentralised layer network: serve a slice of the shared model as a peer. Optionally a seed peer's URL or a manifest file (default: COMMONNET_NETWORK or the built-in seeds). No gateway registration")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
@@ -1763,33 +1656,23 @@ def main() -> None:
     parser.add_argument("--cost", type=float, default=0, help="Declared cost per 1k tokens (default: 0, it's free)")
     parser.add_argument("--capability", default=None, help="Override the auto-generated capability description")
     parser.add_argument("--no-update", action="store_true", default=bool(os.environ.get("COMMON_NO_UPDATE")), help="Skip the self-update check (useful when hacking on this script locally)")
-    parser.add_argument("--lan", action="store_true", help="Use a LAN worker address instead of a Cloudflare tunnel; still registers with --gateway (production by default). For isolated tests use --local-only")
+    parser.add_argument("--lan", action="store_true", help="Use a LAN worker address instead of a Cloudflare tunnel; still registers with --gateway (production by default).")
     parser.add_argument("--permanent", action="store_true", help="Install as a background service that starts at login/boot and restarts if it crashes, then exit")
     parser.add_argument("--remove-permanent", action="store_true", help="Remove the background service installed by --permanent, then exit")
     args = parser.parse_args()
 
     # Before updates, catalogue lookup, identity reads, tunnel creation or any
     # registration path. A local test must not contact the public gateway.
-    if args.port is not None and not (1 <= args.port <= 65535):
-        parser.error("--port must be between 1 and 65535")
-    if args.port is not None and not args.local_only:
-        parser.error("--port is only used with --local-only")
-    if args.group_token is not None and (args.local_only or args.distributed_config or args.model
-                                         or args.lan or args.permanent or args.remove_permanent
-                                         or args.list_catalogue or args.port is not None):
-        parser.error("--group-token cannot be combined with --local-only, --distributed-config, --model, --lan, --port, service installation/removal, or --list-catalogue")
-    if args.relay is not None and args.group_token is None:
-        parser.error("--relay is only used with --group-token")
-    if args.network is not None and (args.group_token is not None or args.distributed_config or args.model
-                                     or args.local_only or args.lan or args.list_catalogue
-                                     or args.port is not None or args.permanent or args.remove_permanent):
-        parser.error("--network cannot be combined with --group-token, --distributed-config, --model, --local-only, --lan, --port, --list-catalogue, or service installation/removal")
-    if args.local_only:
-        if (not args.distributed_config or args.model or args.lan or args.permanent
-                or args.remove_permanent or args.list_catalogue):
-            parser.error("--local-only requires --distributed-config and cannot be combined with --model, --lan, service installation/removal, or --list-catalogue")
-        run_local_coordinator(args.distributed_config, args.port or LLAMA_PORT)
-        return
+    removed = [flag for flag, given in (
+        ("--distributed-config", args.distributed_config is not None), ("--local-only", args.local_only),
+        ("--group-token", args.group_token is not None), ("--relay", args.relay is not None),
+        ("--port", args.port is not None)) if given]
+    if removed:
+        parser.exit(2, f"removed: {', '.join(removed)} belonged to the v0.2 RPC-group prototype, which the "
+                       "layer network replaced. Use `common join --network` (see docs/layer-network.md).\n")
+    if args.network is not None and (args.model or args.lan or args.list_catalogue
+                                     or args.permanent or args.remove_permanent):
+        parser.error("--network cannot be combined with --model, --lan, --list-catalogue, or service installation/removal")
 
     if not args.no_update:
         # A node can be left running a join.py that expects a newer worker.py than
@@ -1807,10 +1690,6 @@ def main() -> None:
 
     if args.remove_permanent:
         remove_permanent()
-        return
-
-    if args.group_token is not None:
-        run_group_member(args.group_token, relay_url=args.relay)
         return
 
     if args.network is not None:
@@ -1834,18 +1713,7 @@ def main() -> None:
         print_catalogue(gateway, hw)
         return
 
-    distributed = None
-    if args.distributed_config:
-        if args.model:
-            parser.error("--model and --distributed-config are mutually exclusive")
-        try:
-            distributed = _require_runtime().DistributedConfig(args.distributed_config)
-        except _require_runtime().FetchFailed as e:
-            parser.error(str(e))
-        model_source, domain_tags, catalogue_id = None, ["general"], None
-        capability_text_default = f"General-purpose language model {distributed.name}, served across a distributed model group."
-    else:
-        model_source, domain_tags, catalogue_id, capability_text_default = resolve_model(gateway, args)
+    model_source, domain_tags, catalogue_id, capability_text_default = resolve_model(gateway, args)
     # Bake the resolution into args.model so --permanent's saved service
     # invocation re-resolves the same way on every restart -- the catalogue
     # id round-trips back through resolve_model()'s lookup branch, and a source
@@ -1859,8 +1727,8 @@ def main() -> None:
     # LAN mode skips cloudflared entirely, so don't demand it be installed.
     check_binaries(need_tunnel=not args.lan)
 
-    spec = resolve_source(model_source) if not distributed else None
-    if spec is None and not distributed:
+    spec = resolve_source(model_source)
+    if spec is None:
         die(f"can't run '{model_source}' locally (unrecognised source).")
 
     # The single string that is both this node's public model name and the id the
@@ -1868,11 +1736,10 @@ def main() -> None:
     # against the `model_name` registered below, so these two uses must stay the
     # same string -- for an `ollama:` source it is the tag with the scheme
     # stripped, which is exactly what every existing node already registers.
-    wire_name = distributed.name if distributed else spec.wire_name
+    wire_name = spec.wire_name
 
-    gguf = distributed.target if distributed else fetch_model(spec)
-    llama_proc = (start_llama_server(gguf, wire_name, distributed=distributed)
-                  if distributed else start_llama_server(gguf, wire_name))
+    gguf = fetch_model(spec)
+    llama_proc = start_llama_server(gguf, wire_name)
     if not wait_for_llama(llama_proc, gguf):
         stop_process(llama_proc)
         die_with_fix("the model runtime never started serving.",

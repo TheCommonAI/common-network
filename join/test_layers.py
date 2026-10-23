@@ -205,14 +205,11 @@ class JoinFlag(unittest.TestCase):
         return subprocess.run([sys.executable, str(JOIN_PY), "--no-update", *args], capture_output=True, text=True, timeout=60)
 
     def test_network_flag_is_refused_with_incompatible_options(self):
-        for other in (["--group-token", "cng1.x.y"], ["--distributed-config", "c.json"], ["--model", "m"],
-                      ["--local-only"], ["--lan"], ["--list-catalogue"], ["--permanent"], ["--remove-permanent"],
-                      ["--port", "5"]):
+        for other in (["--model", "m"], ["--lan"], ["--list-catalogue"], ["--permanent"], ["--remove-permanent"]):
             with self.subTest(other=other):
                 out = self._run("--network", *other)
                 self.assertEqual(out.returncode, 2)
-                if other != ["--port", "5"]:  # --port without --local-only is refused by an older check first
-                    self.assertIn("--network cannot be combined", out.stderr)
+                self.assertIn("--network cannot be combined", out.stderr)
 
     def test_help_lists_the_option(self):
         self.assertIn("--network", self._run("--help").stdout)
