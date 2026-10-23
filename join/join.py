@@ -1438,8 +1438,15 @@ SCHTASKS_NAME = "CommonNetworkJoin"
 
 
 def _service_argv(args: argparse.Namespace) -> list[str]:
+    if getattr(args, "network", None) is not None:
+        # A layer-network service: the spec goes last, as --network=SPEC, so it can never swallow another flag.
+        argv = [sys.executable, os.path.abspath(__file__)]
+        if args.no_update:
+            argv += ["--no-update"]
+        return argv + ([f"--network={args.network}"] if args.network else ["--network"])
     argv = [
         sys.executable, os.path.abspath(__file__),
+        "--legacy",  # recorded, so a service never changes mode when the default does
         "--gateway", args.gateway,
         "--model", args.model,
         "--name", args.name,
@@ -1595,29 +1602,82 @@ def remove_permanent() -> None:
         die(f"--permanent isn't supported on {system}")
 
 
+def _load_layers():
+    """The layers module beside join.py (fetched once if this copy predates it), or None."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        return importlib.import_module("layers")
+    except ImportError:
+        pass
+    try:
+        with urllib.request.urlopen(SIBLING_UPDATE_URL.format("layers.py"), timeout=10) as resp:
+            body = resp.read()
+        with open(os.path.join(here, "layers.py"), "wb") as f:
+            f.write(body)
+        importlib.invalidate_caches()
+        return importlib.import_module("layers")
+    except (OSError, ImportError):
+        return None
+
+
+def layer_network_supported() -> bool:
+    """Can this machine serve the layer network (Apple silicon or an NVIDIA GPU), with layers.py available?"""
+    layers = _load_layers()
+    if layers is None:
+        return False
+    try:
+        layers.platform_kind()
+    except Exception:
+        return False
+    return True
+
+
+def choose_mode(args: argparse.Namespace, supported=None) -> str:
+    """'network' or 'legacy' for this invocation.
+
+    The layer network is the default for a plain `join`. The whole-model gateway node is kept as
+    `--legacy`, and anything that only means something to it (--model, --lan, --list-catalogue)
+    implies it, so existing scripts and installed services (which always carry --model) do not change.
+    A machine the layer network cannot use (no Apple silicon / NVIDIA) stays on the legacy path.
+    """
+    if args.network is not None:
+        return "network"
+    if args.legacy or args.model or args.lan or args.list_catalogue or args.remove_permanent:
+        return "legacy"
+    return "network" if (supported or layer_network_supported)() else "legacy"
+
+
+LAYER_FIRST_NOTICE = ("`common join` now joins the decentralised layer network. "
+                      "To run this machine as a whole-model gateway node like before, use `common join --legacy`.")
+
+
+def announce_layer_first(marker: Path | None = None, printer=print) -> bool:
+    """Say, once per machine, that the default changed. Returns True if it was printed."""
+    marker = marker or (Path.home() / ".common-network" / "layer-first-notice")
+    if marker.exists():
+        return False
+    printer(f"{GLYPH_WORK} {LAYER_FIRST_NOTICE}")
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("shown\n")
+    except OSError:
+        pass  # saying it again next time is harmless
+    return True
+
+
 def run_network_member(network: str | None, node_args: list[str] | None = None) -> None:
     """Join the decentralised layer network: set up a runtime, then serve a slice of the shared model.
 
     layers.py (beside this file) does the work; a copy of join.py that predates it fetches it
     here, so this path never changes how a plain `join.py` behaves.
     """
-    here = os.path.dirname(os.path.abspath(__file__))
-    if here not in sys.path:
-        sys.path.insert(0, here)
-    try:
-        layers = importlib.import_module("layers")
-    except ImportError:
-        try:
-            with urllib.request.urlopen(SIBLING_UPDATE_URL.format("layers.py"), timeout=10) as resp:
-                body = resp.read()
-            with open(os.path.join(here, "layers.py"), "wb") as f:
-                f.write(body)
-            importlib.invalidate_caches()
-            layers = importlib.import_module("layers")
-        except (OSError, ImportError):
-            die_with_fix("layers.py is missing.",
-                         f"join.py needs layers.py beside it to join the layer network. Fetch it from\n"
-                         f"  https://github.com/{REPO}/tree/main/join")
+    layers = _load_layers()
+    if layers is None:
+        die_with_fix("layers.py is missing.",
+                     f"join.py needs layers.py beside it to join the layer network. Fetch it from\n"
+                     f"  https://github.com/{REPO}/tree/main/join")
     try:
         code = layers.run(network or None, node_args or [])
     except layers.LayersError as e:
@@ -1641,6 +1701,7 @@ def main() -> None:
     parser.add_argument("--local-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--network", nargs="?", const="", default=None, metavar="URL|FILE", help="Join the decentralised layer network: serve a slice of the shared model as a peer. Optionally a seed peer's URL or a manifest file (default: COMMONNET_NETWORK or the built-in seeds). No gateway registration")
+    parser.add_argument("--legacy", action="store_true", help="Run as a whole-model gateway node (the original network) instead of the default layer network")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
     # The name and operator are published to the whole network (`GET /nodes`
@@ -1670,9 +1731,15 @@ def main() -> None:
     if removed:
         parser.exit(2, f"removed: {', '.join(removed)} belonged to the v0.2 RPC-group prototype, which the "
                        "layer network replaced. Use `common join --network` (see docs/layer-network.md).\n")
-    if args.network is not None and (args.model or args.lan or args.list_catalogue
-                                     or args.permanent or args.remove_permanent):
-        parser.error("--network cannot be combined with --model, --lan, --list-catalogue, or service installation/removal")
+    if args.network is not None and (args.model or args.lan or args.list_catalogue or args.legacy
+                                     or args.remove_permanent):
+        parser.error("--network cannot be combined with --model, --lan, --list-catalogue, --legacy, or --remove-permanent")
+    explicit_legacy = bool(args.legacy or args.model or args.lan or args.list_catalogue or args.remove_permanent)
+    mode = choose_mode(args)
+    defaulted = mode == "network" and args.network is None
+    fell_back = mode == "legacy" and not explicit_legacy  # plain join on a machine the layer network cannot use
+    if defaulted:
+        args.network = ""  # the default: the built-in network
 
     if not args.no_update:
         # A node can be left running a join.py that expects a newer worker.py than
@@ -1693,8 +1760,15 @@ def main() -> None:
         return
 
     if args.network is not None:
+        if defaulted:
+            announce_layer_first()
+        if args.permanent:
+            install_permanent(args)
+            return
         run_network_member(args.network or None)
         return
+    if fell_back:
+        print(f"{GLYPH_WORK} {dim('this machine cannot serve the layer network (it needs Apple silicon or an NVIDIA GPU); running as a whole-model node.')}")
 
     gateway = args.gateway.rstrip("/")
 

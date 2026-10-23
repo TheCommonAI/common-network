@@ -48,11 +48,11 @@ class RemovedFlags(unittest.TestCase):
 
 
 class ServiceCommandLine(unittest.TestCase):
-    def test_a_permanent_service_command_line_is_unchanged_for_a_plain_node(self):
+    def test_a_permanent_service_command_line_is_the_same_plus_the_recorded_mode(self):
         args = argparse.Namespace(gateway="https://g.example", model="qwen-x", name="n1", operator="o", cost=0.0,
                                   region=None, capability=None, no_update=False, lan=False)
         argv = join._service_argv(args)
-        self.assertEqual(argv[2:], ["--gateway", "https://g.example", "--model", "qwen-x", "--name", "n1",
+        self.assertEqual(argv[2:], ["--legacy", "--gateway", "https://g.example", "--model", "qwen-x", "--name", "n1",
                                     "--operator", "o", "--cost", "0.0"])
         args.lan, args.region = True, "au"
         self.assertEqual(join._service_argv(args)[-3:], ["--region", "au", "--lan"])

@@ -205,7 +205,7 @@ class JoinFlag(unittest.TestCase):
         return subprocess.run([sys.executable, str(JOIN_PY), "--no-update", *args], capture_output=True, text=True, timeout=60)
 
     def test_network_flag_is_refused_with_incompatible_options(self):
-        for other in (["--model", "m"], ["--lan"], ["--list-catalogue"], ["--permanent"], ["--remove-permanent"]):
+        for other in (["--model", "m"], ["--lan"], ["--list-catalogue"], ["--legacy"], ["--remove-permanent"]):
             with self.subTest(other=other):
                 out = self._run("--network", *other)
                 self.assertEqual(out.returncode, 2)
@@ -219,8 +219,8 @@ class JoinFlag(unittest.TestCase):
         self.assertIn("if args.network is not None:", source)
         top_level = [l for l in source.splitlines() if l.startswith(("import layers", "from layers"))]
         self.assertEqual(top_level, [])  # layers is imported lazily, inside run_network_member only
-        body = source[source.index("def run_network_member"):source.index("def main()")]
-        self.assertEqual(source.count("import_module(\"layers\")"), body.count("import_module(\"layers\")"))
+        body = source[source.index("def _load_layers"):source.index("def layer_network_supported")]
+        self.assertEqual(source.count("import_module(\"layers\")"), body.count("import_module(\"layers\")"))  # only the loader imports it
 
 
 class BackendImportCheck(unittest.TestCase):

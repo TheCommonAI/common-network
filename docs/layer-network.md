@@ -5,15 +5,19 @@ Each peer holds a few layers; only the small activations travel between peers (a
 There is no central server: peers find each other by gossip, build their own routes, and replace a peer
 that drops out in the middle of a generation.
 
-This is separate from the original `common join` network (one whole model per node, routed by the gateway),
-which is unchanged. Layer-network commands all take `--network`.
+`common join` joins this network by default. The original whole-model gateway node is still there as
+`common join --legacy` (and anything that only makes sense for it, such as `--model` or `--lan`, implies
+it), and a machine that cannot serve layers (no Apple silicon or NVIDIA GPU) keeps running as a
+whole-model node. A background service keeps the mode it was installed with.
 
 ## Join (any machine with a supported GPU)
 
 ```bash
-common join --network            # the built-in network
+common join                      # the built-in network (same as --network)
 common join --network URL        # a network a friend runs: any peer's URL
 common join --network manifest.json
+common join --permanent          # keep serving after reboots (records the mode)
+common join --legacy             # the original whole-model gateway node instead
 ```
 
 The first run sets itself up: it makes a private Python environment, installs the model runtime, fetches
