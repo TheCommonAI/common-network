@@ -217,6 +217,24 @@ class JoinFlag(unittest.TestCase):
     def test_help_lists_the_option(self):
         self.assertIn("--network", self._run("--help").stdout)
 
+    def test_api_is_only_valid_with_network(self):
+        out = self._run("--api")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("--api is only used with --network", out.stderr)
+        out = self._run("--api", "12345", "--model", "m")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("--api is only used with --network", out.stderr)
+        self.assertIn("--api", self._run("--help").stdout)
+
+    def test_api_is_passed_to_the_node(self):
+        for argv, expected in ((["--network"], []), (["--network", "--api"], ["--api", "11440"]),
+                               (["--network", "https://seed", "--api", "12345"], ["--api", "12345"])):
+            with self.subTest(argv=argv):
+                with mock.patch.object(join, "run_network_member") as run, \
+                        mock.patch.object(sys, "argv", ["join.py", "--no-update", *argv]):
+                    join.main()
+                run.assert_called_once_with(argv[1] if len(argv) > 1 and argv[1].startswith("http") else None, expected)
+
     def test_without_the_flag_layers_is_never_imported(self):
         source = JOIN_PY.read_text()
         self.assertIn("if args.network is not None:", source)

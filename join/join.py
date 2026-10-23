@@ -1748,6 +1748,7 @@ def main() -> None:
     parser.add_argument("--group-token", default=None, help="Join a distributed model group with a one-time token from its coordinator, and run this machine's RPC worker; no gateway registration")
     parser.add_argument("--relay", default=None, help="With --group-token, on a machine already enrolled in that group: the relay's current tunnel URL, as the coordinator printed it after a restart. The machine rejoins there with its member key; no new token is needed")
     parser.add_argument("--network", nargs="?", const="", default=None, metavar="URL|FILE", help="Join the decentralised layer network: serve a slice of the shared model as a peer. Optionally a seed peer's URL or a manifest file (default: COMMONNET_NETWORK or the built-in seeds). No gateway registration")
+    parser.add_argument("--api", nargs="?", const=11440, default=None, type=int, metavar="PORT", help="With --network: also serve an OpenAI-compatible chat API on 127.0.0.1:PORT (default 11440) from the same process, so a desktop app or any OpenAI-style client can chat with the network. The client part of the model (about 1 GB for Qwen3-8B) loads in the background")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
     # The name and operator are published to the whole network (`GET /nodes`
@@ -1780,6 +1781,8 @@ def main() -> None:
         parser.error("--group-token cannot be combined with --local-only, --distributed-config, --model, --lan, --port, service installation/removal, or --list-catalogue")
     if args.relay is not None and args.group_token is None:
         parser.error("--relay is only used with --group-token")
+    if args.api is not None and args.network is None:
+        parser.error("--api is only used with --network")
     if args.network is not None and (args.group_token is not None or args.distributed_config or args.model
                                      or args.local_only or args.lan or args.list_catalogue
                                      or args.port is not None or args.permanent or args.remove_permanent):
@@ -1814,7 +1817,7 @@ def main() -> None:
         return
 
     if args.network is not None:
-        run_network_member(args.network or None)
+        run_network_member(args.network or None, [] if args.api is None else ["--api", str(args.api)])
         return
 
     gateway = args.gateway.rstrip("/")
