@@ -244,6 +244,7 @@ class Node:
         self.publish()
         self._push_to_peers()
         self.log(f"up at {self.url}")
+        self.log(f"you are part of the network. A friend can join through you with:  common join --network {self.url}")
         return self
 
     def stop(self) -> None:
@@ -315,6 +316,9 @@ class Node:
         if not repo:
             raise NodeError(f"the manifest has no {self.hw.backend} checkpoint for {self.manifest.model.get('name')}")
         fetch = self._fetch
+        local = os.environ.get("COMMONNET_LOCAL_CHECKPOINT")  # development/offline: use this directory, download nothing
+        if fetch is None and local:
+            fetch = lambda r, w: local  # noqa: E731
         if fetch is None:
             from commonnet import hub
             fetch = lambda r, w: hub.Hub(r).fetch(layers=tuple(w))  # noqa: E731

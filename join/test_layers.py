@@ -226,5 +226,22 @@ class JoinFlag(unittest.TestCase):
         self.assertEqual(source.count("import_module(\"layers\")"), body.count("import_module(\"layers\")"))
 
 
+class BackendImportCheck(unittest.TestCase):
+    def test_a_python_without_the_backend_modules_is_not_a_runtime(self):
+        seen = []
+
+        def fake_run(command, **kw):
+            seen.append(command[-1])
+            return type("R", (), {"returncode": 0})()
+
+        layers.can_import("python", None, fake_run, "mac-arm64")
+        layers.can_import("python", None, fake_run, "nvidia")
+        layers.can_import("python", None, fake_run)
+        self.assertIn("mlx.core, mlx_lm", seen[0])
+        self.assertIn("bitsandbytes", seen[1])
+        self.assertNotIn("mlx", seen[2])
+        self.assertNotIn("bitsandbytes", seen[2])
+
+
 if __name__ == "__main__":
     unittest.main()

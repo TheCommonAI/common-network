@@ -37,7 +37,9 @@ SOURCE_DIR = HOME_DIR / "commonnet-src"
 DEFAULT_REF = "main"
 TARBALL_URL = "https://github.com/" + REPO + "/archive/{ref}.tar.gz"
 DEFAULT_NETWORK_ENV = "COMMONNET_NETWORK"
-IMPORT_CHECK = "import commonnet, cryptography, torch"
+IMPORT_CHECK = "import commonnet, cryptography, torch, numpy, safetensors, transformers"
+# The backend's own modules too: a Python with torch but no mlx (or no bitsandbytes) cannot serve a block.
+BACKEND_IMPORTS = {"mac-arm64": "import mlx.core, mlx_lm", "nvidia": "import bitsandbytes"}
 
 # Pinned, so a join today and a join next month install the same thing. Versions are the ones
 # the tests ran with (see commonnet/tests).
@@ -97,13 +99,16 @@ def venv_python(venv: Path = RUNTIME_VENV) -> Path:
     return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
-def can_import(python, source: Path | None = None, run=subprocess.run) -> bool:
-    """Can `python` import commonnet and its dependencies (with `source` on the path, if given)?"""
+def can_import(python, source: Path | None = None, run=subprocess.run, kind: str | None = None) -> bool:
+    """Can `python` import commonnet and its dependencies (with `source` on the path, if given)?
+
+    With `kind`, the platform's backend modules must import as well."""
     env = dict(os.environ)
     if source is not None:
         env["PYTHONPATH"] = os.pathsep.join(p for p in (str(source), env.get("PYTHONPATH", "")) if p)
     try:
-        out = run([str(python), "-c", IMPORT_CHECK], capture_output=True, env=env, timeout=120)
+        check = IMPORT_CHECK + ("; " + BACKEND_IMPORTS[kind] if kind in BACKEND_IMPORTS else "")
+        out = run([str(python), "-c", check], capture_output=True, env=env, timeout=120)
     except (OSError, subprocess.SubprocessError):
         return False
     return out.returncode == 0
@@ -174,10 +179,10 @@ def ensure_runtime(kind: str, *, source: Path, current_python=None, venv: Path =
                    run=subprocess.run, dry_run: bool = False, log=print) -> str:
     """A Python that can run commonnet.node: this interpreter if it can, else the runtime venv (made if needed)."""
     current_python = current_python or sys.executable
-    if can_import(current_python, source, run):
+    if can_import(current_python, source, run, kind):
         return str(current_python)
     python = venv_python(venv)
-    if python.is_file() and can_import(python, source, run):
+    if python.is_file() and can_import(python, source, run, kind):
         return str(python)
     plain, torch_args = requirements(kind)
     steps = []
@@ -196,7 +201,7 @@ def ensure_runtime(kind: str, *, source: Path, current_python=None, venv: Path =
         if getattr(result, "returncode", 0) != 0:
             raise LayersError(f"{what} failed (exit {result.returncode}). Fix the error above and run the same "
                               "command again; it resumes where it stopped.")
-    if not dry_run and not can_import(python, source, run):
+    if not dry_run and not can_import(python, source, run, kind):
         raise LayersError("the runtime installed but commonnet still cannot be imported; "
                           f"try deleting {venv} and joining again")
     return str(python)
@@ -222,6 +227,7 @@ def run(network: str | None, extra: list[str] | None = None, *, dry_run: bool = 
         log("would run: " + " ".join(command))
         return 0
     env["PYTHONPATH"] = os.pathsep.join(p for p in (str(source), env.get("PYTHONPATH", "")) if p)
+    env["PYTHONUNBUFFERED"] = "1"  # progress must show as it happens, not when the node exits
     child = runner(command, env=env)
 
     def forward(signum, frame):
