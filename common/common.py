@@ -85,6 +85,7 @@ import random
 import re
 import secrets
 import shlex
+import signal
 import socket
 import statistics
 import subprocess
@@ -1309,7 +1310,453 @@ def cmd_reports(gateway: str, as_json: bool, rest: list[str], args) -> None:
         print()
 
 
+
+# --- The layer network ------------------------------------------------------
+#
+# `ask`, `status`, `peers`, `recommend`, `leave` used to talk to the gateway. The
+# layer network has no gateway: a machine running `common join --network --api`
+# writes a status file (commonnet/node.py) and serves an OpenAI-compatible chat
+# API on loopback, and the mesh of peers is public and signed. These verbs read
+# those. Nothing here contacts the gateway. COMMON_LEGACY_GATEWAY=1 (or --legacy)
+# keeps the old behaviour of every verb below for anyone who still needs it.
+
+LAYER_API_PORT = 11440
+LAYER_MESH_FRESH_SECONDS = 60       # a peer record older than this is not live
+LAYER_LEAVE_WAIT_SECONDS = 20
+LAYER_SEEDS_URL = f"https://raw.githubusercontent.com/{REPO}/main/commonnet/networks/seeds.json"
+_LEGACY_GATEWAY = [False]           # set from --legacy in main()
+
+
+def _use_gateway() -> bool:
+    return _LEGACY_GATEWAY[0] or os.environ.get("COMMON_LEGACY_GATEWAY", "").strip().lower() in ("1", "true", "yes")
+
+
+def _layer_status_path() -> Path:
+    override = os.environ.get("COMMONNET_STATUS_FILE")
+    return Path(override) if override else INSTALL_DIR / "net" / "status.json"
+
+
+def _pid_alive(pid) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _read_layer_status() -> tuple[dict | None, str]:
+    """(status, health). health: absent | stopped | crashed | the node's own state (up, downloading, ...)."""
+    try:
+        status = json.loads(_layer_status_path().read_text())
+    except (OSError, ValueError):
+        return None, "absent"
+    if not isinstance(status, dict) or not isinstance(status.get("state"), str):
+        return None, "absent"
+    if status["state"] == "stopped":
+        return status, "stopped"
+    if not _pid_alive(status.get("pid")):
+        return status, "crashed"  # the file says it was running and the process is gone
+    return status, status["state"]
+
+
+def _get_json(url: str, timeout: float = 4.0):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(urllib.request.Request(url, headers={"Accept": "application/json"}), timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _layer_seeds() -> list[str]:
+    env = os.environ.get("COMMON_LAYER_SEEDS")
+    if env:
+        return [s.strip().rstrip("/") for s in env.split(",") if s.strip()]
+    try:
+        data = _get_json(LAYER_SEEDS_URL, timeout=4)
+    except (OSError, ValueError):
+        return []
+    return [u.rstrip("/") for u in (data.get("seeds") or []) if isinstance(u, str) and u.startswith(("http://", "https://"))]
+
+
+def _stage_coverage(stages: list, peers: list) -> list[int]:
+    out = []
+    for a, b in stages:
+        out.append(sum(1 for p in peers if p.get("state") == "up" and p.get("window")
+                       and p["window"][0] <= a and b <= p["window"][1]))
+    return out
+
+
+def _mesh_snapshot() -> dict | None:
+    """The network as a seed peer sees it: public, signed records. None if no seed answers."""
+    now = time.time()
+    for seed in _layer_seeds():
+        try:
+            records = _get_json(seed + "/peers").get("records") or []
+            manifest = _get_json(seed + "/manifest")
+        except (OSError, ValueError, AttributeError):
+            continue
+        stages = [[a, b] for a, b in zip(manifest["boundaries"], manifest["boundaries"][1:])]
+        peers = [{"peer": r.get("peer", ""), "window": r.get("window"), "backend": r.get("backend"),
+                  "state": r.get("state") if now - float(r.get("ts", 0)) <= LAYER_MESH_FRESH_SECONDS else "stale",
+                  "age_s": round(max(now - float(r.get("ts", now)), 0.0), 1), "me": False}
+                 for r in records if isinstance(r, dict)]
+        return {"source": "mesh", "state": None, "network": manifest.get("id"),
+                "model": (manifest.get("model") or {}).get("name"), "peer": None, "window": None,
+                "url": seed, "api": None, "stages": stages, "coverage": _stage_coverage(stages, peers),
+                "peers": peers, "error": None}
+    return None
+
+
+def _layer_snapshot() -> tuple[dict | None, str]:
+    """(snapshot, health): this machine's own peer if one is running, else a seed's view of the network."""
+    status, health = _read_layer_status()
+    if status is not None and health not in ("stopped", "crashed"):
+        snap = dict(status)
+        snap["source"] = "node"
+        return snap, health
+    return _mesh_snapshot(), health
+
+
+def _layer_api_base(status: dict | None) -> str:
+    override = os.environ.get("COMMON_LAYER_API")
+    if override:
+        return override.rstrip("/")
+    port = ((status or {}).get("api") or {}).get("port") or LAYER_API_PORT
+    return f"http://127.0.0.1:{port}"
+
+
+def _say_no_local_peer(health: str, status: dict | None) -> None:
+    """One friendly explanation of why there is nothing to ask, with the one command that fixes it."""
+    if health in ("downloading", "starting", "loading", "moving"):
+        extra = ""
+        download = (status or {}).get("download") or {}
+        if health == "downloading" and download.get("total"):
+            extra = f" ({100 * download.get('bytes', 0) // download['total']}%)"
+        print(red(f"✗ your peer is still getting ready: {health}{extra}."), file=sys.stderr)
+        print(dim("  → try again in a moment, or watch it with:  common status"), file=sys.stderr)
+    elif health == "up":
+        print(red("✗ your peer is running without the chat API."), file=sys.stderr)
+        print(dim("  → restart it with:  common join --network --api"), file=sys.stderr)
+    elif health == "crashed":
+        print(red("✗ your peer stopped unexpectedly."), file=sys.stderr)
+        print(dim("  → start it again:  common join --network --api"), file=sys.stderr)
+    else:
+        print(red("✗ no peer is running on this machine."), file=sys.stderr)
+        print(dim("  → join the network and open the chat API:  common join --network --api"), file=sys.stderr)
+        print(dim("  → or ask the model on this machine:        common ask \"...\" --local"), file=sys.stderr)
+
+
+def _ask_layers(question: str, model: str | None, as_json: bool, quiet: bool, verbose: bool,
+                region: str | None = None, compose: str | None = None) -> None:
+    status, health = _read_layer_status()
+    base = _layer_api_base(status)
+    if (region or compose) and not quiet and not as_json:
+        print(comment("--region and --compose belong to the old gateway; the layer network ignores them."))
+
+    if model:
+        try:
+            names = [m.get("id") for m in _get_json(base + "/v1/models", timeout=5).get("data", [])]
+        except (OSError, ValueError):
+            _say_no_local_peer(health, status)
+            sys.exit(1)
+        if model not in names:
+            print(red(f"✗ this network serves {', '.join(n for n in names if n) or 'no model'}, not '{model}'."), file=sys.stderr)
+            print(comment("refusing rather than silently answering with a different model."), file=sys.stderr)
+            sys.exit(1)
+
+    body = {"model": model or "auto", "messages": [{"role": "user", "content": question}], "stream": True}
+    req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    start = time.monotonic()
+    try:
+        resp = opener.open(req, timeout=REQUEST_TIMEOUT_SECONDS)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="ignore")
+        try:
+            detail = json.loads(detail)["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            pass
+        print(red("✗ the network couldn't answer that."), file=sys.stderr)
+        print(comment(detail), file=sys.stderr)
+        if e.code == 503:
+            print(dim("  → more peers may be needed, or your peer is still loading; retry in a moment"), file=sys.stderr)
+        sys.exit(1)
+    except (urllib.error.URLError, OSError):
+        _say_no_local_peer(health, status)
+        sys.exit(1)
+
+    snap = status or {}
+    peer_id = snap.get("peer") or None
+    n_peers = sum(1 for p in snap.get("peers") or [] if p.get("state") == "up")
+    if not quiet and not as_json:
+        where = f"{n_peers} peer(s) online" if n_peers else "the layer network"
+        print(f"{GLYPH_ROUTE} answered by   {blue('the layer network')}   ·   {where}")
+        print(GLYPH_RECV + dim(" streaming"))
+        print()
+
+    full: list[str] = []
+    ttft_ms: int | None = None
+    stream_done = False
+    with resp:
+        for raw_line in resp:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if payload == "[DONE]":
+                stream_done = True
+                break
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if chunk.get("error"):
+                print(red("✗ the answer stream failed."), file=sys.stderr)
+                print(comment(str((chunk["error"] or {}).get("message") or chunk["error"])), file=sys.stderr)
+                sys.exit(1)
+            delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+            if delta:
+                if ttft_ms is None:
+                    ttft_ms = int((time.monotonic() - start) * 1000)
+                if as_json:
+                    print(json.dumps({"delta": delta}), flush=True)
+                else:
+                    print(paper(delta), end="", flush=True)
+                full.append(delta)
+    if not stream_done:
+        print(red("✗ the answer stream ended before it was complete."), file=sys.stderr)
+        print(comment("a peer may have dropped out mid-answer; retry the question."), file=sys.stderr)
+        sys.exit(1)
+    if not as_json:
+        print()
+    total_ms = int((time.monotonic() - start) * 1000)
+
+    answer = "".join(full)
+    answer_text, answer_truncated = _truncate_bytes(answer, ANSWER_MAX_BYTES)
+    _write_exchange_stash({
+        "local": False, "gateway": None, "network": "layers",
+        "question": question, "answer": answer_text, "answer_truncated": answer_truncated,
+        "request": {"region": region, "node": None, "model": model, "compose": compose},
+        "timings": {"routing_ms": None, "ttft_ms": ttft_ms, "total_ms": total_ms},
+        "routing": {"topology": "layers", "peer": peer_id, "peers_online": n_peers},
+    })
+
+    if as_json:
+        # The same keys the gateway path printed, so a consumer written against it keeps working. What the layer
+        # network has no meaning for (a routing score, a panel) is null.
+        print(json.dumps({
+            "answer": answer, "node": peer_id or "layer-network", "score": None,
+            "latency_ms": total_ms, "routing_ms": None, "ttft_ms": ttft_ms, "total_ms": total_ms,
+            "topology": "single", "network": "layers", "panel": None, "aggregator": None,
+            "compose_reason": None, "candidates": n_peers or None, "margin_over_runner_up": None,
+            "checks_run": None, "checks_failed": None, "disagreements": None,
+        }))
+        return
+    if not quiet:
+        print()
+        print(dim("─" * 63))
+        print(dim(f"served by   the layer network" + (f"   ·   via peer {peer_id[:8]}" if peer_id else "")))
+        parts = []
+        if ttft_ms is not None:
+            parts.append(f"first token {_fmt_ms(ttft_ms)}")
+        parts.append(f"total {_fmt_ms(total_ms)}")
+        print(dim("   ·   ".join(parts)))
+
+
 def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
+            local: bool, as_json: bool, quiet: bool, verbose: bool,
+            compose: str | None = None) -> None:
+    if local:
+        _ask_local(question, model, as_json, quiet)
+    elif _use_gateway():
+        _cmd_ask_gateway(gateway, question, region, model, local, as_json, quiet, verbose, compose=compose)
+    else:
+        _ask_layers(question, model, as_json, quiet, verbose, region=region, compose=compose)
+
+
+def _stage_bar(count: int, width: int = 10) -> str:
+    return "█" * min(count, width) + "░" * (width - min(count, width))
+
+
+def cmd_status(gateway: str, as_json: bool) -> None:
+    if _use_gateway():
+        _cmd_status_gateway(gateway, as_json)
+        return
+    snap, health = _layer_snapshot()
+    here = snap is not None and snap.get("source") == "node"
+    if as_json:
+        out = {"joined": here, "health": health}
+        if snap:
+            out.update({k: snap.get(k) for k in ("source", "state", "network", "model", "peer", "window", "url", "api",
+                                                 "stages", "coverage", "peers", "error")})
+        print(json.dumps(out))
+        return
+    if not here:
+        if health == "crashed":
+            print(red("your peer stopped unexpectedly."))
+            print(dim("  → start it again:  common join --network --api"))
+        else:
+            print(dim("this machine is not on the layer network."))
+            print(dim("  → common join --network --api"))
+        if snap:
+            print()
+            _print_coverage(snap)
+        return
+    window = snap.get("window")
+    print(f"peer  {paper((snap.get('peer') or '')[:8], bold=True)}   ·   {snap.get('state')}   ·   {snap.get('model') or 'model'}\n")
+    if window:
+        print(dim(f"layers          {window[0]}–{window[1]} ({snap.get('backend')}, {snap.get('gib')} GiB offered)"))
+    download = snap.get("download")
+    if download and download.get("total"):
+        print(dim(f"downloading     {100 * download.get('bytes', 0) // download['total']}%"))
+    if snap.get("url"):
+        print(dim(f"address         {snap['url']}"))
+        print(dim(f"friends can join through you:  common join --network {snap['url']}"))
+    api = snap.get("api")
+    if api:
+        print(dim(f"chat API        127.0.0.1:{api.get('port')}  ({'ready' if api.get('ready') else 'loading'})"))
+    if snap.get("error"):
+        print(red(snap["error"]))
+    print()
+    _print_coverage(snap)
+
+
+def _print_coverage(snap: dict) -> None:
+    stages, coverage = snap.get("stages") or [], snap.get("coverage") or []
+    peers = [p for p in snap.get("peers") or [] if p.get("state") == "up"]
+    print(dim(f"{len(peers)} peer(s) online   ·   coverage by layers"))
+    for (a, b), n in zip(stages, coverage):
+        mark = GLYPH_DONE if n else GLYPH_FAILED
+        print(f"  {mark} {a:>3}–{b:<3} {paper(_stage_bar(n))}  {dim(str(n) + ' peer(s)')}")
+
+
+def cmd_peers(gateway: str, as_json: bool, show_all: bool = False) -> None:
+    if _use_gateway():
+        _cmd_peers_gateway(gateway, as_json, show_all)
+        return
+    snap, health = _layer_snapshot()
+    peers = (snap or {}).get("peers") or []
+    live = [p for p in peers if p.get("state") == "up"]
+    shown = peers if show_all else live
+    if as_json:
+        print(json.dumps(shown))
+        return
+    if snap is None:
+        print(dim("no peers reachable: no peer here and no seed answered."))
+        print(dim("  → common join --network --api"))
+        return
+    if not shown:
+        print(dim("nothing answering right now."))
+        print(dim("  → common join --network --api"))
+        return
+    print(dim(f"{len(shown)} peer(s)   ·   {len(live)} answering\n"))
+    for p in shown:
+        w = p.get("window")
+        badge = GLYPH_DONE if p.get("state") == "up" else GLYPH_FORMING
+        name = (p.get("peer") or "")[:8] + ("  (you)" if p.get("me") else "")
+        print(f"{badge}  {paper(name) if p.get('state') == 'up' else dim(name)}")
+        print(dim(f"   layers {w[0]}–{w[1]}" if w else "   no layers yet") + dim(f"   ·   {p.get('backend') or '?'}   ·   {p.get('state')}   ·   seen {p.get('age_s', 0):.0f}s ago"))
+    if not show_all and len(peers) > len(live):
+        print()
+        print(comment(f"{len(peers) - len(live)} more not serving (loading, leaving, or silent)."))
+        print(dim("  → common peers --all"))
+
+
+def cmd_recommend(gateway: str, as_json: bool, machines: int, ram_gb: float) -> None:
+    if _use_gateway():
+        _cmd_recommend_gateway(gateway, as_json, machines, ram_gb)
+        return
+    snap, _ = _layer_snapshot()
+    stages, coverage = (snap or {}).get("stages") or [], (snap or {}).get("coverage") or []
+    ranked = sorted(zip(stages, coverage), key=lambda sc: (sc[1], sc[0][0]))
+    if as_json:
+        print(json.dumps({"stages": [{"layers": list(s), "peers": n} for s, n in zip(stages, coverage)],
+                          "most_needed": list(ranked[0][0]) if ranked else None}))
+        return
+    if not ranked:
+        print(dim("can't see the network right now, so there is nothing to recommend."))
+        print(dim("  → common join --network    (it picks the layers the network needs most)"))
+        return
+    print(dim("the thinnest parts of the model right now\n"))
+    for (a, b), n in ranked[:max(1, machines)]:
+        print(f"  layers {a}–{b}   {paper(_stage_bar(n))}   {dim(str(n) + ' peer(s)')}")
+    print()
+    print(comment("you don't pick: `common join --network` takes the part the network needs most that fits your memory."))
+
+
+def cmd_demand(gateway: str, as_json: bool) -> None:
+    if _use_gateway():
+        _cmd_demand_gateway(gateway, as_json)
+        return
+    if as_json:
+        print(json.dumps({}))
+        return
+    print(dim("the layer network has no central request log, so there is no demand chart."))
+    print(dim("  → what it does need:  common recommend"))
+
+
+def cmd_contrib(gateway: str, as_json: bool) -> None:
+    if _use_gateway():
+        _cmd_contrib_gateway(gateway, as_json)
+        return
+    if as_json:
+        print(json.dumps({"requests_served": None, "ok": None}))
+        return
+    print(dim("the layer network doesn't count requests: nothing central sees who asked what."))
+    print(dim("  → what your peer is doing now:  common status"))
+
+
+def _stop_layer_peer() -> bool:
+    """Ask this machine's running peer to leave (SIGINT, as Ctrl+C would). True if there was one."""
+    status, health = _read_layer_status()
+    if status is None or health in ("stopped", "crashed", "absent"):
+        return False
+    pid = status.get("pid")
+    print(dim("asking your peer to leave the network cleanly..."))
+    try:
+        if os.name == "nt":
+            import subprocess
+            subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True)
+        else:
+            os.kill(pid, signal.SIGINT)
+    except (ProcessLookupError, PermissionError, OSError) as e:
+        print(red(f"✗ couldn't signal the peer ({e})."), file=sys.stderr)
+        return True
+    deadline = time.time() + LAYER_LEAVE_WAIT_SECONDS
+    while time.time() < deadline:
+        _, now = _read_layer_status()
+        if now in ("stopped", "crashed") or not _pid_alive(pid):
+            print(f"{GLYPH_DONE} done. your peer left; the network re-routes around it.")
+            return True
+        time.sleep(0.5)
+    print(comment("the peer is still shutting down; it will finish on its own."))
+    return True
+
+
+def cmd_leave(gateway: str) -> None:
+    if _use_gateway() or not _stop_layer_peer():
+        _cmd_leave_legacy(gateway)
+        return
+    # A background service would start the peer again; remove it as well.
+    join_py = INSTALL_DIR / "join.py"
+    if join_py.exists():
+        import subprocess
+        result = subprocess.run([sys.executable, str(join_py), "--no-update", "--remove-permanent"], capture_output=True, text=True)
+        if result.returncode == 0 and "Removed" in result.stdout:
+            print(f"{GLYPH_DONE} the background service was removed too.")
+
+
+def _cmd_ask_gateway(gateway: str, question: str, region: str | None, model: str | None,
             local: bool, as_json: bool, quiet: bool, verbose: bool,
             compose: str | None = None) -> None:
     if local:
@@ -1769,7 +2216,7 @@ def _ask_local(question: str, model: str | None, as_json: bool, quiet: bool) -> 
                           f"its model — the next one is fast."))
 
 
-def cmd_recommend(gateway: str, as_json: bool, machines: int, ram_gb: float) -> None:
+def _cmd_recommend_gateway(gateway: str, as_json: bool, machines: int, ram_gb: float) -> None:
     """What specialist does the network need next?
 
     Two modes. Without `--machines`, it reports the network's current gaps and
@@ -1914,7 +2361,7 @@ def _peer_state(node: dict) -> tuple[str, datetime | None]:
     return ("down" if age <= PEER_GRACE_SECONDS else "gone"), seen
 
 
-def cmd_peers(gateway: str, as_json: bool, show_all: bool = False) -> None:
+def _cmd_peers_gateway(gateway: str, as_json: bool, show_all: bool = False) -> None:
     nodes = http_json("GET", f"{gateway}/nodes")
     classified = [(n, *_peer_state(n)) for n in nodes]
     live = [c for c in classified if c[1] == "live"]
@@ -1966,7 +2413,7 @@ def cmd_peers(gateway: str, as_json: bool, show_all: bool = False) -> None:
         print(dim("  → common peers --all"))
 
 
-def cmd_demand(gateway: str, as_json: bool) -> None:
+def _cmd_demand_gateway(gateway: str, as_json: bool) -> None:
     nodes = http_json("GET", f"{gateway}/nodes")
     decisions = http_json("GET", f"{gateway}/decisions/recent?limit=200")
 
@@ -2007,7 +2454,7 @@ def cmd_demand(gateway: str, as_json: bool) -> None:
         print(dim(f"  → common join --auto"))
 
 
-def cmd_status(gateway: str, as_json: bool) -> None:
+def _cmd_status_gateway(gateway: str, as_json: bool) -> None:
     identity = read_identity()
     if not identity:
         if as_json:
@@ -2107,7 +2554,7 @@ def cmd_whoami(as_json: bool) -> None:
     print(comment("no account, nothing to log into -- see TODO(v0.4) in the design doc."))
 
 
-def cmd_contrib(gateway: str, as_json: bool) -> None:
+def _cmd_contrib_gateway(gateway: str, as_json: bool) -> None:
     identity = read_identity()
     if not identity:
         print(dim("not currently on the commons."))
@@ -2152,7 +2599,7 @@ def cmd_config(as_json: bool, args: argparse.Namespace) -> None:
     print(comment("showing you exactly what would go."))
 
 
-def cmd_leave(gateway: str) -> None:
+def _cmd_leave_legacy(gateway: str) -> None:
     identity = read_identity()
     join_py = INSTALL_DIR / "join.py"
     if join_py.exists():
@@ -4014,6 +4461,7 @@ def main() -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument("--auto", action="store_true")
     parser.add_argument("--local", action="store_true")
+    parser.add_argument("--legacy", action="store_true", help="ask/status/peers/recommend/demand/contrib/leave: use the old gateway instead of the layer network (same as COMMON_LEGACY_GATEWAY=1)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -4063,6 +4511,13 @@ def main() -> None:
     args = parser.parse_args()
 
     _ARGS_NO_COLOR[0] = args.no_color
+
+    # `--legacy` is a global switch for the verbs that moved to the layer network. After `join`/`serve` it belongs to
+    # join.py (a whole-model node), so it is left in `rest` for them.
+    if args.verb not in ("join", "serve") and "--legacy" in (args.rest or []):
+        args.rest = [a for a in args.rest if a != "--legacy"]
+        args.legacy = True
+    _LEGACY_GATEWAY[0] = bool(args.legacy)
 
     if not args.no_update:
         self_update(force=args.force_update)

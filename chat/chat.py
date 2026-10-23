@@ -29,6 +29,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 VERSION = "0.1.13"
 RELEASE = "The Common Network Alpha"
@@ -252,7 +253,7 @@ class Turn:
     timings: Timings
 
 
-def stream_chat(gateway: str, messages: list[dict], region: str | None, target_node: str | None) -> Turn:
+def _stream_chat_gateway(gateway: str, messages: list[dict], region: str | None, target_node: str | None) -> Turn:
     body = {"model": "auto", "messages": messages, "stream": True}
     headers = {"Content-Type": "application/json"}
     if region:
@@ -315,6 +316,119 @@ def stream_chat(gateway: str, messages: list[dict], region: str | None, target_n
     return Turn(text="".join(full), node=node, timings=timings)
 
 
+# --- The layer network ------------------------------------------------------
+#
+# A machine running `common join --network --api` serves an OpenAI-compatible chat API on loopback and writes a
+# status file. Chat talks to that, not to the gateway. COMMON_LEGACY_GATEWAY=1 (or --legacy) keeps the old path.
+
+LAYER_API_PORT = 11440
+
+
+def use_gateway(args=None) -> bool:
+    return bool(getattr(args, "legacy", False)) or os.environ.get("COMMON_LEGACY_GATEWAY", "").strip().lower() in ("1", "true", "yes")
+
+
+def _status_path() -> Path:
+    override = os.environ.get("COMMONNET_STATUS_FILE")
+    return Path(override) if override else Path.home() / ".common-network" / "net" / "status.json"
+
+
+def _read_status() -> dict | None:
+    try:
+        status = json.loads(_status_path().read_text())
+    except (OSError, ValueError):
+        return None
+    return status if isinstance(status, dict) else None
+
+
+def _layer_base(status: dict | None) -> str:
+    override = os.environ.get("COMMON_LAYER_API")
+    if override:
+        return override.rstrip("/")
+    return f"http://127.0.0.1:{((status or {}).get('api') or {}).get('port') or LAYER_API_PORT}"
+
+
+def _no_peer_message(status: dict | None) -> str:
+    state = (status or {}).get("state")
+    if state in ("starting", "downloading", "loading", "moving"):
+        return f"your peer is still getting ready ({state}); try again in a moment, or run `common status`."
+    if state == "up":
+        return "your peer is running without the chat API; restart it with `common join --network --api`."
+    return "no peer is running on this machine. Join the network and open the chat API: `common join --network --api`."
+
+
+def stream_chat_layers(messages: list[dict]) -> Turn:
+    status = _read_status()
+    body = {"model": "auto", "messages": messages, "stream": True}
+    req = urllib.request.Request(_layer_base(status) + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    start = time.monotonic()
+    try:
+        resp = opener.open(req, timeout=REQUEST_TIMEOUT_SECONDS)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="ignore")
+        try:
+            detail = json.loads(detail)["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            pass
+        raise RuntimeError(f"{e.code}: {detail}")
+    except (urllib.error.URLError, OSError):
+        raise RuntimeError(_no_peer_message(status))
+    full = []
+    ttft_ms: int | None = None
+    done = False
+    with resp:
+        for raw_line in resp:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if payload == "[DONE]":
+                done = True
+                break
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if chunk.get("error"):
+                raise RuntimeError(str((chunk["error"] or {}).get("message") or chunk["error"]))
+            delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+            if delta:
+                if ttft_ms is None:
+                    ttft_ms = int((time.monotonic() - start) * 1000)
+                print(paper(delta), end="", flush=True)
+                full.append(delta)
+    print()
+    if not done:
+        raise RuntimeError("the answer stream ended before it was complete; a peer may have dropped out. Retry the question.")
+    peer = (status or {}).get("peer")
+    return Turn(text="".join(full), node=(f"the layer network, via peer {peer[:8]}" if peer else "the layer network"),
+                timings=Timings(routing_ms=None, ttft_ms=ttft_ms, total_ms=int((time.monotonic() - start) * 1000)))
+
+
+def stream_chat(gateway: str, messages: list[dict], region: str | None, target_node: str | None, legacy: bool = False) -> Turn:
+    if legacy or use_gateway():
+        return _stream_chat_gateway(gateway, messages, region, target_node)
+    return stream_chat_layers(messages)
+
+
+def list_nodes(gateway: str, legacy: bool = False) -> None:
+    if legacy or use_gateway():
+        _list_nodes_gateway(gateway)
+        return
+    status = _read_status()
+    peers = (status or {}).get("peers") or []
+    if not peers:
+        print(dim("no peers visible from this machine."))
+        print(dim("  → common join --network --api"))
+        return
+    for p in peers:
+        badge = GLYPH_DONE if p.get("state") == "up" else GLYPH_FAILED
+        w = p.get("window")
+        print(f"{badge} {paper((p.get('peer') or '')[:8])}  {dim(f'layers {w[0]}-{w[1]}' if w else 'no layers yet')}  {dim(p.get('state') or '')}")
+
+
 def print_footer(node: str | None, timings: Timings) -> None:
     print()
     print(dim("─" * 63))
@@ -348,10 +462,10 @@ def print_footer(node: str | None, timings: Timings) -> None:
     # common/common.py, where this number is only shown under -v.
 
 
-def one_shot(gateway: str, question: str, region: str | None, target_node: str | None) -> None:
+def one_shot(gateway: str, question: str, region: str | None, target_node: str | None, legacy: bool = False) -> None:
     messages = [{"role": "user", "content": question}]
     try:
-        turn = stream_chat(gateway, messages, region, target_node)
+        turn = stream_chat(gateway, messages, region, target_node, legacy)
     except RuntimeError as e:
         print(f"{GLYPH_FAILED} {red('the network could not answer that.')}", file=sys.stderr)
         print(comment(str(e)), file=sys.stderr)
@@ -359,9 +473,9 @@ def one_shot(gateway: str, question: str, region: str | None, target_node: str |
     print_footer(turn.node, turn.timings)
 
 
-def interactive(gateway: str, region: str | None, target_node: str | None) -> None:
+def interactive(gateway: str, region: str | None, target_node: str | None, legacy: bool = False) -> None:
     print(paper(BANNER, bold=True))
-    print(dim(f"common network chat — talking to {gateway}"))
+    print(dim(f"common network chat — talking to {gateway}" if (legacy or use_gateway()) else "common network chat — talking to your peer's layer network (127.0.0.1)"))
     if target_node:
         print(dim(f"talking to a specific node: {target_node}"))
     print(comment("ctrl+c or ctrl+d to quit.\n"))
@@ -377,7 +491,7 @@ def interactive(gateway: str, region: str | None, target_node: str | None) -> No
         messages.append({"role": "user", "content": question})
         print(flush=True)
         try:
-            turn = stream_chat(gateway, messages, region, target_node)
+            turn = stream_chat(gateway, messages, region, target_node, legacy)
         except RuntimeError as e:
             print(f"{GLYPH_FAILED} {red('the network could not answer that.')}", file=sys.stderr)
             print(comment(str(e)), file=sys.stderr)
@@ -388,7 +502,7 @@ def interactive(gateway: str, region: str | None, target_node: str | None) -> No
         print()
 
 
-def list_nodes(gateway: str) -> None:
+def _list_nodes_gateway(gateway: str) -> None:
     req = urllib.request.Request(f"{gateway}/nodes", headers=gateway_headers())
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -415,7 +529,8 @@ def main() -> None:
     parser.add_argument("--gateway", default=os.environ.get("COMMON_GATEWAY_URL", DEFAULT_GATEWAY), help="Gateway base URL (default: the shared Common Network gateway)")
     parser.add_argument("--region", default=None, help="Optional region hint for routing, e.g. au-adelaide")
     parser.add_argument("--node", default=None, help="Target a specific node by name instead of letting the router pick (see --list-nodes)")
-    parser.add_argument("--list-nodes", action="store_true", help="List registered nodes and their health, then exit")
+    parser.add_argument("--list-nodes", action="store_true", help="List the peers this machine can see (or the gateway's nodes with --legacy), then exit")
+    parser.add_argument("--legacy", action="store_true", help="Talk to the old gateway instead of the layer network (same as COMMON_LEGACY_GATEWAY=1)")
     parser.add_argument("--no-update", action="store_true", default=bool(os.environ.get("COMMON_NO_UPDATE")), help="Skip the self-update check")
     args = parser.parse_args()
 
@@ -425,13 +540,13 @@ def main() -> None:
     gateway = args.gateway.rstrip("/")
 
     if args.list_nodes:
-        list_nodes(gateway)
+        list_nodes(gateway, args.legacy)
         return
 
     if args.question:
-        one_shot(gateway, " ".join(args.question), args.region, args.node)
+        one_shot(gateway, " ".join(args.question), args.region, args.node, args.legacy)
     else:
-        interactive(gateway, args.region, args.node)
+        interactive(gateway, args.region, args.node, args.legacy)
 
 
 if __name__ == "__main__":
