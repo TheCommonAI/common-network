@@ -1,0 +1,201 @@
+{
+ "version": 1,
+ "when": "2026-10-24T07:31:02Z",
+ "network": "common-main-8b-v1",
+ "model": "Qwen3-8B",
+ "seed": "https://peak-for-values-consists.trycloudflare.com",
+ "route": [
+  {
+   "hop": 0,
+   "window": [
+    0,
+    27
+   ],
+   "peers": [
+    {
+     "peer": "59890399",
+     "host": "https://peak-for-values-consists.trycloudflare.com",
+     "backend": "mlx"
+    }
+   ]
+  },
+  {
+   "hop": 1,
+   "window": [
+    27,
+    36
+   ],
+   "peers": [
+    {
+     "peer": "ba7d4aea",
+     "host": "https://aircraft-ali-jersey-cultural.trycloudflare.com",
+     "backend": "cpu"
+    }
+   ]
+  }
+ ],
+ "warnings": [],
+ "hop_rtt": [
+  {
+   "hop": 0,
+   "first_ms": 382.09524999547284,
+   "warm_ms_p50": 48.349374999816064,
+   "warm_ms_min": 41.93616599513916,
+   "error": null
+  },
+  {
+   "hop": 1,
+   "first_ms": 156.73570799845038,
+   "warm_ms_p50": 72.1573749979143,
+   "warm_ms_min": 54.59300000075018,
+   "error": null
+  }
+ ],
+ "config": {
+  "repeats": 1,
+  "cases": [
+   [
+    16,
+    16
+   ]
+  ],
+  "draft": false,
+  "draft_k": 8
+ },
+ "cases": [
+  {
+   "prompt_len": 16,
+   "new": 16,
+   "repeats": 1,
+   "generated": [
+    16
+   ],
+   "prefill": {
+    "steps": 1,
+    "ms_mean": 3311.60424999689,
+    "ms_p50": 3311.60424999689,
+    "ms_p95": 3311.60424999689,
+    "tok_s": 4.831495188477013,
+    "compute_ms": 2456.58,
+    "network_ms": 814.2633340085322,
+    "client_ms": 40.76091598835774,
+    "missing_server_ms": 0,
+    "per_hop": [
+     {
+      "hop": 0,
+      "window": [
+       0,
+       27
+      ],
+      "peer": "59890399",
+      "host": "https://peak-for-values-consists.trycloudflare.com",
+      "backend": "mlx",
+      "replica_index": 0,
+      "calls": 1,
+      "total_ms": 500.7167920048232,
+      "server_ms": 169.52,
+      "network_ms": 331.19679200482324,
+      "rtt_ms": 48.349374999816064,
+      "reuse_rate": 1.0,
+      "bytes_per_call": 699208.0
+     },
+     {
+      "hop": 1,
+      "window": [
+       27,
+       36
+      ],
+      "peer": "ba7d4aea",
+      "host": "https://aircraft-ali-jersey-cultural.trycloudflare.com",
+      "backend": "cpu",
+      "replica_index": 0,
+      "calls": 1,
+      "total_ms": 2521.8123750019004,
+      "server_ms": 2287.06,
+      "network_ms": 234.75237500190042,
+      "rtt_ms": 72.1573749979143,
+      "reuse_rate": 1.0,
+      "bytes_per_call": 699208.0
+     }
+    ]
+   },
+   "decode": {
+    "steps": 15,
+    "ms_mean": 580.404522200115,
+    "ms_p50": 567.9835000046296,
+    "ms_p95": 649.462459005008,
+    "tok_s": 1.7229362655710228,
+    "compute_ms": 427.724,
+    "network_ms": 138.56337773474615,
+    "client_ms": 14.117144465368861,
+    "missing_server_ms": 0,
+    "per_hop": [
+     {
+      "hop": 0,
+      "window": [
+       0,
+       27
+      ],
+      "peer": "59890399",
+      "host": "https://peak-for-values-consists.trycloudflare.com",
+      "backend": "mlx",
+      "replica_index": 0,
+      "calls": 15,
+      "total_ms": 119.43249433437207,
+      "server_ms": 49.87533333333333,
+      "network_ms": 69.55716100103874,
+      "rtt_ms": 48.349374999816064,
+      "reuse_rate": 1.0,
+      "bytes_per_call": 43847.0
+     },
+     {
+      "hop": 1,
+      "window": [
+       27,
+       36
+      ],
+      "peer": "ba7d4aea",
+      "host": "https://aircraft-ali-jersey-cultural.trycloudflare.com",
+      "backend": "cpu",
+      "replica_index": 0,
+      "calls": 15,
+      "total_ms": 446.8548834003741,
+      "server_ms": 377.84866666666665,
+      "network_ms": 69.00621673370745,
+      "rtt_ms": 72.1573749979143,
+      "reuse_rate": 1.0,
+      "bytes_per_call": 43847.0
+     }
+    ]
+   },
+   "first_run_ids": [
+    14164,
+    13,
+    576,
+    5426,
+    374,
+    220,
+    16,
+    15,
+    15,
+    20044,
+    1293,
+    11,
+    323,
+    279,
+    14164,
+    374
+   ]
+  }
+ ],
+ "speculative": [],
+ "summary": {
+  "decode_ms_per_tok": 580.404522200115,
+  "decode_tok_s": 1.7229362655710228,
+  "compute_ms": 427.724,
+  "network_ms": 138.56337773474615,
+  "client_ms": 14.117144465368861,
+  "hops": 2,
+  "rtt_sum_ms": 120.50674999773037
+ }
+}
