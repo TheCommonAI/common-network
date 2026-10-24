@@ -158,6 +158,34 @@ class Rebalance(NodeCase):
         self.assertEqual(movers[0].server.port, {c: 18943, survivor_twin: survivor_twin.port}[movers[0]])
 
 
+class PinnedWindow(NodeCase):
+    """--layers A-B: serve exactly that window, or refuse with a reason."""
+
+    def _node(self, window, gib=30.0):
+        identity = Identity.load_or_create(Path(self.tmp.name) / "idp.key")
+        return node.Node(self.manifest, [], identity, node.Hardware("stub", gib, "stub"), port=18973, stub=True,
+                         tunnel=False, log=lambda *_: None, resign_s=5, gossip_s=5, fixed_window=window)
+
+    def test_the_pinned_window_is_used_whatever_the_network_would_pick(self):
+        self.assertEqual(self._node((27, 36))._choose(), (27, 36))
+
+    def test_a_window_off_the_stage_boundaries_is_refused(self):
+        with self.assertRaises(node.NodeError) as caught:
+            self._node((5, 20))._choose()
+        self.assertIn("stage boundary", str(caught.exception))
+
+    def test_a_window_that_does_not_fit_is_refused_with_the_numbers(self):
+        with self.assertRaises(node.NodeError) as caught:
+            self._node((0, 36), gib=0.5)._choose()
+        self.assertIn("GiB", str(caught.exception))
+
+    def test_a_pinned_peer_never_moves(self):
+        n = self._node((27, 36))
+        n.state = "up"
+        with mock.patch.object(n, "_mover", side_effect=AssertionError("must not look for a move")):
+            n._maybe_move()
+
+
 class ApiClientPart(NodeCase):
     """Which checkpoint and format the chat API's embedding/head part is loaded from."""
 

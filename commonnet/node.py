@@ -322,7 +322,9 @@ class Node:
                  resign_s: float = RESIGN_SECONDS, rebalance_s: float = REBALANCE_SECONDS,
                  cooldown_s: float = MOVE_COOLDOWN_SECONDS, gossip_s: float | None = None, clock=time.time,
                  status: StatusFile | None = None, status_s: float = STATUS_SECONDS,
-                 api_port: int | None = None, api_backend=None):
+                 api_port: int | None = None, api_backend=None,
+                 fixed_window: tuple[int, int] | None = None):
+        self.fixed_window = fixed_window
         self.manifest, self.seeds, self.identity, self.hw = manifest, list(seeds), identity, hardware
         self.cpu_dtype = None
         if hardware.backend == "cpu" and not os.environ.get("COMMONNET_DTYPE"):
@@ -537,6 +539,17 @@ class Node:
     # -- choosing and serving a window ---------------------------------------------------------
 
     def _choose(self) -> tuple[int, int]:
+        if self.fixed_window is not None:
+            window = tuple(self.fixed_window)
+            if not self.manifest.is_window(*window):
+                stages = ", ".join(f"{a}-{b}" for a, b in self.manifest.stages())
+                raise NodeError(f"--layers {window[0]}-{window[1]} does not line up with this network's stages "
+                                f"({stages}); a window starts and ends on a stage boundary.")
+            need = self.manifest.window_gib(*window, self.hw.backend)
+            if need > self.hw.gib:
+                raise NodeError(f"layers {window[0]}-{window[1]} need {need:.1f} GiB here and this machine offers "
+                                f"{self.hw.gib:.1f} GiB. Pick a shorter window.")
+            return window
         try:
             return placement.choose_window(self.manifest, self.table.live(), self.hw.gib, self.hw.backend,
                                            me=self.identity.peer)
@@ -786,6 +799,8 @@ class Node:
         return min(eligible) if eligible else None
 
     def _maybe_move(self) -> None:
+        if self.fixed_window is not None:
+            return  # pinned with --layers: this peer stays where it was told to
         if self.state != "up" or self.clock() - self._last_move < self.cooldown_s:
             return
         chosen = self._mover(self.table.live())
@@ -829,6 +844,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=0, help="loopback port for the block server (default: any free port)")
     p.add_argument("--backend", choices=["mlx", "nf4", "cpu"], help="override the detected backend")
     p.add_argument("--stage-gib", type=float, help="memory to offer, in GiB (default: detected)")
+    p.add_argument("--layers", metavar="A-B", help="serve exactly this window of layers (for example 27-36) instead of the one the network picks; it must start and end on a stage boundary")
     p.add_argument("--identity-dir", type=Path, help="where this peer's key lives (default: ~/.common-network/net/<network>)")
     p.add_argument("--stub", action="store_true", help="serve an identity block with no weights (tests)")
     p.add_argument("--no-tunnel", action="store_true", help="do not open a tunnel; publish --advertise or the loopback URL")
@@ -860,6 +876,12 @@ def main(argv=None) -> int:
                 hardware = Hardware(args.backend, hardware.gib, hardware.name)
             if args.stage_gib:
                 hardware = Hardware(hardware.backend, args.stage_gib, hardware.name)
+        fixed_window = None
+        if args.layers:
+            m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", args.layers)
+            if not m:
+                raise NodeError(f"--layers wants a window like 27-36, got {args.layers!r}")
+            fixed_window = (int(m.group(1)), int(m.group(2)))
         directory = args.identity_dir or HOME / "net" / re.sub(r"[^A-Za-z0-9._-]", "_", manifest.id)
         identity = Identity.load_or_create(Path(directory) / "identity.key")
     except (NodeError, RecordError, ManifestError) as e:
@@ -867,7 +889,7 @@ def main(argv=None) -> int:
         status.write(blank_status("error", error=friendly(e)))
         return 2
     node = Node(manifest, seeds, identity, hardware, port=args.port, stub=args.stub, tunnel=not args.no_tunnel,
-                advertise=args.advertise, status=status, api_port=args.api)
+                advertise=args.advertise, status=status, api_port=args.api, fixed_window=fixed_window)
 
     def leave(signum, frame):
         node.request_leave()

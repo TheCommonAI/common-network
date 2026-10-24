@@ -15,6 +15,7 @@ it). A background service keeps the mode it was installed with.
 common join                      # the built-in network (same as --network)
 common join --network URL        # a network a friend runs: any peer's URL
 common join --network manifest.json
+common join --layers 27-36       # serve exactly this window (a stage boundary pair) instead of the one the network picks
 common join --permanent          # keep serving after reboots (records the mode)
 common join --legacy             # the original whole-model gateway node instead
 ```
