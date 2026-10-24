@@ -89,7 +89,8 @@ last peer, a move, the API loading; `--scenario error|crash`) for developing a U
 ## Local chat API (`--api`)
 
 ```bash
-common join --network --api          # peer + OpenAI-compatible API on http://127.0.0.1:11440/v1
+common join --network                # peer + OpenAI-compatible API on http://127.0.0.1:11440/v1 (the API is on by default)
+common join --no-api                 # peer only: skips the ~1 GB client part, so `common ask` and chat apps will not work
 common join --network --api 12000    # another port
 ```
 

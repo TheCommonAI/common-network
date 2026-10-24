@@ -1447,6 +1447,8 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
         argv = [sys.executable, os.path.abspath(__file__)]
         if args.no_update:
             argv += ["--no-update"]
+        if getattr(args, "api", None) is not None:
+            argv += [f"--api={args.api}"]
         return argv + ([f"--network={args.network}"] if args.network else ["--network"])
     argv = [
         sys.executable, os.path.abspath(__file__),
@@ -1705,6 +1707,7 @@ def main() -> None:
     parser.add_argument("--local-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--network", nargs="?", const="", default=None, metavar="URL|FILE", help="Join the decentralised layer network: serve a slice of the shared model as a peer. Optionally a seed peer's URL or a manifest file (default: COMMONNET_NETWORK or the built-in seeds). No gateway registration")
+    parser.add_argument("--no-api", action="store_true", help="With the layer network: do not serve the local chat API (on by default, so `common ask` and chat apps work). Saves the ~1 GB client part of the model")
     parser.add_argument("--api", nargs="?", const=11440, default=None, type=int, metavar="PORT", help="With --network: also serve an OpenAI-compatible chat API on 127.0.0.1:PORT (default 11440) from the same process, so a desktop app or any OpenAI-style client can chat with the network. The client part of the model (about 1 GB for Qwen3-8B) loads in the background")
     parser.add_argument("--legacy", action="store_true", help="Run as a whole-model gateway node (the original network) instead of the default layer network")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
@@ -1747,6 +1750,8 @@ def main() -> None:
         args.network = ""  # the default: the built-in network
     if args.api is not None and (mode != "network" or args.remove_permanent):
         parser.error("--api is only used with the layer network (--network, or a plain join on a machine that can serve it)")
+    if mode == "network" and args.api is None and not args.no_api and not args.remove_permanent:
+        args.api = 11440  # on by default: `common ask`, `common chat` and chat apps need this peer's local API
 
     if not args.no_update:
         # A node can be left running a join.py that expects a newer worker.py than
