@@ -258,6 +258,15 @@ class JoinFlag(unittest.TestCase):
                     join.main()
                 run.assert_called_once_with(argv[1] if len(argv) > 1 and argv[1].startswith("http") else None, expected)
 
+    def test_layers_is_passed_to_the_node_and_kept_by_a_service(self):
+        with mock.patch.object(join, "run_network_member") as run, \
+                mock.patch.object(sys, "argv", ["join.py", "--no-update", "--network", "--layers", "27-36"]):
+            join.main()
+        run.assert_called_once_with(None, ["--api", "11440", "--layers", "27-36"])
+        import argparse
+        args = argparse.Namespace(network="", api=11440, layers="27-36", no_update=False)
+        self.assertIn("--layers=27-36", join._service_argv(args))
+
     def test_a_permanent_service_keeps_the_api(self):
         import argparse
         args = argparse.Namespace(network="", api=11440, no_update=False)
