@@ -286,3 +286,41 @@ class Arguments(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnsureJoinDir(unittest.TestCase):
+    """A runtime unpacked without join/ must still be able to open its tunnel."""
+
+    def test_missing_join_dir_is_fetched_once(self):
+        import tempfile
+        from pathlib import Path
+
+        class R:
+            def __init__(self, data): self.data = data
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return self.data
+
+        asked = []
+
+        def urlopen(url, timeout=0):
+            asked.append(url)
+            return R(b"x=1")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "join"
+            self.assertEqual(tunnel.ensure_join_dir(dest, urlopen=urlopen), dest)
+            self.assertTrue((dest / "join.py").is_file() and (dest / "worker.py").is_file())
+            tunnel.ensure_join_dir(dest, urlopen=lambda *a, **k: 1 / 0)  # present now: no second fetch
+        self.assertEqual(len(asked), 3)
+
+    def test_download_failure_is_a_launcher_error(self):
+        import tempfile
+        from pathlib import Path
+
+        def boom(url, timeout=0):
+            raise OSError("offline")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(tunnel.LauncherError):
+                tunnel.ensure_join_dir(Path(tmp) / "join", urlopen=boom)

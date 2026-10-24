@@ -152,7 +152,7 @@ def ensure_source(env=None, ref: str | None = None, dest: Path = SOURCE_DIR, url
             prefix = None
             for member in tar.getmembers():
                 parts = Path(member.name).parts
-                if len(parts) < 2 or parts[1] != "commonnet":
+                if len(parts) < 2 or parts[1] not in ("commonnet", "join"):  # join/ holds the tunnel opener
                     continue
                 if member.name.startswith(("/", "..")) or ".." in parts or not (member.isfile() or member.isdir()):
                     continue  # refuse absolute paths, traversal, links and devices
@@ -165,6 +165,8 @@ def ensure_source(env=None, ref: str | None = None, dest: Path = SOURCE_DIR, url
                     target.write_bytes(tar.extractfile(member).read())
             if prefix is None:
                 raise LayersError("the downloaded archive has no commonnet/ package")
+        if not (staging / "join" / "join.py").is_file():
+            raise LayersError("the downloaded archive has no join/join.py (the tunnel opener)")
         _check_package(staging)
         (staging / ".ref").write_text(ref)
     except (tarfile.TarError, OSError) as e:
