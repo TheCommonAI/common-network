@@ -45,9 +45,10 @@ def main(argv=None) -> int:
         direct = DirectConfig(bootstrap=args.bootstrap, loopback=True, tunnel_fallback=False)
     elif not args.advertise:
         p.error("--advertise or --direct-loopback is required")
+    from commonnet.mesh import directory as mesh_directory   # COMMONNET_GATEWAY, tests only: no default gateway here
     node = Node(manifest, args.seed, identity, hardware, port=args.port, tunnel=False, advertise=args.advertise,
                 block_builder=build, log=lambda m: None, gossip_s=1.0, direct=direct, fixed_window=fixed,
-                state_dir=Path(args.identity_dir) / "tls", resign_s=2.0 if direct else 15.0)
+                state_dir=Path(args.identity_dir) / "tls", gateway=mesh_directory.gateway_url(default=None), resign_s=2.0 if direct else 15.0)
     signal.signal(signal.SIGTERM, lambda *_: node.request_leave())
     signal.signal(signal.SIGINT, lambda *_: node.request_leave())
     try:

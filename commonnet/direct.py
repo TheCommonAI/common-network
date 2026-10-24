@@ -25,6 +25,8 @@ import ipaddress
 from commonnet.net import nat
 
 LOOPBACK_IP = "127.0.0.1"
+DEFAULT_TCP_PORT = 7471    # the block server in auto mode
+DEFAULT_DHT_PORT = 7472    # the DHT (UDP) in auto mode
 
 
 @dataclasses.dataclass
@@ -34,6 +36,7 @@ class DirectConfig:
     public_ip: str | None = None         # this machine's public IPv4 (manual forward)
     dht_port: int = 0                    # UDP port of the DHT node (0 = any; forward it for others to reach you)
     tunnel_fallback: bool = True
+    auto: bool = False                   # plain `common join`: default ports 7471/7472 (free-port fallback), tunnel on failure
     loopback: bool = False               # tests only: publish https://127.0.0.1:PORT, skip reachability
 
 

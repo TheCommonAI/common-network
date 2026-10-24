@@ -1462,7 +1462,8 @@ SCHTASKS_NAME = "CommonNetworkJoin"
 def _direct_flags(args: argparse.Namespace) -> list[str]:
     """The --direct options as `commonnet.node` flags, in `--name=value` form. Empty unless --direct was given."""
     if not getattr(args, "direct", False):
-        return []
+        # Plain `common join`: try a direct connection, fall back to the tunnel. --no-direct keeps the tunnel only.
+        return [] if getattr(args, "no_direct", False) else ["--auto-direct"]
     flags = ["--direct"]
     flags += [f"--bootstrap={b}" for b in (getattr(args, "bootstrap", None) or [])]
     for name, attr in (("--public-ip", "public_ip"), ("--external-port", "external_port"), ("--dht-port", "dht_port"),
@@ -1747,6 +1748,7 @@ def main() -> None:
     parser.add_argument("--layers", metavar="A-B", help="With the layer network: serve exactly this window of layers (for example 27-36) instead of the one the network picks for you. It must start and end on a stage boundary and fit in memory")
     parser.add_argument("--no-api", action="store_true", help="With the layer network: do not serve the local chat API (on by default, so `common ask` and chat apps work). Saves the ~1 GB client part of the model")
     parser.add_argument("--api", nargs="?", const=11440, default=None, type=int, metavar="PORT", help="With --network: also serve an OpenAI-compatible chat API on 127.0.0.1:PORT (default 11440) from the same process, so a desktop app or any OpenAI-style client can chat with the network. The client part of the model (about 1 GB for Qwen3-8B) loads in the background")
+    parser.add_argument("--no-direct", action="store_true", help="With the layer network: tunnel only, never try a direct connection (peers are still found through the gateway directory)")
     parser.add_argument("--direct", action="store_true", help="With the layer network (experimental): serve over TLS on a public address and be found through a DHT, with no Cloudflare tunnel unless this machine proves unreachable. Default off; see docs/layer-network.md")
     parser.add_argument("--bootstrap", action="append", default=[], metavar="HOST:PORT", help="With --direct: a DHT node to join through (repeatable)")
     parser.add_argument("--direct-port", type=int, default=None, metavar="N", help="With --direct: the TCP port to serve on (default: any free port; set it when you forward a port by hand)")
@@ -1795,6 +1797,8 @@ def main() -> None:
         args.network = ""  # the default: the built-in network
     if args.api is not None and (mode != "network" or args.remove_permanent):
         parser.error("--api is only used with the layer network (--network, or a plain join on a machine that can serve it)")
+    if args.no_direct and args.direct:
+        parser.error("--no-direct and --direct contradict each other")
     if (args.direct or args.bootstrap or args.public_ip or args.external_port or args.dht_port is not None
             or args.direct_port is not None or args.no_tunnel_fallback) and mode != "network":
         parser.error("--direct and its options are only used with the layer network (--network, or a plain join on a machine that can serve it)")
