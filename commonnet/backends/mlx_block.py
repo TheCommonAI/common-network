@@ -96,7 +96,10 @@ class MlxBlockRange:
         self.config = cfg
         self.hidden_size = cfg["hidden_size"]
         files = _weight_files(self.checkpoint_dir)
-        self.qwen35 = str(wrapper.get("model_type", "")).startswith("qwen3_5")
+        model_type = str(wrapper.get("model_type", ""))
+        # A Hadamard pack (Prism ML Bonsai 2): qwen3_5 layers whose 2-bit linears sit in a rotated basis.
+        self.hadamard = model_type == "prism_hadamard_qwen35"
+        self.qwen35 = self.hadamard or model_type.startswith("qwen3_5")
         if self.qwen35:
             from mlx_lm.models.qwen3_5 import DecoderLayer, TextModelArgs
             args = TextModelArgs.from_dict(cfg)
@@ -111,6 +114,8 @@ class MlxBlockRange:
         # A checkpoint is pre-quantized if it stores .scales next to the layer weights.
         prequantized = f"{lp}layers.{self.start}.mlp.up_proj.scales" in files
         qcfg = wrapper.get("quantization") or cfg.get("quantization") or {}
+        if self.hadamard and not prequantized:
+            raise ValueError("a Hadamard pack stores 2-bit weights; this checkpoint has none for these layers")
         if prequantized:
             group_size, bits = qcfg["group_size"], qcfg["bits"]
         else:
@@ -138,7 +143,14 @@ class MlxBlockRange:
             blk = make_block(glob)
             prefix = f"{lp}layers.{glob}."
             if prequantized:
-                nn.quantize(blk, group_size=group_size, bits=bits)
+                if self.hadamard:
+                    from commonnet.backends import hadamard
+                    if (group_size, bits) != (hadamard.GROUP_SIZE, hadamard.BITS):
+                        raise ValueError(f"unsupported Hadamard quantization: {bits}-bit, group {group_size}")
+                    hadamard.install(blk, wrapper["modules"], f"model.layers.{glob}.",
+                                     lambda path, suffix: tensor(f"{lp}{path[len('model.'):]}.{suffix}"))
+                else:
+                    nn.quantize(blk, group_size=group_size, bits=bits)
                 keys = [k for k, _ in tree_flatten(blk.parameters())]
                 pairs = [(k, tensor(prefix + k)) for k in keys]
                 blk.load_weights(pairs, strict=True)

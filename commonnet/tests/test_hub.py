@@ -145,6 +145,23 @@ class HubTest(unittest.TestCase):
         x = torch.randn(1, 4, 64)
         torch.testing.assert_close(out.forward("s", x, 0), ref.forward("s", x, 0))
 
+    def test_one_file_with_an_index_downloads_only_needed_tensors(self):
+        """A pack that is one model.safetensors plus an index (the Bonsai MLX packs): ranges, not the whole file."""
+        model, files = model_files(False)
+        import struct
+        blob = files["model.safetensors"]
+        n = struct.unpack("<Q", blob[:8])[0]
+        names = [k for k in json.loads(blob[8:8 + n]) if k != "__metadata__"]
+        files[hub.INDEX_NAME] = json.dumps({"metadata": {}, "weight_map": {k: "model.safetensors" for k in names}}).encode()
+        h, log, _ = self.hub(files)
+        d = h.fetch(layers=(1, 3))
+        self.assertFalse(any(name == "model.safetensors" and not rng and m == "GET" for m, name, rng, _ in log))
+        ref = BlockRange(checkpoint_dir=self._full(files), start=1, end=3)
+        got = BlockRange(checkpoint_dir=d, start=1, end=3)
+        x = torch.randn(1, 5, 64)
+        torch.testing.assert_close(got.forward("s", x, 0), ref.forward("s", x, 0))
+        self.assertLess(os.path.getsize(os.path.join(d, "model.safetensors")), len(blob))
+
     def test_client_tensors(self):
         model, files = model_files(False)
         h, log, _ = self.hub(files)

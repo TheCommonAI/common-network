@@ -1,0 +1,8 @@
+{"id": "common-bonsai-8b-v1", "version": 1,
+ "model": {"name": "Ternary Bonsai 8B", "num_layers": 36,
+           "repos": {"mlx": "prism-ml/Ternary-Bonsai-8B-mlx-2bit", "cpu": "prism-ml/Ternary-Bonsai-8B-unpacked"},
+           "dtype": {"cpu": "bfloat16"},
+           "client_repo": "prism-ml/Ternary-Bonsai-8B-mlx-2bit"},
+ "boundaries": [0, 9, 18, 27, 36],
+ "gib_per_layer": {"mlx": 0.051, "cpu": 0.36}, "fixed_gib": 0.3,
+ "min_replicas": 2, "seeds": []}
