@@ -1,0 +1,5 @@
+{"id": "test-synth-v1", "version": 1,
+ "model": {"name": "Synth", "num_layers": 12, "repos": {"synth": "synthetic"}, "client_repo": "synthetic"},
+ "boundaries": [0, 3, 6, 9, 12],
+ "gib_per_layer": {"synth": 1.0}, "fixed_gib": 0.0,
+ "min_replicas": 1, "seeds": []}
