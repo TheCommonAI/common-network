@@ -111,6 +111,12 @@ def venv_python(venv: Path = RUNTIME_VENV) -> Path:
     return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
+def _source_prefix(source: Path | None) -> str:
+    # -m and -c put the working directory before PYTHONPATH. Select the downloaded
+    # code explicitly while keeping cwd unchanged for relative manifest paths.
+    return f"import sys; sys.path.insert(0, {str(source.resolve())!r}); " if source is not None else ""
+
+
 def can_import(python, source: Path | None = None, run=subprocess.run, kind: str | None = None) -> bool:
     """Can `python` import commonnet and its dependencies (with `source` on the path, if given)?
 
@@ -119,7 +125,7 @@ def can_import(python, source: Path | None = None, run=subprocess.run, kind: str
     if source is not None:
         env["PYTHONPATH"] = os.pathsep.join(p for p in (str(source), env.get("PYTHONPATH", "")) if p)
     try:
-        check = IMPORT_CHECK + ("; " + BACKEND_IMPORTS[kind] if BACKEND_IMPORTS.get(kind) else "")
+        check = _source_prefix(source) + IMPORT_CHECK + ("; " + BACKEND_IMPORTS[kind] if BACKEND_IMPORTS.get(kind) else "")
         out = run([str(python), "-c", check], capture_output=True, env=env, timeout=120)
     except (OSError, subprocess.SubprocessError):
         return False
@@ -221,9 +227,13 @@ def ensure_runtime(kind: str, *, source: Path, current_python=None, venv: Path =
     return str(python)
 
 
-def build_command(python: str, network: str | None, extra: list[str] | None = None) -> list[str]:
+def build_command(python: str, network: str | None, extra: list[str] | None = None,
+                  *, source: Path | None = None) -> list[str]:
     """The command that runs the node. `network` may be None to use COMMONNET_NETWORK or the default seeds."""
     command = [str(python), "-m", "commonnet.node"]
+    if source is not None:
+        command = [str(python), "-c", _source_prefix(source)
+                   + "import runpy; runpy.run_module('commonnet.node', run_name='__main__', alter_sys=True)"]
     if network:
         command += ["--network", network]
     return command + list(extra or [])
@@ -236,7 +246,7 @@ def run(network: str | None, extra: list[str] | None = None, *, dry_run: bool = 
     kind = platform_kind(nvidia=nvidia)
     source = ensure_source(env, dry_run=dry_run, log=log)
     python = ensure_runtime(kind, source=source, run=run_cmd, dry_run=dry_run, log=log)
-    command = build_command(python, network, extra)
+    command = build_command(python, network, extra, source=source)
     if dry_run:
         log("would run: " + " ".join(command))
         return 0
