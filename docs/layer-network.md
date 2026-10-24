@@ -174,3 +174,11 @@ drift slightly because their 4-bit weights differ.
   have too little.
 
 Design details: `commonnet/NETWORK.md`.
+
+## Gateway directory (rendezvous)
+
+The production gateway also runs a small in-memory directory so `common join` needs no typed address. It stores
+signed peer records (90 s TTL, newest per peer, capped per network and per source IP) and never trusts them: readers
+verify signatures themselves. `POST /announce` (a signed record), `GET /directory?network=ID` (up to 100 live records)
+and `POST /check {port, fp?}` (the gateway opens a TLS connection back to the caller's own IP only, ports 1024-65535,
+to tell a peer whether it is reachable from outside). All three are rate limited per IP. Code: `gateway/app/directory.py`.
