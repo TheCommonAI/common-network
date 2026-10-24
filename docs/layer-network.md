@@ -7,10 +7,9 @@ that drops out in the middle of a generation.
 
 `common join` joins this network by default. The original whole-model gateway node is still there as
 `common join --legacy` (and anything that only makes sense for it, such as `--model` or `--lan`, implies
-it), and a machine that cannot serve layers (no Apple silicon or NVIDIA GPU) keeps running as a
-whole-model node. A background service keeps the mode it was installed with.
+it). A background service keeps the mode it was installed with.
 
-## Join (any machine with a supported GPU)
+## Join (Apple silicon, NVIDIA, or any machine with enough RAM)
 
 ```bash
 common join                      # the built-in network (same as --network)
@@ -25,8 +24,15 @@ the code, picks the layers the network needs most that fit your memory, download
 Cloudflare tunnel (no ports to forward), and starts serving. Ctrl+C leaves cleanly. Running it again
 resumes. Nothing is registered with any gateway.
 
-Supported: Apple silicon Macs (MLX) and NVIDIA GPUs on Windows/Linux (NF4). Machines without a GPU are
-refused. **The NVIDIA path is written but has not been run on real hardware yet.**
+Supported: Apple silicon Macs (MLX), NVIDIA GPUs on Windows/Linux (NF4), and **CPU-only machines** (Windows,
+Linux, Intel Macs) running the unquantised model in bfloat16 on the CPU with plain PyTorch. A CPU peer is
+supported but slower than a GPU peer: it offers `min(60% of free RAM, 50% of total RAM)`, and a 9-layer window
+of Qwen3-8B (`Qwen/Qwen3-8B`, about 0.36 GiB per layer) needs about 3.6 GiB, so a PC with 8 GB of free RAM can
+serve one stage and a 31 GB PC can serve several. Routes prefer GPU peers when the number of hops is the same
+(a CPU peer is never the cheapest choice for a hop a GPU peer also serves), and a CPU peer still adds capacity
+and replicas. Replicas are same-backend only (see below). A machine with too little RAM for even one stage is
+told how much it needs and exits. **The NVIDIA path is written but has not been run on real hardware yet, and
+the CPU path has been run on a Mac's CPU only, not on Windows.**
 
 ## Chat with it
 
@@ -80,7 +86,7 @@ through the tunnel. The port answers straight away; chat requests get `503 loadi
 `"ready": false`) until the client part of the model — the embedding, final norm and head, **about 1 GB for
 Qwen3-8B on a 16 GB Mac, on top of the layers this peer serves** — has downloaded and loaded in the background.
 `status.json` shows `api: {"port", "ready"}`. If the port is taken or the model part fails to load, the peer keeps
-serving and the status `error` says so. On NVIDIA the client part runs from CPU in fp16; that path is untested.
+serving and the status `error` says so. On NVIDIA and CPU peers the client part runs from CPU in fp16; that path is untested.
 `python -m commonnet.serve` still runs the API alone, without serving layers.
 
 ## Start a network (be a seed)

@@ -12,6 +12,7 @@ from commonnet.mesh.manifest import Manifest
 
 BACKEND_SWITCH_PENALTY = 0.5  # replaying onto another quantisation drifts a little; keep the same backend when it costs nothing
 PREFERRED_BACKEND_PENALTY = 0.5
+CPU_PENALTY = 0.25  # a CPU peer is several times slower than a GPU peer: on an equal-hop route, take the GPU one
 
 
 class NoRoute(RuntimeError):
@@ -122,6 +123,8 @@ def _penalty(record: dict, now: float, previous_backend: str | None, prefer_back
         penalty += BACKEND_SWITCH_PENALTY
     if prefer_backend is not None and record.get("backend") != prefer_backend:
         penalty += PREFERRED_BACKEND_PENALTY
+    if record.get("backend") == "cpu":
+        penalty += CPU_PENALTY
     return penalty
 
 

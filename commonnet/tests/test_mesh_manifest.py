@@ -64,3 +64,21 @@ class ManifestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CpuBackendManifest(unittest.TestCase):
+    def test_main_manifest_has_a_cpu_checkpoint_and_cost(self):
+        from pathlib import Path
+        m = Manifest.load(Path(__file__).resolve().parents[1] / "networks" / "main.json")
+        self.assertEqual(m.repo("cpu"), "Qwen/Qwen3-8B")
+        self.assertEqual(m.model["dtype"]["cpu"], "bfloat16")
+        # an unquantised bf16 Qwen3-8B layer is ~0.36 GiB; a 9-layer window must be costed at least that
+        self.assertGreaterEqual(m.window_gib(0, 9, "cpu"), 0.3 + 9 * 0.36)
+        self.assertEqual(m.windows_fitting(5.0, "cpu")[0], (0, 9))
+        self.assertEqual(m.windows_fitting(3.0, "cpu"), [])
+
+    def test_a_peer_that_does_not_know_cpu_is_unaffected(self):
+        from pathlib import Path
+        m = Manifest.load(Path(__file__).resolve().parents[1] / "networks" / "main.json")
+        self.assertAlmostEqual(m.window_gib(0, 9, "mlx"), 0.3 + 9 * 0.125)
+        self.assertAlmostEqual(m.window_gib(0, 9, "nf4"), 0.3 + 9 * 0.17)

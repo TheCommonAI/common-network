@@ -26,12 +26,15 @@ class PlatformChoice(unittest.TestCase):
         for system in ("Windows", "Linux"):
             self.assertEqual(layers.platform_kind(system, "AMD64", nvidia=True), "nvidia")
 
-    def test_everything_else_is_refused_with_a_reason(self):
-        for system, machine, nvidia in (("Linux", "x86_64", False), ("Windows", "AMD64", False), ("Darwin", "x86_64", False)):
+    def test_machines_without_a_gpu_serve_on_the_cpu(self):
+        for system, machine in (("Linux", "x86_64"), ("Windows", "AMD64"), ("Darwin", "x86_64")):
             with self.subTest(system=system, machine=machine):
-                with self.assertRaises(layers.LayersError) as caught:
-                    layers.platform_kind(system, machine, nvidia=nvidia)
-                self.assertRegex(str(caught.exception), "GPU|supported")
+                self.assertEqual(layers.platform_kind(system, machine, nvidia=False), "cpu")
+
+    def test_an_unknown_os_is_refused_with_a_reason(self):
+        with self.assertRaises(layers.LayersError) as caught:
+            layers.platform_kind("FreeBSD", "amd64", nvidia=False)
+        self.assertRegex(str(caught.exception), "not supported")
 
     def test_requirements_are_pinned_where_it_matters(self):
         plain, extra = layers.requirements("mac-arm64")
@@ -41,8 +44,21 @@ class PlatformChoice(unittest.TestCase):
         plain, extra = layers.requirements("nvidia")
         self.assertTrue(any(r.startswith("bitsandbytes") for r in plain))
         self.assertIn("--index-url", extra)
+        plain, extra = layers.requirements("cpu")
+        self.assertIn("transformers==5.8.0", plain)
+        self.assertFalse(any(r.startswith(("mlx", "bitsandbytes")) for r in plain))
+        self.assertTrue(any(r.startswith("torch") for r in extra))
         with self.assertRaises(layers.LayersError):
             layers.requirements("riscv")
+
+    def test_cpu_torch_uses_the_cpu_wheel_index_on_windows_and_linux(self):
+        from unittest import mock
+        for system, indexed in (("Windows", True), ("Linux", True), ("Darwin", False)):
+            with mock.patch.object(layers.platform, "system", return_value=system):
+                _, extra = layers.requirements("cpu")
+            self.assertEqual("--index-url" in extra, indexed, system)
+            if indexed:
+                self.assertIn("/whl/cpu", extra[-1])
 
 
 class Commands(unittest.TestCase):
@@ -261,6 +277,9 @@ class BackendImportCheck(unittest.TestCase):
         layers.can_import("python", None, fake_run, "mac-arm64")
         layers.can_import("python", None, fake_run, "nvidia")
         layers.can_import("python", None, fake_run)
+        layers.can_import("python", None, fake_run, "cpu")
+        self.assertNotIn("mlx", seen[3])
+        self.assertNotIn("bitsandbytes", seen[3])
         self.assertIn("mlx.core, mlx_lm", seen[0])
         self.assertIn("bitsandbytes", seen[1])
         self.assertNotIn("mlx", seen[2])

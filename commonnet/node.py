@@ -55,6 +55,8 @@ TUNNEL_GRACE_SECONDS = 600.0
 TUNNEL_WAIT_SECONDS = 180.0
 VRAM_RESERVE_GIB = 1.5
 MAC_MEMORY_FRACTION = 0.62
+CPU_AVAILABLE_FRACTION = 0.6  # a CPU-only machine offers min(60% of free RAM, 50% of total RAM)
+CPU_TOTAL_FRACTION = 0.5
 MAX_GOSSIP_RECORDS = 500
 STUB_GIB = 100.0
 
@@ -69,7 +71,7 @@ class NodeError(RuntimeError):
 
 @dataclass(frozen=True)
 class Hardware:
-    backend: str  # "mlx" | "nf4" | "stub"
+    backend: str  # "mlx" | "nf4" | "cpu" | "stub"
     gib: float    # memory this node offers for its layers
     name: str
 
@@ -102,9 +104,46 @@ def _nvidia_free_mib() -> tuple[float, str] | None:
     return best
 
 
+def _memory_bytes(system: str | None = None) -> tuple[int, int] | None:
+    """(total, available) RAM in bytes, or None when this OS will not say. Standard library only."""
+    system = system or platform.system()
+    try:
+        if system == "Windows":
+            import ctypes
+
+            class Status(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong),
+                            ("avail", ctypes.c_ulonglong), ("tpage", ctypes.c_ulonglong),
+                            ("apage", ctypes.c_ulonglong), ("tvirt", ctypes.c_ulonglong),
+                            ("avirt", ctypes.c_ulonglong), ("ext", ctypes.c_ulonglong)]
+            status = Status()
+            status.length = ctypes.sizeof(Status)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return None
+            return int(status.total), int(status.avail)
+        if system == "Linux":
+            fields = {}
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    key, _, rest = line.partition(":")
+                    fields[key] = int(rest.split()[0]) * 1024
+            return fields["MemTotal"], fields.get("MemAvailable", fields.get("MemFree", 0))
+        if system == "Darwin":
+            total = _sysctl_memsize()
+            return total, total // 2  # Intel Macs: no cheap free-memory figure; assume half
+    except (OSError, ValueError, KeyError, AttributeError, subprocess.SubprocessError):
+        return None
+    return None
+
+
+def cpu_gib(total: float, available: float) -> float:
+    """What a CPU-only machine offers: a conservative share, so the OS and the user's own work keep room."""
+    return round(max(0.0, min(available * CPU_AVAILABLE_FRACTION, total * CPU_TOTAL_FRACTION)) / 2**30, 2)
+
+
 def detect_hardware(system: str | None = None, machine: str | None = None, memsize=_sysctl_memsize,
-                    nvidia=_nvidia_free_mib) -> Hardware:
-    """Apple silicon -> mlx, NVIDIA -> nf4; anything else is refused (the network is GPU only)."""
+                    nvidia=_nvidia_free_mib, meminfo=_memory_bytes) -> Hardware:
+    """Apple silicon -> mlx, NVIDIA -> nf4, anything else -> cpu (a share of RAM, bfloat16 on the CPU)."""
     system = system or platform.system()
     machine = (machine or platform.machine()).lower()
     if system == "Darwin" and machine in ("arm64", "aarch64"):
@@ -115,8 +154,11 @@ def detect_hardware(system: str | None = None, machine: str | None = None, memsi
         free_mib, name = found
         gib = max(0.0, free_mib / 1024 - VRAM_RESERVE_GIB)
         return Hardware("nf4", round(gib, 2), name or "NVIDIA GPU")
-    raise NodeError("this machine has no supported GPU. The layer network serves on Apple silicon or NVIDIA "
-                    "(nvidia-smi must work); CPU-only machines cannot join.")
+    mem = meminfo(system or platform.system())
+    if not mem:
+        raise NodeError("could not read how much memory this machine has, so it cannot size a CPU window. "
+                        "The layer network serves on Apple silicon, NVIDIA, or a CPU with enough RAM.")
+    return Hardware("cpu", cpu_gib(*mem), f"CPU ({os.cpu_count() or '?'} cores)")
 
 
 def fetch_manifest(seed: str) -> Manifest:
@@ -502,7 +544,7 @@ class Node:
         # bfloat16 and the hidden state between peers is float32. An explicit COMMONNET_DTYPE wins, then the
         # manifest's per-backend dtype. COMMONNET_MLX_CACHE_MB is left to the environment untouched.
         dtype = (self.manifest.model.get("dtype") or {}).get(self.hw.backend)
-        if self.hw.backend == "mlx":
+        if self.hw.backend in ("mlx", "cpu"):
             dtype = dtype or "bfloat16"
         if dtype and not os.environ.get("COMMONNET_DTYPE"):
             os.environ["COMMONNET_DTYPE"] = dtype
@@ -560,7 +602,7 @@ class Node:
     def _default_api_backend(self, network):
         import torch
         from commonnet.serve import NetworkBackend
-        fmt = "mlx4" if self.hw.backend == "mlx" else "fp16"  # mlx4 needs Apple silicon; the fp16 path is untested on NVIDIA
+        fmt = "mlx4" if self.hw.backend == "mlx" else "fp16"  # mlx4 needs Apple silicon; the fp16 client path runs on CPU for nf4 and cpu peers
         return NetworkBackend(network, os.environ.get("COMMONNET_LOCAL_CHECKPOINT"), fmt=fmt, hidden_dtype=torch.float32)
 
     def _start_api(self) -> None:
@@ -745,7 +787,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--network", metavar="URL|FILE", help=f"a seed peer's URL, or a manifest file (or set {NETWORK_ENV})")
     p.add_argument("--seed", action="append", default=[], metavar="URL", help="another peer to learn from (repeatable)")
     p.add_argument("--port", type=int, default=0, help="loopback port for the block server (default: any free port)")
-    p.add_argument("--backend", choices=["mlx", "nf4"], help="override the detected backend")
+    p.add_argument("--backend", choices=["mlx", "nf4", "cpu"], help="override the detected backend")
     p.add_argument("--stage-gib", type=float, help="memory to offer, in GiB (default: detected)")
     p.add_argument("--identity-dir", type=Path, help="where this peer's key lives (default: ~/.common-network/net/<network>)")
     p.add_argument("--stub", action="store_true", help="serve an identity block with no weights (tests)")
