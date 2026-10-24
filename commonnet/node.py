@@ -631,8 +631,19 @@ class Node:
     def _default_api_backend(self, network):
         import torch
         from commonnet.serve import NetworkBackend
-        fmt = "mlx4" if self.hw.backend == "mlx" else "fp16"  # mlx4 needs Apple silicon; the fp16 client path runs on CPU for nf4 and cpu peers
-        return NetworkBackend(network, os.environ.get("COMMONNET_LOCAL_CHECKPOINT"), fmt=fmt, hidden_dtype=torch.float32)
+        checkpoint = os.environ.get("COMMONNET_LOCAL_CHECKPOINT")
+        if self.hw.backend == "mlx":
+            fmt = "mlx4"  # the manifest's client_repo is the 4-bit MLX one
+        else:
+            # mlx4 needs Apple silicon, and the 4-bit client repo cannot be read as plain floats (its embedding is
+            # packed 512 wide, not 4096). Other peers take the embedding, norm and head from their own checkpoint
+            # repo, in fp16 on the CPU.
+            fmt = "fp16"
+            repo = self.manifest.repo(self.hw.backend)
+            if checkpoint is None and repo:
+                from commonnet import hub
+                checkpoint = hub.Hub(repo).fetch(client=True)
+        return NetworkBackend(network, checkpoint, fmt=fmt, hidden_dtype=torch.float32)
 
     def _start_api(self) -> None:
         from commonnet import serve
