@@ -6,6 +6,7 @@ transport) now happens inside the layer network, with no central server. What is
   GET /health      liveness, for the host
   GET /manifest    the default network's manifest
   GET /seeds       peers that are normally up (same list `common join` fetches from the repository)
+  POST /announce, GET /directory, POST /check   a tiny rendezvous so `common join` needs no typed address (directory.py)
   GET /            a short page saying where things went
   anything else    410 Gone with a plain sentence, so an old node or app version learns why it stopped working
 """
@@ -18,11 +19,14 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from . import directory
+
 NETWORKS = Path(os.environ.get("COMMON_NETWORKS_DIR", Path(__file__).resolve().parent.parent / "networks"))
 MOVED = ("The Common gateway has been retired. The network now runs peer to peer: install or update the "
          "`common` command and run `common join`. See https://github.com/TheCommonAI/common-network")
 
 app = FastAPI(title="Common gateway (retired)", docs_url=None, redoc_url=None, openapi_url=None)
+app.include_router(directory.router)
 
 
 def _load(name: str) -> dict:
