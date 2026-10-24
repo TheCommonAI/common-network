@@ -30,6 +30,7 @@ def load_text_config(checkpoint_dir: str):
         from transformers import Qwen3_5TextConfig
         cfg = Qwen3_5TextConfig(**{k: v for k, v in raw["text_config"].items() if k != "model_type"})
         cfg.quantization = raw.get("quantization")
+        cfg.hadamard_modules = raw.get("modules")  # the packed projections (path, block); marks a Hadamard pack
         return cfg
     if mt.startswith("qwen3_5"):
         cfg = AutoConfig.from_pretrained(checkpoint_dir)

@@ -134,12 +134,24 @@ class BlockRange:
         for local in range(self.num_local):
             glob = self.start + local
             factory = partial(layer_cls, config, layer_idx=glob)
-            with torch.device("meta"):
-                keys = list(factory().state_dict().keys())
-            prefix = f"{reader.prefix}layers.{glob}."
-            tensors = reader.load([prefix + k for k in keys], device=self.device, dtype=self.dtype)
-            state = {k[len(prefix):]: v for k, v in tensors.items()}
-            layer = build_module(factory, state)
+            if getattr(config, "hadamard_modules", None):
+                # Bonsai 2 style Hadamard pack: 2-bit projections dequantised to ordinary weights (hadamard_torch.py)
+                from commonnet.backends.hadamard_torch import load_pack_layer
+                dev, dt = self.device, self.dtype
+
+                def make_linear(w, n_in, n_out):
+                    lin = torch.nn.Linear(n_in, n_out, bias=False, device="meta")
+                    lin.weight = torch.nn.Parameter(w.to(device=dev, dtype=dt), requires_grad=False)
+                    return lin
+
+                layer = load_pack_layer(reader, glob, factory, config.hadamard_modules, self.device, self.dtype, make_linear)
+            else:
+                with torch.device("meta"):
+                    keys = list(factory().state_dict().keys())
+                prefix = f"{reader.prefix}layers.{glob}."
+                tensors = reader.load([prefix + k for k in keys], device=self.device, dtype=self.dtype)
+                state = {k[len(prefix):]: v for k, v in tensors.items()}
+                layer = build_module(factory, state)
             # The attention code indexes the session cache by layer_idx, so the
             # local index is set here. The global index was used above only to
             # pick the right layer type.
