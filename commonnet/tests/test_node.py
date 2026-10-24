@@ -158,6 +158,50 @@ class Rebalance(NodeCase):
         self.assertEqual(movers[0].server.port, {c: 18943, survivor_twin: survivor_twin.port}[movers[0]])
 
 
+class ApiClientPart(NodeCase):
+    """Which checkpoint and format the chat API's embedding/head part is loaded from."""
+
+    def _api_args(self, backend, environ=None):
+        manifest = Manifest.from_dict({**MANIFEST, "model": {**MANIFEST["model"],
+                                       "repos": {"mlx": "org/mlx-4bit", "cpu": "org/float-repo"},
+                                       "client_repo": "org/mlx-4bit"}})
+        identity = Identity.load_or_create(Path(self.tmp.name) / "ida.key")
+        n = node.Node(manifest, [], identity, node.Hardware(backend, 30.0, "x"), port=18972, stub=True, tunnel=False,
+                      log=lambda *_: None, resign_s=5, gossip_s=5)
+        fetched, built = [], {}
+
+        class FakeHub:
+            def __init__(self, repo): self.repo = repo
+            def fetch(self, layers=None, client=False):
+                fetched.append((self.repo, client))
+                return "/client-ckpt"
+
+        def fake_backend(network, checkpoint, fmt=None, hidden_dtype=None):
+            built.update(checkpoint=checkpoint, fmt=fmt)
+            return object()
+
+        env = {"COMMONNET_LOCAL_CHECKPOINT": ""} if environ is None else environ
+        with mock.patch.dict(os.environ, env), mock.patch("commonnet.hub.Hub", FakeHub), \
+                mock.patch("commonnet.serve.NetworkBackend", fake_backend):
+            os.environ.pop("COMMONNET_LOCAL_CHECKPOINT", None) if environ is None else None
+            n._default_api_backend(object())
+        return fetched, built
+
+    def test_a_cpu_peer_takes_its_client_part_from_the_float_repo_not_the_4bit_one(self):
+        fetched, built = self._api_args("cpu")
+        self.assertEqual(fetched, [("org/float-repo", True)])  # the 4-bit client repo's embedding is packed (512 wide) and cannot load as floats
+        self.assertEqual(built, {"checkpoint": "/client-ckpt", "fmt": "fp16"})
+
+    def test_a_mac_keeps_the_manifest_client_repo_in_mlx4(self):
+        fetched, built = self._api_args("mlx")
+        self.assertEqual(fetched, [])  # NetworkBackend fetches the manifest's client_repo itself
+        self.assertEqual(built, {"checkpoint": None, "fmt": "mlx4"})
+
+    def test_a_local_checkpoint_override_wins(self):
+        fetched, built = self._api_args("cpu", {"COMMONNET_LOCAL_CHECKPOINT": "/mine"})
+        self.assertEqual((fetched, built["checkpoint"]), ([], "/mine"))
+
+
 class BlockStart(NodeCase):
     """What the node hands the MLX block: bfloat16 compute, with the cache limit left to the environment."""
 
