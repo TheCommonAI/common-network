@@ -198,12 +198,21 @@ class Hardware(unittest.TestCase):
         hw = node.detect_hardware("Windows", "AMD64", nvidia=lambda: (7168.0, "RTX 4060"))
         self.assertEqual((hw.backend, hw.gib, hw.name), ("nf4", 7.0 - node.VRAM_RESERVE_GIB, "RTX 4060"))
 
-    def test_machines_without_a_gpu_are_refused_with_a_reason(self):
+    def test_machines_without_a_gpu_offer_a_conservative_share_of_ram_on_cpu(self):
+        gib = 2**30
         for system, machine in (("Linux", "x86_64"), ("Windows", "AMD64"), ("Darwin", "x86_64")):
             with self.subTest(system=system, machine=machine):
-                with self.assertRaises(node.NodeError) as caught:
-                    node.detect_hardware(system, machine, nvidia=lambda: None)
-                self.assertIn("GPU", str(caught.exception))
+                hw = node.detect_hardware(system, machine, nvidia=lambda: None, meminfo=lambda s: (31 * gib, 20 * gib))
+                self.assertEqual((hw.backend, hw.gib), ("cpu", 12.0))  # min(20*0.6, 31*0.5)
+        low = node.detect_hardware("Windows", "AMD64", nvidia=lambda: None, meminfo=lambda s: (31 * gib, 4 * gib))
+        self.assertEqual(low.gib, 2.4)  # busy machine: the free-RAM share wins
+        small = node.detect_hardware("Linux", "x86_64", nvidia=lambda: None, meminfo=lambda s: (4 * gib, 4 * gib))
+        self.assertEqual(small.gib, 2.0)  # too little for a stage; choose_window then says so
+
+    def test_unreadable_memory_is_refused_with_a_reason(self):
+        with self.assertRaises(node.NodeError) as caught:
+            node.detect_hardware("Linux", "x86_64", nvidia=lambda: None, meminfo=lambda s: None)
+        self.assertIn("memory", str(caught.exception))
 
 
 class Network(NodeCase):

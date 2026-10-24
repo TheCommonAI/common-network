@@ -16,13 +16,17 @@ mid-generation. The old v0.1 whole-model-per-node + gateway-composition system i
 ```json
 {"id": "common-8b-v1", "version": 1,
  "model": {"name": "Qwen3-8B", "num_layers": 36,
-           "repos": {"mlx": "mlx-community/Qwen3-8B-4bit", "nf4": "unsloth/Qwen3-8B-bnb-4bit"},
+           "repos": {"mlx": "mlx-community/Qwen3-8B-4bit", "nf4": "unsloth/Qwen3-8B-bnb-4bit",
+                     "cpu": "Qwen/Qwen3-8B"},
+           "dtype": {"cpu": "bfloat16"},
            "client_repo": "mlx-community/Qwen3-8B-4bit"},
  "boundaries": [0, 9, 18, 27, 36],
- "gib_per_layer": {"mlx": 0.125, "nf4": 0.17}, "fixed_gib": 0.3,
+ "gib_per_layer": {"mlx": 0.125, "nf4": 0.17, "cpu": 0.4}, "fixed_gib": 0.3,
  "min_replicas": 2, "seeds": ["https://example.trycloudflare.com"]}
 ```
 `Manifest.load(path_or_dict)`, `.stages()` -> [(a,b)...], `.window_gib(a,b,backend)`, `.windows_fitting(gib, backend)`.
+A backend a peer does not know (for example `cpu` on an older peer) is simply never looked up by it: peers read only
+their own backend's `repos`/`dtype`/`gib_per_layer` entries, so adding one is backward compatible.
 Any peer serves its manifest at `GET /manifest`. A manifest's `id` is the network id; records for another id are dropped.
 
 ## Peer record (`commonnet/mesh/records.py`)
@@ -62,7 +66,10 @@ plus one seed; drops a peer from its table's *candidates* after 3 failed exchang
 ## Node (`commonnet/node.py`, what `common join` runs)
 1. Load/create identity (`~/.common-network/net/<network>/identity.key`).
 2. Fetch manifest from a seed; gossip once to learn peers; detect hardware: macOS arm64 -> `mlx`, NVIDIA CUDA -> `nf4`,
-   else refuse ("GPU only"); `gib` = usable memory (Mac: 0.62*RAM; CUDA: free VRAM - 1.5).
+   else `cpu` (`commonnet/backends/cpu_block.py`: unquantised `Qwen/Qwen3-8B` in bfloat16 on torch CPU, float32 hidden
+   state on the wire like every backend); `gib` = usable memory (Mac: 0.62*RAM; CUDA: free VRAM - 1.5; CPU:
+   min(0.6 * available RAM, 0.5 * total RAM)). Too little RAM for one stage -> `NoWindow` error naming the need.
+   `best_route` adds a small penalty to `cpu` peers, so a GPU peer wins a hop with the same hop count.
 3. `choose_window`; publish record `loading`; download only that window (`hub.Hub(repo).fetch(layers=window)`);
    start the block server (+ Cloudflare quick tunnel via `net/tunnel.py`) with its own random token; publish `up`.
 4. Loop: re-sign record every 15 s with the *current* tunnel URL (tunnels change URL; the mesh learns it). Every 60 s run

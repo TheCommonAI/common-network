@@ -2,7 +2,7 @@
 
 Environment:
   COMMONNET_CHECKPOINT  checkpoint directory (required)
-  COMMONNET_BACKEND     torch (default) | mlx | nf4
+  COMMONNET_BACKEND     torch (default) | mlx | nf4 | cpu
   COMMONNET_DEVICE      torch backend device (default cpu)
   COMMONNET_DTYPE       torch backend dtype: float32 (default) | float16 | bfloat16
                         mlx backend compute dtype: float16 (default) | bfloat16
@@ -16,7 +16,7 @@ import torch
 from commonnet.net import protocol
 from commonnet.net.transport import from_wire, to_wire
 
-BACKENDS = ("torch", "mlx", "nf4", "synth")
+BACKENDS = ("torch", "mlx", "nf4", "cpu", "synth")
 
 
 class ServedBlock:
@@ -62,6 +62,11 @@ def build_block(start: int, end: int, backend: str | None = None, checkpoint: st
         dtype = getattr(torch, env.get("COMMONNET_DTYPE", "float32"))
         inner = BlockRange(checkpoint_dir=checkpoint, start=start, end=end, device=device, dtype=dtype)
         return ServedBlock(inner, start, end, device)
+    if backend == "cpu":
+        from commonnet.backends.cpu_block import CpuBlockRange
+        dtype = getattr(torch, env.get("COMMONNET_DTYPE") or "bfloat16")
+        inner = CpuBlockRange(checkpoint_dir=checkpoint, start=start, end=end, dtype=dtype)
+        return ServedBlock(inner, start, end, "cpu")
     if backend == "mlx":
         from commonnet.backends.mlx_block import MlxBlockRange, OnWorkerThread
         # MLX streams are per-thread and the server runs each request on a new thread.

@@ -493,7 +493,7 @@ def gateway_json(method: str, url: str, body: dict | None = None, headers: dict 
             if e.code == 410:
                 die("the old Common gateway has been retired, so `--legacy` and --model no longer work. "
                     "Run `common join` (no flags) to join the new decentralised network on a Mac with "
-                    "Apple silicon or a PC with an NVIDIA GPU.")
+                    "Apple silicon, a PC with an NVIDIA GPU, or any PC (it serves on its CPU).")
             raise  # a real answer -- and an HTTPError is a URLError, so this comes first
         except (urllib.error.URLError, socket.timeout, OSError):
             if time.monotonic() >= deadline:
@@ -1627,7 +1627,7 @@ def _load_layers():
 
 
 def layer_network_supported() -> bool:
-    """Can this machine serve the layer network (Apple silicon or an NVIDIA GPU), with layers.py available?"""
+    """Can this machine serve the layer network (Apple silicon, an NVIDIA GPU, or a CPU), with layers.py available?"""
     layers = _load_layers()
     if layers is None:
         return False
@@ -1644,7 +1644,7 @@ def choose_mode(args: argparse.Namespace, supported=None) -> str:
     The layer network is the default for a plain `join`. The whole-model gateway node is kept as
     `--legacy`, and anything that only means something to it (--model, --lan, --list-catalogue)
     implies it, so existing scripts and installed services (which always carry --model) do not change.
-    A machine the layer network cannot use (no Apple silicon / NVIDIA) stays on the legacy path.
+    A machine the layer network cannot use (an OS other than macOS, Windows or Linux, or no layers.py) stays on the legacy path.
     """
     if args.network is not None:
         return "network"
@@ -1775,9 +1775,9 @@ def main() -> None:
         run_network_member(args.network or None, [] if args.api is None else ["--api", str(args.api)])
         return
     if fell_back:
-        die("this machine cannot join the Common network: it needs Apple silicon or an NVIDIA GPU "
-            "(on Windows or Linux, `nvidia-smi` must work). The old whole-model gateway is retired, so there is "
-            "no CPU-only mode. If this PC has an NVIDIA GPU, install its driver from nvidia.com/drivers and try again.")
+        die("this machine cannot join the Common network: it needs macOS, Windows or Linux with Python 3.10+ "
+            "(Apple silicon and NVIDIA GPUs are fastest; any other machine serves on its CPU and needs "
+            "about 5 GiB of free RAM). If you are on one of those, check your connection and try again. The old whole-model gateway is retired, so there is no other mode.")
 
     gateway = args.gateway.rstrip("/")
 
