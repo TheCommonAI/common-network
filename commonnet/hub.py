@@ -53,12 +53,18 @@ def detect_layout(names) -> str:
     return next((p for p in LAYOUTS if any(n.startswith(p + "layers.") for n in names)), "model.")
 
 
-def needed_prefixes(layers=None, client=False, layout="model.") -> list[str]:
+def needed_prefixes(layers=None, client=False, layout="model.", embed=False, head=False, tied=False) -> list[str]:
+    """embed / head: just the embedding (the first stage serving token ids) or just the final norm + lm_head (the last
+    stage). A tied head is the embedding itself, so head with tied=True also needs embed_tokens."""
     out = []
     if layers:
         out += [f"{layout}layers.{i}." for i in range(layers[0], layers[1])]
     if client:
         out += [layout + "embed_tokens.", layout + "norm.", "lm_head.", "language_model.lm_head."]
+    if embed or (head and tied):
+        out.append(layout + "embed_tokens.")
+    if head:
+        out += [layout + "norm.", "lm_head.", "language_model.lm_head."]
     return out
 
 
@@ -314,7 +320,29 @@ class Hub:
         raise HubError(f"{name}: incomplete download of merged range ({written} bytes written)")
 
     # ---- top level ---------------------------------------------------
-    def fetch(self, layers=None, client=False, ranged=False):
+    def fetch_metadata(self):
+        """Config, tokenizer and tensor names without downloading endpoint weights.
+
+        The index allows CheckpointReader to inspect architecture/tied-head layout.
+        Its shard paths intentionally do not exist: a legacy route must call
+        fetch(client=True) before it loads local end tables. Keep a separate cache
+        directory so this index cannot replace an actual compact checkpoint.
+        """
+        base = self.dir
+        try:
+            self.dir = os.path.join(base, "metadata-client")
+            self.fetch_config()
+            index = self.fetch_small(INDEX_NAME, required=False)
+            if index is None:
+                _, header = self.read_header(SINGLE_NAME)
+                weight_map = {n: SINGLE_NAME for n in header if n != "__metadata__"}
+                _atomic_write(os.path.join(self.dir, INDEX_NAME),
+                              json.dumps({"metadata": {}, "weight_map": weight_map}).encode())
+            return self.dir
+        finally:
+            self.dir = base
+
+    def fetch(self, layers=None, client=False, ranged=False, embed=False, head=False):
         """Download what is needed; returns the checkpoint directory. `ranged` forces the range-download route
         (only the needed tensors of each shard) for a sharded repo of plain layers, for example a float16 repo
         that an NVIDIA peer quantises on load."""
@@ -325,13 +353,15 @@ class Hub:
             with open(idx_path) as f:
                 wm = json.load(f)["weight_map"]
             layout = detect_layout(wm)
-            prefixes = needed_prefixes(layers, client, layout)
+            tied = not any(n.startswith(("lm_head.", "language_model.lm_head.")) for n in wm)
+            prefixes = needed_prefixes(layers, client, layout, embed, head, tied)
             shards = sorted({wm[n] for n in select_names(wm, prefixes)})
             if ranged or layout != "model." or len(set(wm.values())) == 1:
                 # qwen3_5 repos have ~5 GB shards that also hold vision/other layers, and a one-file pack (the
                 # Bonsai MLX packs) is a single shard holding every layer: range-download only the needed
                 # tensors of each shard into a compact copy with a filtered index.
-                sel = ("L%d-%d" % tuple(layers) if layers else "") + ("+client" if client else "")
+                sel = ("L%d-%d" % tuple(layers) if layers else "") + ("+client" if client else "") + (
+                    "+embed" if embed else "") + ("+head" if head else "")
                 self.dir = os.path.join(base, "compact-" + sel.strip("+"))
                 self.fetch_config()
                 for i, sname in enumerate(shards):
@@ -346,10 +376,13 @@ class Hub:
                 self.fetch_file(s)
             return self.dir
         # single file: a compact checkpoint per selection, so ranges never collide
-        sel = ("L%d-%d" % tuple(layers) if layers else "") + ("+client" if client else "")
+        sel = ("L%d-%d" % tuple(layers) if layers else "") + ("+client" if client else "") + (
+                    "+embed" if embed else "") + ("+head" if head else "")
         self.dir = os.path.join(base, "compact-" + sel.strip("+"))
         self.fetch_config()
-        self.fetch_compact(SINGLE_NAME, lambda names: needed_prefixes(layers, client, detect_layout(names)))
+        self.fetch_compact(SINGLE_NAME, lambda names: needed_prefixes(
+            layers, client, detect_layout(names), embed, head,
+            not any(n.startswith(("lm_head.", "language_model.lm_head.")) for n in names)))
         return self.dir
 
 

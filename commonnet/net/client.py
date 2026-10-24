@@ -88,6 +88,16 @@ def _server_ms(header) -> float | None:
 def _connect_resolved(conn, tls: bool) -> None:
     """Connect to the resolved address, keeping the hostname for the Host header and SNI."""
     address = dns.resolve(conn.host, conn.port)
+    if getattr(conn, "public_only", False):
+        # Resolve to a numeric address once, then connect to that exact address. Validating
+        # a hostname and resolving it again would leave a DNS-rebinding window.
+        import ipaddress
+        addresses = socket.getaddrinfo(address, conn.port, type=socket.SOCK_STREAM)
+        choices = [a[4][0] for a in addresses if ipaddress.ip_address(a[4][0]).is_global
+                   and not ipaddress.ip_address(a[4][0]).is_multicast]
+        if len(choices) != len(addresses) or not choices:
+            raise OSError("chain destination is not a public address")
+        address = choices[0]
     sock = socket.create_connection((address, conn.port), conn.timeout, conn.source_address)
     if tls:
         try:
@@ -135,7 +145,7 @@ class BlockClient:
                  backoff: float = RETRY_BACKOFF_SECONDS,
                  max_backoff: float = RETRY_MAX_BACKOFF_SECONDS,
                  max_request_bytes: int = MAX_REQUEST_BYTES, sleep=time.sleep,
-                 pin=None, ssl_context=None):
+                 pin=None, ssl_context=None, public_only: bool = False):
         """pin (default None) pins the certificate of https endpoints by sha256 fingerprint
         (commonnet/net/secure.py): a fingerprint string for every https endpoint, or a dict
         mapping "host:port" to one, which wins over the string form. An endpoint with a pin is
@@ -152,6 +162,7 @@ class BlockClient:
         self._sleep = sleep
         self._pin = pin
         self._ssl_context = ssl_context
+        self._public_only = public_only
         self._pinned: dict[str, object] = {}
         self._idle: dict[tuple, http.client.HTTPConnection] = {}
         self._lock = threading.Lock()
@@ -160,6 +171,21 @@ class BlockClient:
     def health(self, endpoint: str, timeout: float = CONTROL_TIMEOUT_SECONDS) -> tuple:
         """Returns (layers, device)."""
         return protocol.decode_health(self._call("GET", endpoint, "/health", None, timeout))
+
+    def health_caps(self, endpoint: str, timeout: float = CONTROL_TIMEOUT_SECONDS) -> tuple:
+        """The capability names the server advertises (empty from an old server, which ignores the query)."""
+        return protocol.decode_health_caps(self._call("GET", endpoint, "/health?caps=1", None, timeout))
+
+    def health_info(self, endpoint: str, timeout: float = CONTROL_TIMEOUT_SECONDS) -> tuple:
+        """Validated (layers, device, capabilities) from one authenticated health request."""
+        reply = self._call("GET", endpoint, "/health?caps=1", None, timeout)
+        layers, device = protocol.decode_health(reply)
+        return layers, device, protocol.decode_health_caps(reply)
+
+    def chain(self, endpoint: str, body: dict, timeout: float = FORWARD_TIMEOUT_SECONDS) -> dict:
+        """One route traversal; only token IDs and small verification metadata return."""
+        from commonnet.net.chain import check_reply
+        return check_reply(self._call("POST", endpoint, "/chain", body, timeout))
 
     def open(self, endpoint: str, session_id: str, timeout: float = CONTROL_TIMEOUT_SECONDS) -> None:
         body = protocol.encode_session_request(session_id)
@@ -174,8 +200,18 @@ class BlockClient:
         body = protocol.encode_truncate_request(session_id, length)
         protocol.decode_ok(self._call("POST", endpoint, "/truncate", body, timeout))
 
-    def forward(self, endpoint: str, session_id: str, hidden: Tensor, start_pos: int,
-                timeout: float = FORWARD_TIMEOUT_SECONDS, truncate_to: int | None = None) -> Tensor:
+    def forward(self, endpoint: str, session_id: str, hidden: Tensor | None, start_pos: int,
+                timeout: float = FORWARD_TIMEOUT_SECONDS, truncate_to: int | None = None, *,
+                ids=None, output: str | None = None, which: str | None = None, sampling=None):
+        """Returns a Tensor, or with output="ids" a list of token ids. hidden=None sends `ids` instead."""
+        if ids is not None or output is not None:
+            body = protocol.encode_forward_request_ex(session_id, hidden, start_pos, truncate_to, ids=ids,
+                                                      output=output, which=which, sampling=sampling)
+            reply = self._call("POST", endpoint, "/forward", body, timeout)
+            if output is not None:
+                return protocol.decode_ids_reply(reply)
+            out = protocol.decode_forward_reply(reply)
+            return out
         if not isinstance(hidden, Tensor):
             raise TypeError("forward takes a protocol.Tensor")
         body = protocol.encode_forward_request(session_id, hidden, start_pos, truncate_to)
@@ -209,9 +245,12 @@ class BlockClient:
             conn = self._idle.pop(key, None)
         if conn is None:
             if key[0] == "https":
-                return _HTTPSConnection(key[1], key[2], timeout=timeout,
-                                        context=self._context_for(key[1], key[2])), False
-            return _HTTPConnection(key[1], key[2], timeout=timeout), False
+                conn = _HTTPSConnection(key[1], key[2], timeout=timeout,
+                                        context=self._context_for(key[1], key[2]))
+            else:
+                conn = _HTTPConnection(key[1], key[2], timeout=timeout)
+            conn.public_only = self._public_only
+            return conn, False
         conn.timeout = timeout
         try:
             if conn.sock is not None:

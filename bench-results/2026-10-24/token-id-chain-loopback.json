@@ -1,0 +1,55 @@
+{
+  "model": "synthetic seeded causal model",
+  "hidden_width": 4096,
+  "stages": 2,
+  "wire_dtype": "float32",
+  "activation_codec": "float; measured before default int8 compression was added",
+  "measurement": "HTTP JSON payload bytes",
+  "scope": "loopback; no WAN speed inference",
+  "cases": [
+    {
+      "k": 4,
+      "new_tokens": 24,
+      "hidden_relay": {
+        "payload_bytes": 3672914,
+        "client_payload_bytes": 3672914,
+        "data_calls": 18,
+        "rounds": 8,
+        "accepted": 16,
+        "matches_plain": true
+      },
+      "token_chain": {
+        "payload_bytes": 921941,
+        "client_payload_bytes": 2378,
+        "data_calls": 18,
+        "rounds": 8,
+        "accepted": 16,
+        "matches_plain": true
+      },
+      "payload_reduction": 0.7489892221816248,
+      "client_payload_reduction": 0.999352557669469
+    },
+    {
+      "k": 8,
+      "new_tokens": 24,
+      "hidden_relay": {
+        "payload_bytes": 5070408,
+        "client_payload_bytes": 5070408,
+        "data_calls": 14,
+        "rounds": 6,
+        "accepted": 17,
+        "matches_plain": true
+      },
+      "token_chain": {
+        "payload_bytes": 1270828,
+        "client_payload_bytes": 2074,
+        "data_calls": 14,
+        "rounds": 6,
+        "accepted": 17,
+        "matches_plain": true
+      },
+      "payload_reduction": 0.7493637592872211,
+      "client_payload_reduction": 0.9995909599385296
+    }
+  ]
+}

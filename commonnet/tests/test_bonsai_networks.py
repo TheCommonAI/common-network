@@ -40,7 +40,8 @@ class Manifests(unittest.TestCase):
         self.assertEqual(m.client_repo, m.repo("mlx"))
         self.assertLess(m.window_gib(0, 36, "mlx"), 3.0)   # the whole 2-bit model fits one small Mac
         # a 9-layer window fits the 4 GiB a 4060 offers; the whole model (about 3.7 GiB NF4 + overhead) does not
-        self.assertLess(m.window_gib(0, 9, "nf4"), 1.5)
+        self.assertLess(m.window_gib(0, 9, "nf4"), 4.0)
+        self.assertAlmostEqual(m.window_gib(0, 9, "nf4") - m.window_gib(9, 18, "nf4"), m.io_gib["nf4"])
         self.assertGreater(m.window_gib(0, 36, "nf4"), 4.0)
 
     def test_bonsai_2_9b(self):
@@ -49,7 +50,8 @@ class Manifests(unittest.TestCase):
         self.assertEqual(m.repo("mlx"), "prism-ml/Ternary-Bonsai-2-9B-mlx-2bit")
         self.assertEqual(m.repo("cpu"), m.repo("mlx"))   # the same 2-bit pack, dequantised in torch (hadamard_torch.py)
         self.assertEqual(m.repo("nf4"), m.repo("mlx"))
-        self.assertLess(m.window_gib(0, 8, "nf4"), 1.5)
+        self.assertLess(m.window_gib(0, 8, "nf4"), 4.0)
+        self.assertAlmostEqual(m.window_gib(0, 8, "nf4") - m.window_gib(8, 16, "nf4"), m.io_gib["nf4"])
         self.assertIn("linear attention", m.model["no_speculation"])
         self.assertTrue(all(b % 4 == 0 for b in m.boundaries))  # stages hold whole 4-layer hybrid groups
 

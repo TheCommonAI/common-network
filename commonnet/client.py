@@ -1,12 +1,13 @@
-"""Client: embedding, final norm and head, plus a chain of block endpoints.
+"""Generation client with negotiated token-only or legacy hidden-state transport.
 
-The client holds no decoder layers. For each generated token it sends the
-hidden states through every block in route order. Each block keeps its own KV
-cache under a session id, so after the prompt only the new token is sent.
+On a capable route, the first peer embeds input IDs, peers forward activations,
+and the final peer returns output IDs. Legacy routes load local embedding/norm/
+head tables lazily. Each block holds its own KV cache under the session ID.
 """
 
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import dataclass
 from functools import partial
@@ -100,24 +101,76 @@ class Client:
         self.dtype = dtype
 
         self.arch = reader.arch
-        embed_name = reader.prefix + "embed_tokens.weight"
-        norm_name = reader.prefix + "norm.weight"
-        head_name = reader.head_name  # tied embeddings fall back to the embedding
-        tensors = reader.load(
-            [embed_name, norm_name, head_name], device=self.device, dtype=dtype
+        self._reader = reader
+        self._local_lock = threading.RLock()
+        self._local_ready = False
+        self.loaded_names = []
+        self.client_bytes = 0
+
+    def _ensure_local_weights(self) -> None:
+        # Target tables are unnecessary for an ID route. Attribute access keeps the
+        # original embed/head/norm API and loads them only for a legacy route or logits.
+        if getattr(self, "_local_ready", True):
+            return
+        with self._local_lock:
+            if not self._local_ready:
+                loader = getattr(self, "_endpoint_checkpoint_loader", None)
+                if loader is not None:
+                    # NetworkBackend starts with tokenizer/config/index only. An
+                    # old route triggers the target table download exactly here.
+                    self._reader = CheckpointReader(loader())
+                    self._endpoint_checkpoint_loader = None
+                self._load_local_weights()
+                self._local_ready = True
+
+    @property
+    def embed(self):
+        self._ensure_local_weights()
+        return self._embed
+
+    @embed.setter
+    def embed(self, value):
+        self._embed = value
+
+    @property
+    def norm(self):
+        self._ensure_local_weights()
+        return self._norm
+
+    @norm.setter
+    def norm(self, value):
+        self._norm = value
+
+    @property
+    def head(self):
+        self._ensure_local_weights()
+        return self._head
+
+    @head.setter
+    def head(self, value):
+        self._head = value
+
+    def _load_local_weights(self) -> None:
+        embed_name = self._reader.prefix + "embed_tokens.weight"
+        norm_name = self._reader.prefix + "norm.weight"
+        head_name = self._reader.head_name  # tied embeddings fall back to the embedding
+        tensors = self._reader.load(
+            [embed_name, norm_name, head_name], device=self.device, dtype=self.dtype
         )
         vocab, hidden = self.config.vocab_size, self.config.hidden_size
         self.embed = build_module(
             partial(nn.Embedding, vocab, hidden), {"weight": tensors[embed_name]}
         )
         self.norm = build_module(
-            partial(make_norm, reader.arch, hidden, self.config.rms_norm_eps, reader.prefix),
+            partial(make_norm, self._reader.arch, hidden, self.config.rms_norm_eps, self._reader.prefix),
             {"weight": tensors[norm_name]},
         )
         self.head = build_module(
             partial(nn.Linear, hidden, vocab, bias=False), {"weight": tensors[head_name]}
         )
-        self.loaded_names = list(reader.read_names)
+        self.loaded_names = list(self._reader.read_names)
+
+        self.client_bytes = sum(t.numel() * t.element_size() for t in tensors.values())
 
     @staticmethod
     def check_route(endpoints: Sequence[BlockEndpoint], num_layers: int) -> None:
@@ -133,6 +186,45 @@ class Client:
     def _run_blocks(self, endpoints, session_id: str, hidden: torch.Tensor, start_pos: int) -> torch.Tensor:
         for ep in endpoints:
             hidden = self.transport.forward(ep, session_id, hidden, start_pos)
+        return hidden
+
+    def _use_ids(self, endpoints) -> bool:
+        """True when the route can run on token ids: the first peer embeds (ids_in) and the last returns ids
+        (head_out). Only a transport that can ask (HttpTransport) ever says yes; anything else is today's path."""
+        probe = getattr(self.transport, "ids_route", None)
+        if probe is None or getattr(self, "ids_disabled", False):
+            return False
+        try:
+            return bool(probe(list(endpoints)))
+        except Exception:
+            return False
+
+    def _use_chain(self, endpoints) -> bool:
+        """Negotiate before opening a session; failures here choose the legacy route."""
+        probe = getattr(self.transport, "chain_route", None)
+        if probe is None or getattr(self, "ids_disabled", False):
+            return False
+        try:
+            return bool(probe(list(endpoints)))
+        except Exception:
+            return False
+
+    def _step_ids(self, endpoints, session_id: str, token_ids, start_pos: int, which: str = "last",
+                  sampling=None, *, chain: bool = False) -> list[int]:
+        """One trip through the route on token ids: ids go to the first stage, hidden states are relayed between
+        the middle stages, the last stage returns token ids (the last position, or every one for which="all")."""
+        if chain:
+            # Once a session uses /chain, errors propagate. Switching to /forward
+            # mid-session could replay a partly executed step with different caches.
+            reply = self.transport.chain_step(endpoints, session_id, list(token_ids), start_pos,
+                                              which=which, sampling=sampling)
+            return reply["ids"]
+        hidden, n = None, len(endpoints)
+        for i, ep in enumerate(endpoints):
+            last = i == n - 1
+            hidden = self.transport.forward(ep, session_id, hidden, start_pos,
+                                            ids=list(token_ids) if i == 0 else None,
+                                            output="ids" if last else None, which=which, sampling=sampling)
         return hidden
 
     @torch.inference_mode()
@@ -186,6 +278,24 @@ class Client:
         session_id = uuid.uuid4().hex
         produced = 0
         try:
+            use_chain = self._use_chain(endpoints)
+            if use_chain or self._use_ids(endpoints):
+                sampling = None
+                if temperature > 0:
+                    sampling = {"temperature": float(temperature), "top_p": float(top_p),
+                                "seed": int(seed) if seed is not None else int(torch.randint(0, 2 ** 31, (1,)))}
+                tokens, pos = list(prompt_ids), 0
+                while True:
+                    next_id = int(self._step_ids(endpoints, session_id, tokens, pos, "last", sampling,
+                                                        chain=use_chain)[-1])
+                    pos += len(tokens)
+                    if next_id in stops:
+                        return
+                    produced += 1
+                    yield next_id
+                    if produced == max_new_tokens:
+                        return
+                    tokens = [next_id]
             ids = torch.tensor([list(prompt_ids)], dtype=torch.long, device=self.device)
             pos = 0
             while True:

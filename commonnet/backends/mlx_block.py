@@ -306,5 +306,9 @@ class OnWorkerThread:
     def memory_bytes(self):
         return self._run("memory_bytes")
 
+    def run(self, fn, *args):
+        """Run fn(*args) on the worker thread (MLX arrays and streams belong to it)."""
+        return self._pool.submit(fn, *args).result()
+
     def shutdown(self):
         self._pool.shutdown(wait=True)

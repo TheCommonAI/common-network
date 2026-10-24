@@ -44,12 +44,13 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from commonnet.net import auth, protocol
+from commonnet.net.chain import ChainUnavailable
 from commonnet.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
 
 LOOPBACK = "127.0.0.1"
 HANDLER_TIMEOUT_SECONDS = 60.0
 TLS_HANDSHAKE_TIMEOUT_SECONDS = 10.0
-POST_PATHS = frozenset(("/session", "/forward", "/close", "/truncate"))
+POST_PATHS = frozenset(("/session", "/forward", "/close", "/truncate", "/chain"))
 
 
 class UnknownSession(LookupError):
@@ -108,17 +109,25 @@ class StubBlock:
 
 
 class _Session:
-    __slots__ = ("last",)
+    __slots__ = ("last", "chain_last", "chain_lock")
 
     def __init__(self) -> None:
         self.last: tuple | None = None  # (step key, reply Tensor) of the last forward
+        self.chain_last = None
+        self.chain_lock = threading.Lock()
 
 
-def _step_key(hidden: Tensor, start_pos: int) -> tuple:
+def _step_key(hidden: Tensor | None, start_pos: int, ids=None, output=None, which="last", sampling=None) -> tuple:
+    """The retry/idempotency key of a step. It includes the mode: the same bytes asked for hidden states and for
+    token ids (or for the last vs all positions, or another sampling) are different steps."""
     digest = hashlib.sha256()
-    digest.update(repr(hidden.shape).encode("ascii"))
-    digest.update(hidden.dtype.encode("ascii"))
-    digest.update(hidden.data)
+    if hidden is not None:
+        digest.update(repr(hidden.shape).encode("ascii"))
+        digest.update(hidden.dtype.encode("ascii"))
+        digest.update(hidden.data)
+    if ids is not None:
+        digest.update(b"ids:" + repr(list(ids)).encode("ascii"))
+    digest.update(repr((output, which if output else None, sorted((sampling or {}).items()))).encode("ascii"))
     return (start_pos, digest.digest())
 
 
@@ -141,7 +150,7 @@ class BlockServer:
 
     def __init__(self, block, host: str = LOOPBACK, port: int = 0, *,
                  max_request_bytes: int = MAX_REQUEST_BYTES, token: str | None = None,
-                 extra_handlers: dict | None = None, ssl_context=None):
+                 extra_handlers: dict | None = None, ssl_context=None, allow_chain_private: bool = False):
         """token=None serves without authentication. Only tests and --stub do that;
         the command line refuses to start a real block without a token.
 
@@ -164,6 +173,10 @@ class BlockServer:
         self.device = str(block.device)
         self.max_request_bytes = max_request_bytes
         self.extra_handlers = dict(extra_handlers or {})
+        # Explicit local-test opt-in. Public peers may never route requests to LAN,
+        # loopback or cloud metadata services on the authenticated caller's behalf.
+        self.allow_chain_private = bool(allow_chain_private)
+        self._chain_clients = {}
         self._lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
         self._httpd = _Httpd((host, port), _Handler)
@@ -197,6 +210,9 @@ class BlockServer:
             self._thread.join(timeout=5)
             self._thread = None
         self._httpd.server_close()
+        for client in self._chain_clients.values():
+            client.close_connections()
+        self._chain_clients.clear()
 
     def open(self, session_id: str) -> None:
         protocol.check_session_id(session_id)
@@ -228,13 +244,26 @@ class BlockServer:
                 raise NotImplementedError("this block cannot truncate a session")
             fn(session_id, length)
             session.last = None
+            session.chain_last = None
 
-    def forward(self, session_id: str, hidden: Tensor, start_pos: int, truncate_to: int | None = None) -> Tensor:
+    @property
+    def caps(self) -> tuple:
+        extra = ("chain_v1", "chain_private_v1") if self.allow_chain_private else ("chain_v1",)
+        return tuple(getattr(self.block, "caps", ()) or ()) + extra + ("activation_int8_group_v1",)
+
+    def forward(self, session_id: str, hidden: Tensor | None, start_pos: int, truncate_to: int | None = None, *,
+                ids=None, output: str | None = None, which: str = "last", sampling=None):
+        """Returns a Tensor, or with output="ids" a list of token ids (all positions of the step for which="all",
+        else the last). hidden=None means `ids` are embedded here first (needs the ids_in capability)."""
+        if ids is not None and "ids_in" not in self.caps:
+            raise NotImplementedError("this block does not take token ids (no ids_in)")
+        if output is not None and "head_out" not in self.caps:
+            raise NotImplementedError("this block does not return token ids (no head_out)")
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
                 raise UnknownSession(f"session {session_id!r} is not open")
-            key = _step_key(hidden, start_pos) + (truncate_to,)
+            key = _step_key(hidden, start_pos, ids, output, which, sampling) + (truncate_to,)
             if session.last is not None and session.last[0] == key:
                 return session.last[1]
             if truncate_to is not None:
@@ -242,8 +271,12 @@ class BlockServer:
                 if fn is None:
                     raise NotImplementedError("this block cannot truncate a session")
                 fn(session_id, truncate_to)
+            if ids is not None:
+                hidden = self.block.embed(ids)
             out = self.block.forward(session_id, hidden, start_pos)
             _check_output(out, hidden)
+            if output is not None:
+                out = [int(t) for t in self.block.head(out, which, sampling, start_pos)]
             session.last = (key, out)
             return out
 
@@ -345,7 +378,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(401, _error("missing or wrong bearer token"))
             return
         if path == "/health":
-            self._send(200, protocol.encode_health(self._block.layers, self._block.device))
+            caps = self._block.caps if "caps=1" in self.path.partition("?")[2].split("&") else None
+            self._send(200, protocol.encode_health(self._block.layers, self._block.device, caps))
         elif path in POST_PATHS:
             self._send(405, _error(f"{path} takes POST"))
         else:
@@ -386,6 +420,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             reply = self._dispatch(path, obj)
+        except ChainUnavailable as e:
+            self._send(409 if e.lost else 502, _error(str(e)))
         except ProtocolError as e:
             self._send(400, _error(str(e)))
         except UnknownSession as e:
@@ -399,6 +435,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, reply)
 
     def _dispatch(self, path: str, obj) -> dict:
+        if path == "/chain":
+            from commonnet.net.chain import run
+            started = time.perf_counter()
+            reply = run(self._block, obj)
+            self._compute_ms = (time.perf_counter() - started) * 1000
+            return reply
         if path == "/session":
             self._block.open(protocol.decode_session_request(obj))
             return protocol.encode_ok()
@@ -409,12 +451,17 @@ class _Handler(BaseHTTPRequestHandler):
             session_id, length = protocol.decode_truncate_request(obj)
             self._block.truncate(session_id, length)
             return protocol.encode_ok()
-        session_id, start_pos, hidden, truncate_to = protocol.decode_forward_request_full(obj)
+        req = protocol.decode_forward_request_ex(obj)
         started = time.perf_counter()
-        out = (self._block.forward(session_id, hidden, start_pos) if truncate_to is None
-               else self._block.forward(session_id, hidden, start_pos, truncate_to))
+        if req.ids is None and req.output is None:  # the original request shape: call the block as before
+            out = (self._block.forward(req.session_id, req.hidden, req.start_pos) if req.truncate_to is None
+                   else self._block.forward(req.session_id, req.hidden, req.start_pos, req.truncate_to))
+            self._compute_ms = (time.perf_counter() - started) * 1000
+            return protocol.encode_forward_reply(out)
+        out = self._block.forward(req.session_id, req.hidden, req.start_pos, req.truncate_to, ids=req.ids,
+                                  output=req.output, which=req.which, sampling=req.sampling)
         self._compute_ms = (time.perf_counter() - started) * 1000
-        return protocol.encode_forward_reply(out)
+        return protocol.encode_ids_reply(out) if req.output else protocol.encode_forward_reply(out)
 
     def _read_body(self) -> bytes | None:
         if self.headers.get("Transfer-Encoding"):

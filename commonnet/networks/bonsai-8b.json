@@ -6,4 +6,5 @@
            "client_repo": "prism-ml/Ternary-Bonsai-8B-mlx-2bit"},
  "boundaries": [0, 9, 18, 27, 36],
  "gib_per_layer": {"mlx": 0.051, "cpu": 0.36, "nf4": 0.105}, "fixed_gib": 0.3,
+ "io_gib": {"mlx": 0.2, "cpu": 1.2, "nf4": 1.2},
  "min_replicas": 2, "seeds": []}
