@@ -130,12 +130,13 @@ class Source(unittest.TestCase):
 
     def test_tarball_is_unpacked_to_the_commonnet_package_only(self):
         blob = self._tarball({"common-network-1/commonnet/__init__.py": b"", "common-network-1/commonnet/node.py": b"x=1",
-                              "common-network-1/gateway/secret.py": b"no", "common-network-1/commonnet/../../evil.py": b"no"})
+                              "common-network-1/join/join.py": b"y=1", "common-network-1/gateway/secret.py": b"no", "common-network-1/commonnet/../../evil.py": b"no"})
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / "src"
             got = layers.ensure_source({}, ref="v0.3.3", dest=dest, urlopen=self._urlopen(blob), log=lambda *_: None)
             self.assertEqual(got, dest)
             self.assertTrue((dest / "commonnet" / "node.py").is_file())
+            self.assertTrue((dest / "join" / "join.py").is_file())  # the node opens its tunnel through join/
             self.assertFalse((dest / "gateway").exists())
             self.assertFalse((Path(tmp) / "evil.py").exists())
             # a pinned ref is not fetched twice

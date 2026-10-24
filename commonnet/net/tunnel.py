@@ -57,8 +57,33 @@ class LauncherError(RuntimeError):
     """The launcher could not bring the block up. Its message says why."""
 
 
+JOIN_FILES_URL = "https://raw.githubusercontent.com/TheCommonAI/common-network/main/join/{}"
+JOIN_FILES = ("join.py", "worker.py", "runtime.py")
+
+
+def ensure_join_dir(join_dir: Path = JOIN_DIR, urlopen=None) -> Path:
+    """join/ beside commonnet. A runtime unpacked by an older layers.py has no join/, so fetch the three files once."""
+    if (join_dir / "join.py").is_file():
+        return join_dir
+    import urllib.request
+    urlopen = urlopen or urllib.request.urlopen
+    try:
+        blobs = {}
+        for name in JOIN_FILES:
+            with urlopen(JOIN_FILES_URL.format(name), timeout=30) as resp:
+                blobs[name] = resp.read()
+    except OSError as e:
+        raise LauncherError(f"join/ is missing next to commonnet and could not be downloaded ({e}); "
+                            "reinstall with the Common install script") from None
+    join_dir.mkdir(parents=True, exist_ok=True)
+    for name, blob in blobs.items():
+        (join_dir / name).write_bytes(blob)
+    return join_dir
+
+
 def _join():
     """join/join.py, imported by putting join/ on the path first."""
+    ensure_join_dir()
     if str(JOIN_DIR) not in sys.path:
         sys.path.insert(0, str(JOIN_DIR))
     import join
