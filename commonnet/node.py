@@ -141,6 +141,32 @@ def cpu_gib(total: float, available: float) -> float:
     return round(max(0.0, min(available * CPU_AVAILABLE_FRACTION, total * CPU_TOTAL_FRACTION)) / 2**30, 2)
 
 
+def cpu_has_fast_bf16() -> bool:
+    """Does this CPU multiply bfloat16 in hardware (AVX512-BF16 or AMX)? Without it bfloat16 prefill is ~20x slower than float32."""
+    try:
+        import torch
+        cpu = torch.cpu
+        return bool(getattr(cpu, "_is_avx512_bf16_supported", lambda: False)()
+                    or getattr(cpu, "_is_amx_tile_supported", lambda: False)())
+    except Exception:
+        return False
+
+
+def choose_cpu_dtype(manifest, hw: "Hardware", fast_bf16: bool) -> tuple[str, "Hardware"]:
+    """('bfloat16' | 'float32', the Hardware to place with) for a CPU peer.
+
+    Machines without fast bfloat16 compute in float32, which costs twice the memory per layer, so they offer
+    half as much (in bfloat16 units) and only switch when the smallest stage still fits that way.
+    """
+    if fast_bf16:
+        return "bfloat16", hw
+    smallest = min(manifest.window_gib(a, b, "cpu") for a, b in manifest.stages())
+    half = round(hw.gib / 2, 2)
+    if half >= smallest:
+        return "float32", Hardware(hw.backend, half, hw.name)
+    return "bfloat16", hw
+
+
 def detect_hardware(system: str | None = None, machine: str | None = None, memsize=_sysctl_memsize,
                     nvidia=_nvidia_free_mib, meminfo=_memory_bytes) -> Hardware:
     """Apple silicon -> mlx, NVIDIA -> nf4, anything else -> cpu (a share of RAM, bfloat16 on the CPU)."""
@@ -298,6 +324,9 @@ class Node:
                  status: StatusFile | None = None, status_s: float = STATUS_SECONDS,
                  api_port: int | None = None, api_backend=None):
         self.manifest, self.seeds, self.identity, self.hw = manifest, list(seeds), identity, hardware
+        self.cpu_dtype = None
+        if hardware.backend == "cpu" and not os.environ.get("COMMONNET_DTYPE"):
+            self.cpu_dtype, self.hw = choose_cpu_dtype(manifest, hardware, cpu_has_fast_bf16())
         self.port, self.stub, self.use_tunnel, self.advertise = port, stub, tunnel, advertise
         self.log = log
         self._open_tunnel = tunnel_opener
@@ -545,7 +574,7 @@ class Node:
         # manifest's per-backend dtype. COMMONNET_MLX_CACHE_MB is left to the environment untouched.
         dtype = (self.manifest.model.get("dtype") or {}).get(self.hw.backend)
         if self.hw.backend in ("mlx", "cpu"):
-            dtype = dtype or "bfloat16"
+            dtype = self.cpu_dtype or dtype or "bfloat16"
         if dtype and not os.environ.get("COMMONNET_DTYPE"):
             os.environ["COMMONNET_DTYPE"] = dtype
         from commonnet.net import factory
