@@ -314,8 +314,10 @@ class Hub:
         raise HubError(f"{name}: incomplete download of merged range ({written} bytes written)")
 
     # ---- top level ---------------------------------------------------
-    def fetch(self, layers=None, client=False):
-        """Download what is needed; returns the checkpoint directory."""
+    def fetch(self, layers=None, client=False, ranged=False):
+        """Download what is needed; returns the checkpoint directory. `ranged` forces the range-download route
+        (only the needed tensors of each shard) for a sharded repo of plain layers, for example a float16 repo
+        that an NVIDIA peer quantises on load."""
         base = self.dir
         idx_path = self.fetch_small(INDEX_NAME, required=False)
         if idx_path:
@@ -325,7 +327,7 @@ class Hub:
             layout = detect_layout(wm)
             prefixes = needed_prefixes(layers, client, layout)
             shards = sorted({wm[n] for n in select_names(wm, prefixes)})
-            if layout != "model." or len(set(wm.values())) == 1:
+            if ranged or layout != "model." or len(set(wm.values())) == 1:
                 # qwen3_5 repos have ~5 GB shards that also hold vision/other layers, and a one-file pack (the
                 # Bonsai MLX packs) is a single shard holding every layer: range-download only the needed
                 # tensors of each shard into a compact copy with a filtered index.

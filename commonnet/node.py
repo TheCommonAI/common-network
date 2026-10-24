@@ -573,7 +573,9 @@ class Node:
             fetch = lambda r, w: local  # noqa: E731
         if fetch is None:
             from commonnet import hub
-            fetch = lambda r, w: hub.Hub(r, log=self._hub_log).fetch(layers=tuple(w))  # noqa: E731
+            # an NVIDIA peer may quantise a float16 repo on load: fetch only the window's tensors, not whole 5 GB shards
+            ranged = self.hw.backend == "nf4"
+            fetch = lambda r, w: hub.Hub(r, log=self._hub_log).fetch(layers=tuple(w), ranged=ranged)  # noqa: E731
         self.log(f"downloading layers {window[0]}-{window[1]} of {repo} (only these)...")
         self.progress.reset()
         self.set_phase("downloading")
@@ -656,6 +658,11 @@ class Node:
             if checkpoint is None and repo:
                 from commonnet import hub
                 checkpoint = hub.Hub(repo).fetch(client=True)
+            if checkpoint and os.path.exists(os.path.join(checkpoint, "config.json")):
+                with open(os.path.join(checkpoint, "config.json")) as f:
+                    if json.load(f).get("model_type") == "prism_hadamard_qwen35":
+                        raise RuntimeError("the chat API for this model needs Apple silicon (its embedding and head are 2-bit "
+                                           "Hadamard packed); this machine can still serve layers, start it with --no-api")
         return NetworkBackend(network, checkpoint, fmt=fmt, hidden_dtype=torch.float32)
 
     def _start_api(self) -> None:
