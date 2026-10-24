@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import socket
@@ -51,15 +52,34 @@ def _b64d(s: str) -> bytes:
     return base64.b64decode(s.encode("ascii"), validate=True)
 
 
-def caller_ip(request: Request) -> str:
-    """The caller's address from the proxy header; never from a body. Uses the LAST entry (the one our own proxy
-    appended), so a client cannot aim /check at a third party by sending its own X-Forwarded-For."""
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff and (TRUST_TEST_HEADER or os.environ.get("RAILWAY_ENVIRONMENT")):
-        first = xff.split(",")[-1].strip()
-        if first:
-            return first
-    return request.client.host if request.client else "0.0.0.0"
+def _ip_literal(value: str | None, *, public: bool = False) -> str | None:
+    try:
+        if not value or "%" in value:  # no scoped IPv6 or hostnames/DNS resolution
+            return None
+        address = ipaddress.ip_address(value)
+        if public and (not address.is_global or address.is_multicast or address.is_reserved
+                       or getattr(address, "is_site_local", False)):
+            return None
+        return str(address)
+    except ValueError:
+        return None
+
+
+def caller_ip(request: Request) -> str | None:
+    """Use Railway's documented edge-supplied X-Real-IP, never an XFF chain or body host.
+
+    Railway deployments must be reached through its edge. Missing, duplicate or non-public
+    edge addresses fail closed; they must not turn /check into an internal-network probe.
+    Elsewhere only the socket peer is trusted, except for the explicit loopback test mode.
+    """
+    if os.environ.get("RAILWAY_ENVIRONMENT"):
+        values = request.headers.getlist("x-real-ip")
+        return _ip_literal(values[0], public=True) if len(values) == 1 else None
+    if TRUST_TEST_HEADER:
+        values = request.headers.getlist("x-forwarded-for")
+        if values:
+            return _ip_literal(values[0]) if len(values) == 1 else None
+    return _ip_literal(request.client.host if request.client else None)
 
 
 def _limited(kind: str, ip: str, limit: int, now: float) -> bool:
@@ -130,6 +150,8 @@ def _live(rec: dict, now: float) -> bool:
 async def announce(request: Request):
     now = time.time()
     ip = caller_ip(request)
+    if ip is None:
+        return JSONResponse({"error": "cannot determine caller IP"}, status_code=400)
     if _limited("announce", ip, ANNOUNCE_PER_MIN, now):
         return JSONResponse({"error": "slow down"}, status_code=429)
     raw = await request.body()
@@ -198,6 +220,9 @@ def _probe_one(ip: str, port: int, fp: str | None) -> dict:
 async def check(request: Request):
     now = time.time()
     ip = caller_ip(request)
+    test_mode = TRUST_TEST_HEADER and not os.environ.get("RAILWAY_ENVIRONMENT")
+    if ip is None or (not test_mode and _ip_literal(ip, public=True) is None):
+        return JSONResponse({"error": "need a public caller IP"}, status_code=400)
     if _limited("check", ip, CHECK_PER_MIN, now):
         return JSONResponse({"error": "slow down"}, status_code=429)
     try:

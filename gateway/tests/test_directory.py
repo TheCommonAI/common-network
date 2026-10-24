@@ -11,6 +11,7 @@ import threading
 import unittest
 from pathlib import Path
 from socket import socket
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "gateway"))
@@ -19,6 +20,7 @@ os.environ["COMMON_GATEWAY_TEST"] = "1"
 from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from starlette.requests import Request  # noqa: E402
 
 from app import directory, main  # noqa: E402
 
@@ -150,16 +152,64 @@ class Announce(unittest.TestCase):
         self.assertEqual(self.c.get("/health").json()["mode"], "retired")
 
     def test_forwarded_header_is_ignored_outside_tests(self):
-        directory.TRUST_TEST_HEADER = False
-        try:
-            os.environ.pop("RAILWAY_ENVIRONMENT", None)
-            req = type("R", (), {"headers": {"x-forwarded-for": "6.6.6.6"}, "client": type("C", (), {"host": "10.0.0.1"})})
+        with mock.patch.object(directory, "TRUST_TEST_HEADER", False), mock.patch.dict(os.environ, {}, clear=True):
+            req = Request({"type": "http", "client": ("10.0.0.1", 1234),
+                           "headers": [(b"x-forwarded-for", b"6.6.6.6"), (b"x-real-ip", b"7.7.7.7")]})
             self.assertEqual(directory.caller_ip(req), "10.0.0.1")
-            os.environ["RAILWAY_ENVIRONMENT"] = "production"
-            self.assertEqual(directory.caller_ip(req), "6.6.6.6")
-        finally:
-            directory.TRUST_TEST_HEADER = True
-            os.environ.pop("RAILWAY_ENVIRONMENT", None)
+
+
+class RailwayCaller(unittest.TestCase):
+    def setUp(self):
+        reset()
+        self.c = TestClient(main.app)
+        self.env = mock.patch.dict(os.environ, {"RAILWAY_ENVIRONMENT": "production"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_documented_real_ip_wins_over_a_multihop_xff_chain(self):
+        for address in ("119.15.77.2", "2606:4700:4700::1111"):
+            with self.subTest(address=address), mock.patch.object(directory, "_probe", return_value={"reachable": False}) as probe:
+                response = self.c.post("/check", json={"port": 7471, "host": "127.0.0.1"},
+                                       headers={"x-real-ip": address,
+                                                "x-forwarded-for": "1.1.1.1, 152.233.76.10, 79.127.217.66"})
+                self.assertEqual(response.status_code, 200)
+                probe.assert_called_once_with(address, 7471, None)
+
+    def test_announcement_source_and_limits_use_real_ip(self):
+        record = Peer().record()
+        headers = {"x-real-ip": "119.15.77.2", "x-forwarded-for": "1.1.1.1, 79.127.217.66"}
+        self.assertEqual(self.c.post("/announce", json=record, headers=headers).status_code, 200)
+        self.assertEqual(directory._records[("net", record["peer"])]["src"], "119.15.77.2")
+        self.assertIn(("announce", "119.15.77.2"), directory._hits)
+
+    def test_missing_or_invalid_real_ip_never_falls_back_to_xff_or_socket(self):
+        invalid = (None, "", "999.1.1.1", "1.2.3", "127.0.0.1", "10.0.0.1", "169.254.169.254",
+                   "100.64.0.1", "0.0.0.0", "224.0.0.1", "::1", "fc00::1", "fec0::1", "ff02::1", "fe80::1%eth0", "2001:::1",
+                   "::ffff:127.0.0.1", "example.com", "1.1.1.1:7471", "[2606:4700::1111]",
+                   "1.1.1.1, 8.8.8.8", "1.1.1.1\r\nX-Other: yes")
+        for address in invalid:
+            with self.subTest(address=address), mock.patch.object(directory, "_probe") as probe:
+                headers = {"x-forwarded-for": "8.8.8.8"}
+                if address is not None:
+                    headers["x-real-ip"] = address
+                self.assertEqual(self.c.post("/check", json={"port": 7471}, headers=headers).status_code, 400)
+                probe.assert_not_called()
+                self.assertEqual(self.c.post("/announce", json=Peer().record(), headers=headers).status_code, 400)
+
+    def test_duplicate_real_ip_headers_are_refused(self):
+        with mock.patch.object(directory, "_probe") as probe:
+            response = self.c.post("/check", json={"port": 7471},
+                                   headers=[("x-real-ip", "1.1.1.1"), ("x-real-ip", "8.8.8.8")])
+            self.assertEqual(response.status_code, 400)
+            probe.assert_not_called()
+
+    def test_private_socket_peer_cannot_be_probed_outside_explicit_test_mode(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(directory, "TRUST_TEST_HEADER", False), \
+                mock.patch.object(directory, "caller_ip", return_value="127.0.0.1"), \
+                mock.patch.object(directory, "_probe") as probe:
+            self.assertEqual(self.c.post("/check", json={"port": 7471},
+                                         headers={"x-real-ip": "8.8.8.8"}).status_code, 400)
+            probe.assert_not_called()
 
 
 class TlsServer:
