@@ -209,6 +209,17 @@ class Hardware(unittest.TestCase):
         small = node.detect_hardware("Linux", "x86_64", nvidia=lambda: None, meminfo=lambda s: (4 * gib, 4 * gib))
         self.assertEqual(small.gib, 2.0)  # too little for a stage; choose_window then says so
 
+    def test_cpu_dtype_is_float32_without_fast_bf16_when_the_stage_fits_twice(self):
+        manifest = Manifest.load(Path(node.__file__).parent / "networks" / "main.json")
+        smallest = min(manifest.window_gib(a, b, "cpu") for a, b in manifest.stages())
+        roomy = node.Hardware("cpu", round(smallest * 2 + 1, 2), "CPU")
+        dtype, hw = node.choose_cpu_dtype(manifest, roomy, fast_bf16=False)
+        self.assertEqual(dtype, "float32")
+        self.assertEqual(hw.gib, round(roomy.gib / 2, 2))  # float32 costs twice the memory per layer
+        self.assertEqual(node.choose_cpu_dtype(manifest, roomy, fast_bf16=True), ("bfloat16", roomy))
+        tight = node.Hardware("cpu", round(smallest * 2 - 0.5, 2), "CPU")  # float32 would not fit
+        self.assertEqual(node.choose_cpu_dtype(manifest, tight, fast_bf16=False), ("bfloat16", tight))
+
     def test_unreadable_memory_is_refused_with_a_reason(self):
         with self.assertRaises(node.NodeError) as caught:
             node.detect_hardware("Linux", "x86_64", nvidia=lambda: None, meminfo=lambda s: None)

@@ -33,8 +33,9 @@ serve one stage and a 31 GB PC can serve several. Routes prefer GPU peers when t
 and replicas. Replicas are same-backend only (see below). A machine with too little RAM for even one stage is
 told how much it needs and exits. **Measured on an M-series Mac's CPU (4 torch threads, 9 Qwen3-8B layers): bf16 decode 58 ms/token, but bf16
 prefill of 64 tokens took 9.3 s because that CPU has no fast bf16 matmul (float32: 0.40 s prefill, 120 ms/token
-and twice the RAM). Speed on x86 depends on AVX512-BF16/AMX support and has not been measured; `COMMONNET_DTYPE=float32`
-switches a CPU peer to float32 (and its `gib` cost doubles, so only with RAM to spare). The NVIDIA path is written but has not been run on real hardware yet, and
+and twice the RAM). Speed on x86 depends on AVX512-BF16/AMX support and has not been measured; A CPU peer picks its dtype itself: bfloat16
+when the CPU has AVX512-BF16 or AMX, otherwise float32 if the smallest stage still fits at twice the memory (it then offers half as
+much to the network, in bfloat16 units), else bfloat16. `COMMONNET_DTYPE` overrides the choice. The NVIDIA path is written but has not been run on real hardware yet, and
 the CPU path has been run on a Mac's CPU only, not on Windows.**
 
 ## Chat with it
