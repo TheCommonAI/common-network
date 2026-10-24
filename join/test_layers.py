@@ -249,13 +249,20 @@ class JoinFlag(unittest.TestCase):
         run.assert_called_once_with(None, ["--api", "11440"])
 
     def test_api_is_passed_to_the_node(self):
-        for argv, expected in ((["--network"], []), (["--network", "--api"], ["--api", "11440"]),
+        for argv, expected in ((["--network"], ["--api", "11440"]), (["--network", "--no-api"], []),
+                               (["--network", "--api"], ["--api", "11440"]),
                                (["--network", "https://seed", "--api", "12345"], ["--api", "12345"])):
             with self.subTest(argv=argv):
                 with mock.patch.object(join, "run_network_member") as run, \
                         mock.patch.object(sys, "argv", ["join.py", "--no-update", *argv]):
                     join.main()
                 run.assert_called_once_with(argv[1] if len(argv) > 1 and argv[1].startswith("http") else None, expected)
+
+    def test_a_permanent_service_keeps_the_api(self):
+        import argparse
+        args = argparse.Namespace(network="", api=11440, no_update=False)
+        self.assertIn("--api=11440", join._service_argv(args))
+        self.assertEqual(join._service_argv(args)[-1], "--network")  # the spec stays last
 
     def test_without_the_flag_layers_is_never_imported(self):
         source = JOIN_PY.read_text()
