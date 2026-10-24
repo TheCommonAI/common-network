@@ -173,6 +173,21 @@ CLIENT = f"common-cli/{VERSION}"
 REQUEST_TIMEOUT_SECONDS = 240
 
 
+def _exec(argv: list[str]) -> None:
+    """Replace this process with argv. Windows has no exec: os.execv there starts a new process and exits
+    at once, which hands the console back to the shell while the program is still running (the prompt
+    returns, output arrives later, Ctrl+C does nothing). So wait for the child and pass its exit code on."""
+    if os.name != "nt":
+        os.execv(argv[0], argv)
+        return
+    child = subprocess.Popen(argv)
+    while True:
+        try:
+            sys.exit(child.wait())
+        except KeyboardInterrupt:
+            continue  # the child got Ctrl+C too; wait for it to leave cleanly
+
+
 def gateway_headers(extra: dict | None = None) -> dict:
     """Headers every gateway request carries -- the mirror of common-desktop's
     gatewayHeaders(), so an app user and a terminal user are told apart by one
@@ -454,7 +469,7 @@ def self_update(force: bool = False) -> None:
     except OSError as e:
         print(dim(f"warning: couldn't self-update ({e}), continuing with current version"))
         return
-    os.execv(sys.executable, [sys.executable, local_path] + sys.argv[1:])
+    _exec([sys.executable, local_path] + sys.argv[1:])
 
 
 # --- Identity ------------------------------------------------------------
@@ -2674,7 +2689,7 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
     if args.rest:
         argv += args.rest
 
-    os.execv(sys.executable, argv)
+    _exec(argv)
 
 
 # --- Test --------------------------------------------------------------------

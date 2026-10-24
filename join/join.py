@@ -175,6 +175,21 @@ LLAMA_STARTUP_TIMEOUT_SECONDS = 180
 CLIENT = f"common-cli/{VERSION}"
 
 
+def _exec(argv: list[str]) -> None:
+    """Replace this process with argv. Windows has no exec: os.execv there starts a new process and exits
+    at once, which hands the console back to the shell while the program is still running (the prompt
+    returns, output arrives later, Ctrl+C does nothing). So wait for the child and pass its exit code on."""
+    if os.name != "nt":
+        os.execv(argv[0], argv)
+        return
+    child = subprocess.Popen(argv)
+    while True:
+        try:
+            sys.exit(child.wait())
+        except KeyboardInterrupt:
+            continue  # the child got Ctrl+C too; wait for it to leave cleanly
+
+
 def gateway_headers(extra: dict | None = None) -> dict:
     """Headers every gateway request carries.
 
@@ -597,7 +612,7 @@ def apply_update_and_restart(remote: bytes) -> None:
     except OSError as e:
         print(f"{GLYPH_FORMING} {red(f'could not self-update ({e}), continuing with current version')}", file=sys.stderr)
         return
-    os.execv(sys.executable, [sys.executable, local_path] + sys.argv[1:])
+    _exec([sys.executable, local_path] + sys.argv[1:])
 
 
 def die_with_fix(msg: str, fix: str) -> None:
