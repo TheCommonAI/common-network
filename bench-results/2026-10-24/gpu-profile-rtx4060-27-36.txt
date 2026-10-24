@@ -1,0 +1,38 @@
+Patrick's PC, 24 Oct 2026: python -m commonnet.bench.gpu_profile --layers 27-36 (output exactly as pasted)
+
+W1024 19:44:20.399000 50148 .common-network\runtime-venv\Lib\site-packages\torch\utils\flop_counter.py:29] triton not found; flop counting will not work for triton kernels
+{"torch": "2.11.0+cu128", "backend": "nf4", "layers": [27, 36], "gpu": "NVIDIA GeForce RTX 4060", "vram_gib": 8.0, "bitsandbytes": "0.50.2"}
+fetching layers 27-36 of unsloth/Qwen3-8B-bnb-4bit ...
+
+step timing: {"steps": 40, "wall_ms_median": 18.84534995770082, "wall_ms_p95": 21.311099990271032, "python_launch_ms_median": 18.72794993687421, "gpu_event_ms_median": 18.819583892822266}
+profiler (per step): GPU kernels 9.746 ms, launches 545.5
+
+top by GPU time:
+  bitsandbytes::gemm_4bit                                      x63.0   gpu    4.06 ms  cpu   2.265 ms
+  _Z14gemm_4bit_simtI13__nv_bfloat16Li1EEvPKT_PKhPKfS5_S7_S7_P x63.0   gpu    4.06 ms  cpu     0.0 ms
+  aten::mul                                                    x120.0  gpu   0.176 ms  cpu   1.41 ms
+  aten::copy_                                                  x105.5  gpu   0.158 ms  cpu   0.923 ms
+  aten::_efficient_attention_forward                           x9.0    gpu   0.112 ms  cpu   0.127 ms
+  _Z41fmha_cutlassF_bf16_aligned_64x128_rf_sm80N22PyTorchMemEf x9.0    gpu   0.112 ms  cpu     0.0 ms
+  _ZN2at6native18elementwise_kernelILi128ELi4EZNS0_22gpu_kerne x54.0   gpu   0.095 ms  cpu     0.0 ms
+  aten::mean                                                   x36.0   gpu   0.081 ms  cpu   0.494 ms
+  _ZN2at6native13reduce_kernelILi512ELi1ENS0_8ReduceOpIfNS0_7M x36.0   gpu   0.081 ms  cpu     0.0 ms
+  aten::add                                                    x72.0   gpu   0.076 ms  cpu   0.805 ms
+
+top by CPU time:
+  cudaLaunchKernel                                             x545.5  gpu     0.0 ms  cpu   9.233 ms
+  bitsandbytes::gemm_4bit                                      x63.0   gpu    4.06 ms  cpu   2.265 ms
+  aten::mul                                                    x120.0  gpu   0.176 ms  cpu   1.41 ms
+  aten::copy_                                                  x105.5  gpu   0.158 ms  cpu   0.923 ms
+  aten::empty                                                  x130.5  gpu   0.0 ms  cpu   0.808 ms
+  aten::add                                                    x72.0   gpu   0.076 ms  cpu   0.805 ms
+  aten::pow                                                    x36.0   gpu   0.035 ms  cpu   0.64 ms
+  aten::mean                                                   x36.0   gpu   0.081 ms  cpu   0.494 ms
+  aten::cat                                                    x37.0   gpu   0.072 ms  cpu   0.449 ms
+  aten::empty_strided                                          x78.0   gpu   0.0 ms  cpu   0.439 ms
+
+weights 0.81 GiB; achievable read bandwidth about 117 GB/s; floor for reading the weights once per token: 7.4 ms
+measured step: 18.8 ms median (2.5x the floor)
+GPU busy (events): 18.8 ms of 18.8 ms wall; Python/launch side: 18.7 ms
+VERDICT: close to memory-bound; fewer bytes per weight would help.
+wrote bench-results\gpu-profile-20261024-194431.json

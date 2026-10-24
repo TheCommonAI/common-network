@@ -30,8 +30,13 @@ Model: Qwen3-8B, 36 layers, stage boundaries `[0, 9, 18, 27, 36]`, network `comm
 | #83 | `python -m commonnet.bench --live` | Benchmark a real running network |
 | #84 | Never publish `api.trycloudflare.com` as a peer's address | A peer published Cloudflare's own endpoint, so every request to it answered 405 |
 | #85 | NVIDIA peers compute in bfloat16 by default | float16 overflows to NaN on some Qwen3 prompts; the NF4 path had never run |
+| #86 | This testing log | |
+| #87 | `common join --layers A-B` pins a peer to a window | Placement scores coverage, not speed, so Patrick's GPU landed on the Mac's layers |
+| #89 | Bonsai networks: Ternary Bonsai 8B and Bonsai 2 9B manifests, Hadamard pack loading on Mac | Test models for the network |
+| #90 | Bonsai on NVIDIA and CPU: quantise a float16 checkpoint to NF4 on load; Hadamard dequantisation in PyTorch | The NVIDIA path only loaded pre-quantised NF4 checkpoints |
+| #92 | `python -m commonnet.bench.gpu_profile` | Where one decode step of a stage spends its time |
 
-Merged after: #86 (this log) and #87 (`--layers A-B`, pin a peer to a window).
+Open draft PRs at this point: #91 (direct transport: STUN/UPnP/PCP/NAT-PMP, TLS with pinned fingerprints) and #93 (Kademlia DHT discovery). Neither is wired in; an integration branch (`--direct`) was in progress.
 
 ## 2. Synthetic benchmark (fake layers, emulated delay)
 
@@ -196,6 +201,20 @@ Limits: this checks speed only. The benchmark does not print or compare the gene
 
 Raw: `live-mac-0-27-plus-patrick-rtx4060-27-36.json`, `.log`.
 
+### 5d. Common Flash on the real route (first live attempt, contended)
+
+`python -m commonnet.bench --live <Mac URL> --prompt-lens 16,256 --new-tokens 32 --repeats 1 --draft --draft-k 8`, route Mac (0-27) + Patrick's RTX 4060 (27-36), greedy. Run while the Bonsai agent was downloading models and running tests on the same Mac, so the network figures are inflated (network 181-381 ms/token against 93 ms in section 5c).
+
+| Prompt | Plain tok/s | Speculative tok/s | Speedup | Acceptance | Rounds | Same output |
+|---|---|---|---|---|---|---|
+| 16 tokens | 2.1 | 0.5 | 0.25x | 43% (19 of 44 drafted) | 12 | **NO** |
+| 256 tokens | 0.5 | 0.5 | 1.04x | 62% (24 of 39) | 8 | yes |
+
+Plain decode in the same run: 268 ms/token (prompt 16) and 472 ms/token (prompt 256); prefill 3.2 s and 17.1 s (7.2 s for 256 tokens in the clean run of 5c). Bare round trips 62 ms (Mac) and 38 ms (Patrick).
+Not understood yet: why the 16-token output differed from plain (a near tie flipping in bfloat16, the route using a different replica between the two runs, or an NF4 numerics difference; none checked). Treat this run as uninformative about speed. Reruns at k=8 (2 repeats) and k=4 in a quiet state were started afterwards; their results are added below when done.
+
+Raw: `live-draft-k8-run1-contended.json`, `.log`.
+
 ## 6. Why one Mac peer holds all 36 layers
 
 A peer takes the longest window that fits. The Mac offers about 9.9 GiB and the whole 4-bit model costs about 4.8 GiB (`0.3 + 36 x 0.125`), so it serves 0-36 alone;
@@ -238,8 +257,44 @@ Sharded repos (Qwen3-8B) download whole shards that contain needed tensors; sing
 - `live-wrong-peer-single-mac-36-layers.json`
 - `live-mac-0-27-plus-cpu-laptop-27-36.json`
 - `live-mac-0-27-plus-patrick-rtx4060-27-36.json` and `.log`
+- `live-draft-k8-run1-contended.json` and `.log`
+- `gpu-profile-rtx4060-27-36.txt` (Patrick's output as pasted)
 
 `bench-results/` (from the harness and drafter authors)
 - `sweep-2026-10-24.json`, `spec-synth.json`, `spec-real.json`
 
 Reproduce: see `docs/network-bench.md` and `docs/flash-drafter.md`.
+
+## 10. GPU profile of Patrick's RTX 4060 stage (layers 27-36, NF4)
+
+`python -m commonnet.bench.gpu_profile --layers 27-36` on Patrick's PC (torch 2.11.0+cu128, bitsandbytes 0.50.2, 8 GB card), local, no network, one decode token at a time. The first real CUDA run of the NF4 path: it ran. Raw output exactly as pasted: `gpu-profile-rtx4060-27-36.txt`.
+
+| Quantity | Value |
+|---|---|
+| Wall time per decode step (40 steps) | 18.85 ms median, p95 21.3 ms |
+| Python/launch side | 18.73 ms |
+| GPU kernel time per step (profiler) | 9.75 ms |
+| Kernel launches per step | 545.5 (`cudaLaunchKernel` 9.23 ms of CPU time) |
+| `bitsandbytes::gemm_4bit` | 63 calls, 4.06 ms GPU |
+| Weights in memory | 0.81 GiB |
+| Profiler output verdict line | "close to memory-bound; fewer bytes per weight would help" |
+
+In the live network the same stage took 31-38 ms of server time per token (section 5c).
+
+## 11. Bonsai networks (from the build reports of #89 and #90)
+
+Two more networks selectable by manifest: `commonnet/networks/bonsai-8b.json` (Ternary Bonsai 8B, Qwen3-8B architecture, 36 layers, stages 0-9-18-27-36) and `bonsai-2-9b.json` (Bonsai 2 9B, Qwen3.5 hybrid, 32 layers, stages 0-8-16-24-32). Join: `common join --network <manifest>`.
+
+| | Bonsai 1 8B | Bonsai 2 9B |
+|---|---|---|
+| Mac (MLX 2-bit pack) memory per layer | 0.051 GiB | 0.058 GiB |
+| NVIDIA (NF4 quantised on load from float16) memory per layer | 0.105 GiB | 0.115 GiB |
+| CPU memory per layer | 0.36 GiB | 0.41 GiB |
+| Download per layer on NVIDIA/CPU | about 0.36 GiB (float16) | MLX pack via range download |
+| Download for 9 (8) layers on Mac | 0.455 GiB | 0.461 GiB |
+| Greedy tokens, 2-stage split vs one block (24 tokens, 3 prompts) | identical 3/3 | identical 3/3; also matches the pack's own loader on 2 prompts |
+| Decode on one Mac peer holding all layers (Mac loaded, swap nearly full) | about 227-250 ms/token | about 115-124 ms/token |
+| Common Flash drafter | tokenizer identical to Qwen3-0.6B (151,669 entries): accepted; acceptance not measured | refused: 281 matching ids, and linear-attention layers cannot roll back |
+
+NVIDIA numerics (CPU simulation, not bitsandbytes): ternary groups {-s, 0, +s} round-trip through NF4 with error 0.0 for real Bonsai 1 `k_proj` (32,768 groups) and 6 real Bonsai 2 matrices. Bonsai 2 PyTorch dequantisation vs MLX on the real pack, layers 0-8: float32 relative L2 2.0e-6; bfloat16 about 1.0% (cosine 0.99995). On a real CUDA GPU these are unverified: bitsandbytes quantisation from float16, peak VRAM, bf16 on the 4060, end-to-end 8B/9B on a GPU, a mixed Mac plus NVIDIA pipeline.
+Memory (MLX active/peak) was not measured. The two speed rows were measured minutes apart under different load.
