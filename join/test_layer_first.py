@@ -113,11 +113,13 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(dispatch(["--model", "qwen-x"]), ["legacy"])
 
     def test_plain_join_on_an_unsupported_machine_explains_and_exits(self):
-        # the legacy gateway is retired, so a machine with no GPU is told so rather than sent there
+        # the legacy gateway is retired, so a machine the layer network cannot use at all is told so rather than
+        # sent there (a CPU-only machine is not one of them: it serves on its CPU)
         out = subprocess.run([sys.executable, "-c", HARNESS.format(here=str(HERE), argv=[], supported=False)],
                              capture_output=True, text=True, timeout=60)
         self.assertEqual(out.returncode, 1)
-        self.assertIn("NVIDIA GPU", out.stderr)
+        self.assertIn("macOS, Windows or Linux", out.stderr)
+        self.assertNotIn("no CPU-only mode", out.stderr)
         self.assertNotIn("Traceback", out.stderr)
 
     def test_explicit_network_has_no_notice(self):

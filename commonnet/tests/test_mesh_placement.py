@@ -177,3 +177,22 @@ class Route(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CpuPeers(unittest.TestCase):
+    def test_a_gpu_peer_is_preferred_to_a_cpu_peer_for_the_same_window(self):
+        cpu, gpu = peer([0, 9], backend="cpu"), peer([0, 9], backend="nf4")
+        rest = [peer([9, 36], backend="nf4")]
+        for order in ([cpu, gpu], [gpu, cpu]):
+            route = best_route(MANIFEST, order + rest, now=NOW)
+            self.assertEqual(route[0].primary["peer"], gpu["peer"])
+            self.assertEqual(route[0].alternates[0]["peer"], cpu["peer"])
+
+    def test_a_cpu_peer_still_serves_when_it_is_the_only_one(self):
+        cpu = peer([0, 36], backend="cpu")
+        self.assertEqual(best_route(MANIFEST, [cpu], now=NOW)[0].primary["peer"], cpu["peer"])
+
+    def test_cpu_does_not_cost_extra_hops(self):
+        # fewest hops still wins: one CPU peer for everything beats two GPU peers
+        cpu, a, b = peer([0, 36], backend="cpu"), peer([0, 18], backend="nf4"), peer([18, 36], backend="nf4")
+        self.assertEqual(len(best_route(MANIFEST, [cpu, a, b], now=NOW)), 1)
