@@ -86,4 +86,20 @@ the 2-bit matmul, and the embedding's rows after the lookup. The change, all sma
 - Compute is bfloat16 (the node's default for MLX), the pack's reference runtime uses float16.
 - The relative path `commonnet/networks/<name>.json` works from a checkout; otherwise give the full path.
 
-RESULTS_PLACEHOLDER
+## Results (Apple silicon, 16 GB Mac, 2026-10-24)
+
+The Mac was busy (other peers running, swap nearly full), so treat all timings as rough upper bounds.
+
+- **Correctness**: `correctness/bonsai_split.py`, greedy 24 tokens on 3 chat prompts, bfloat16 compute, float32 hidden
+  state, a 2-stage split (8B cut at 18, 9B cut at 16) against a single block holding every layer: identical tokens on
+  3/3 prompts for both models, and the text is coherent. For Bonsai 2 the first two answers were also compared with the
+  pack's own loader (mlx-vlm, `vision_artifact.load_vl_model`): the same text for the 24 tokens checked.
+  The split was in-process (no HTTP) for this check.
+- **Window download**: `Hub.fetch(layers=(0,9))` of the 8B pack and `(0,8)` of the 9B pack fetched 0.455 and 0.461 GiB.
+- **Speed**: one local peer holding every layer, `python -m commonnet.bench --live` (prompt 16 / 256, 32 new tokens, 1 repeat):
+  Bonsai 1 8B about 227-250 ms/token (4.0-4.4 tok/s; compute about 190-212 ms); Bonsai 2 9B about 115-124 ms/token
+  (8.0-8.7 tok/s; compute about 98-105 ms). The two were measured minutes apart under different load, so do not read
+  the 8B/9B ordering as real; the prism-ml reports roughly 30 ms/token on a quiet machine.
+  Memory was not measured.
+- **Not verified**: the CPU repo for Bonsai 1 (never run), more than one peer on these networks, the chat API (`--api`)
+  with these models, drafter acceptance on Bonsai 1.
