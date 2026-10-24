@@ -33,11 +33,17 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from commonnet.mesh import placement
+from commonnet.mesh import directory as mesh_directory
 from commonnet.mesh import gossip as mesh_gossip
 from commonnet.mesh.gossip import Gossiper, GossipError, PeerTable
 from commonnet.mesh.manifest import Manifest, ManifestError
 from commonnet.mesh.records import LIVE_SECONDS, Identity, RecordError
 from commonnet.net.server import BlockServer, StubBlock
+
+def direct_mod_default_dht() -> int:
+    from commonnet.direct import DEFAULT_DHT_PORT
+    return DEFAULT_DHT_PORT
+
 
 HOME = Path(os.environ.get("COMMON_NETWORK_HOME") or Path.home() / ".common-network")
 NETWORK_ENV = "COMMONNET_NETWORK"
@@ -330,10 +336,16 @@ class Node:
                  status: StatusFile | None = None, status_s: float = STATUS_SECONDS,
                  api_port: int | None = None, api_backend=None,
                  fixed_window: tuple[int, int] | None = None,
-                 direct=None, state_dir=None, decider=None):
+                 direct=None, state_dir=None, decider=None, gateway=None):
         # direct (a commonnet.direct.DirectConfig) turns on direct mode: DHT discovery, a TLS block server on a
         # public address, no tunnel unless the node proves unreachable. None (the default) changes nothing.
         self.direct, self.state_dir, self._decider = direct, state_dir, decider
+        # gateway (a URL, or None): the rendezvous directory. Peers found there become seeds and DHT contacts, and this
+        # node's record is announced there. Absent or failing, nothing changes.
+        self.gateway = gateway.rstrip("/") if gateway else None
+        self._pinned = direct is not None or self.gateway is not None   # gossip may meet pinned https://IP peers
+        self._dir_records: list = []
+        self._gw_check = None
         self.dht = None
         self.fp: str | None = None
         self.fpsig: str | None = None
@@ -454,7 +466,13 @@ class Node:
                 "network": self.manifest.id, "url": self.url, "token": self.token,
                 "window": None if self.window is None else list(self.window),
                 "backend": self.hw.backend, "state": self.state, "gib": self.hw.gib,
-                "fp": self.fp, "fpsig": self.fpsig}, now=self.clock())
+                "fp": self.fp, "fpsig": self.fpsig, "dht": self._published_dht_port()}, now=self.clock())
+
+    def _published_dht_port(self):
+        d = self.decision
+        if self.dht is None or d is None or not d.direct or not self.fp:
+            return None
+        return self.dht.address[1]
 
     def publish(self) -> dict:
         record = self.record()
@@ -470,11 +488,12 @@ class Node:
         if self._status is not None:
             self.write_status()
             self._spawn(self._status_loop, "node-status")
+        self._learn_directory()
         self._learn()
         if self.direct is not None:
             self._start_dht()
         self._gossiper = Gossiper(self.table, self.manifest, self.record, self.seeds,
-                                  **({"exchange_fn": mesh_gossip.pinned_exchange} if self.direct is not None else {}))
+                                  **({"exchange_fn": mesh_gossip.pinned_exchange} if self._pinned else {}))
         if self.gossip_s is not None:
             self._gossiper.interval = (self.gossip_s, self.gossip_s)
         self.publish()
@@ -539,8 +558,22 @@ class Node:
 
     # -- learning about peers ------------------------------------------------------------------
 
+    def _learn_directory(self) -> None:
+        """Ask the gateway's directory who is online: verified records go in the table and become gossip seeds."""
+        if not self.gateway:
+            return
+        found = [r for r in mesh_directory.fetch(self.gateway, self.manifest.id, now=self.clock())
+                 if r["peer"] != self.identity.peer]
+        self._dir_records = found
+        self.table.merge_many(found)
+        for r in found:
+            if r.get("url") and r["url"] not in self.seeds and len(self.seeds) < 12:
+                self.seeds.append(r["url"])
+        if found:
+            self.log(f"directory: {len(found)} peer(s) online")
+
     def _learn(self) -> None:
-        fetch = mesh_gossip.pinned_fetch_peers if self.direct is not None else mesh_gossip.fetch_peers
+        fetch = mesh_gossip.pinned_fetch_peers if self._pinned else mesh_gossip.fetch_peers
         for seed in self.seeds:
             try:
                 fetch(self.table, seed, timeout=15)
@@ -551,7 +584,7 @@ class Node:
         """Tell a few peers our latest record now rather than at the next gossip round."""
         self.table.merge(self.record())
         targets = [r["url"] for r in self.table.live() if r["peer"] != self.identity.peer and r.get("url")][:4]
-        swap = mesh_gossip.pinned_exchange if self.direct is not None else mesh_gossip.exchange
+        swap = mesh_gossip.pinned_exchange if self._pinned else mesh_gossip.exchange
         for url in targets + self.seeds[:1]:
             try:
                 swap(self.table, url, timeout=8)
@@ -644,17 +677,26 @@ class Node:
         cfg = self.direct
         boots = [parse_addr(b) for b in cfg.bootstrap]
         boots += [a for a in load_bootstrap() if a not in boots]
+        boots += [a for a in mesh_directory.dht_contacts(self._dir_records, self.identity.peer) if a not in boots]
         host = "127.0.0.1" if cfg.loopback else "0.0.0.0"
-        self.dht = DhtNode(self.identity, bind=(host, cfg.dht_port), bootstrap=boots, network_id=self.manifest.id,
-                           allow_private_dial=cfg.loopback)
-        self.dht.start()
+        want = cfg.dht_port or (direct_mod_default_dht() if cfg.auto else 0)
+        for bind_port in ([want, 0] if want else [0]):   # the default port may be busy: any free one then
+            try:
+                self.dht = DhtNode(self.identity, bind=(host, bind_port), bootstrap=boots, network_id=self.manifest.id,
+                                   allow_private_dial=cfg.loopback)
+                self.dht.start()
+                break
+            except OSError:
+                self.dht = None
+                if bind_port == 0:
+                    raise
         self.log(f"DHT on udp {self.dht.address[1]} ({len(boots)} bootstrap node(s))")
         try:
             self.dht.bootstrap()
         except Exception as e:
             self.log(f"DHT bootstrap failed ({type(e).__name__}); continuing")
         self._merge_dht()
-        if not boots and not self.seeds:
+        if not boots and not self.seeds and not self.gateway:
             self.log("no bootstrap node and no seed: this peer starts the network; others join with "
                      f"--bootstrap <this machine's address>:{self.dht.address[1]}")
 
@@ -668,7 +710,11 @@ class Node:
 
     def _announce(self, record) -> None:
         """Put the freshly signed record into the DHT (direct mode only; failures are not fatal)."""
-        if self.dht is None or record is None or not record.get("url"):
+        if record is None or not record.get("url"):
+            return
+        if self.gateway and self.state == "up":
+            mesh_directory.announce(self.gateway, record)
+        if self.dht is None:
             return
         try:
             self.dht.announce(record)
@@ -685,14 +731,21 @@ class Node:
         cert, key, fp = secure.make_peer_cert(self.identity, self.state_dir)
         ctx = secure.server_ssl_context(cert, key)
         host = "127.0.0.1" if cfg.loopback else "0.0.0.0"
-        server = BlockServer(block, host, self.port, token=self.token, extra_handlers=self.handlers(),
-                             ssl_context=ctx).start()
+        want = self.port or (direct_mod.DEFAULT_TCP_PORT if cfg.auto else 0)
+        try:
+            server = BlockServer(block, host, want, token=self.token, extra_handlers=self.handlers(),
+                                 ssl_context=ctx).start()
+        except OSError:
+            if not want or self.port:
+                raise
+            server = BlockServer(block, host, 0, token=self.token, extra_handlers=self.handlers(),
+                                 ssl_context=ctx).start()   # the default port is busy: any free one
         with self._lock:
             self._block, self.server = block, server
             self.port = server.port
         if self.decision is None:   # decided once; a move to another window keeps the same address
             decide = self._decider or direct_mod.decide
-            dial = self.dht.dial_back if self.dht is not None else (lambda ip, port: None)
+            dial = self._dial_back(fp)
             self.decision = decide(cfg, server.port, dial, log=self.log)
             self.log(f"direct address decision: {self.decision.kind}"
                      + (f" {self.decision.ip}:{self.decision.port}" if self.decision.direct else "")
@@ -702,6 +755,8 @@ class Node:
             with self._lock:
                 self.url, self.fp = d.url, fp
                 self.fpsig = secure.bind_fingerprint(self.identity, fp)
+            if d.kind != "loopback":
+                self.log(f"mode: direct ({self._verified_by or 'unverified'}; {d.ip}:{d.port})")
             return True
         # unreachable
         port = server.port
@@ -712,12 +767,44 @@ class Node:
             raise NodeError(f"this machine is not reachable from the internet on TCP port {port} ({d.detail}). "
                             + direct_mod.forward_hint(port, cfg.dht_port or None)
                             + ", or drop --no-tunnel-fallback to use a Cloudflare tunnel instead.")
-        self.log(f"not reachable directly ({d.detail}); using a Cloudflare tunnel instead. To serve directly, "
-                 + direct_mod.forward_hint(port, cfg.dht_port or None))
+        if cfg.auto:
+            self.log(f"mode: tunnel ({d.detail}; port {port} is not reachable from outside). To serve directly, "
+                     + direct_mod.forward_hint(port, cfg.dht_port or None))
+        else:
+            self.log(f"not reachable directly ({d.detail}); using a Cloudflare tunnel instead. To serve directly, "
+                     + direct_mod.forward_hint(port, cfg.dht_port or None))
         server.stop()      # the tunnel needs the plain loopback server, as without --direct
         with self._lock:
             self.server = None
         return False
+
+    _verified_by = ""
+
+    def _dial_back(self, fp):
+        """dial_back(ip, port) for decide(): the gateway's connect-back (asked once) and the DHT's dial-back; either
+        saying yes verifies the address. A gateway that saw a different IP than ours cannot vouch for it."""
+        def dial(ip, port):
+            answers = []
+            if self.gateway:
+                if self._gw_check is None:
+                    self._gw_check = mesh_directory.check(self.gateway, port, fp) or {}
+                g = self._gw_check
+                if g.get("ip") and g["ip"] != ip:
+                    self.log(f"the gateway sees this machine as {g['ip']}, not {ip}; not trusting its check")
+                    answers.append(None)
+                else:
+                    answers.append(g.get("reachable"))
+                if answers[-1]:
+                    self._verified_by = "verified by the gateway"
+                    return True
+            if self.dht is not None:
+                d = self.dht.dial_back(ip, port)
+                answers.append(d)
+                if d:
+                    self._verified_by = "verified by a peer"
+                    return True
+            return False if any(a is False for a in answers) else None
+        return dial
 
     def _check_direct(self) -> None:
         """Re-ask a few peers whether our address still answers; say so loudly when it does not."""
@@ -916,6 +1003,8 @@ class Node:
             try:
                 self._announce(self.publish())
                 now = time.monotonic()
+                if self.gateway:
+                    self.table.merge_many(mesh_directory.fetch(self.gateway, self.manifest.id, now=self.clock()))
                 if self.direct is not None:
                     self._merge_dht()
                 if now - last_tunnel_check >= TUNNEL_CHECK_SECONDS:
@@ -1023,13 +1112,23 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--external-port", type=int, metavar="N", help="the TCP port the internet uses to reach --port (default: the same)")
     d.add_argument("--dht-port", type=int, default=0, metavar="N", help="UDP port for the DHT (default: any; forward it so others can reach you)")
     d.add_argument("--no-tunnel-fallback", action="store_true", help="with --direct: refuse to start rather than use a tunnel when unreachable")
+    d.add_argument("--auto-direct", action="store_true", help="what plain `common join` passes: try a direct connection "
+                   "(default ports TCP 7471 / UDP 7472, a free port if busy), verified by the gateway and the DHT, and use the "
+                   "tunnel when that is not possible. Ignored with --direct or --no-tunnel")
     d.add_argument("--direct-loopback", action="store_true", help=argparse.SUPPRESS)  # tests only: publish https://127.0.0.1
     return p
+
+
+def stray_direct_flags(args) -> list:
+    return [f for f, v in (("--public-ip", args.public_ip), ("--external-port", args.external_port),
+                           ("--no-tunnel-fallback", args.no_tunnel_fallback), ("--direct-loopback", args.direct_loopback)) if v]
 
 
 def direct_config(args):
     """The DirectConfig for the parsed arguments, or None without --direct. Raises NodeError on a bad combination."""
     from commonnet.direct import DirectConfig, is_public_ipv4
+    if not args.direct and args.auto_direct and not args.no_tunnel and not stray_direct_flags(args):
+        return DirectConfig(bootstrap=list(args.bootstrap), auto=True)
     if not args.direct:
         stray = [f for f, v in (("--bootstrap", args.bootstrap), ("--public-ip", args.public_ip),
                                 ("--external-port", args.external_port), ("--dht-port", args.dht_port),
@@ -1080,9 +1179,11 @@ def main(argv=None) -> int:
         print(f"error: {e}", file=sys.stderr)
         status.write(blank_status("error", error=friendly(e)))
         return 2
+    # The rendezvous directory: COMMONNET_GATEWAY, else the production gateway. Stub (test) nodes use none unless named.
+    gateway = mesh_directory.gateway_url(default=None if args.stub else mesh_directory.DEFAULT_GATEWAY)
     node = Node(manifest, seeds, identity, hardware, port=args.port, stub=args.stub, tunnel=not args.no_tunnel,
                 advertise=args.advertise, status=status, api_port=args.api, fixed_window=fixed_window,
-                direct=direct, state_dir=directory)
+                direct=direct, state_dir=directory, gateway=gateway)
 
     def leave(signum, frame):
         node.request_leave()

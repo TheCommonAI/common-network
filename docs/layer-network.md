@@ -182,3 +182,14 @@ signed peer records (90 s TTL, newest per peer, capped per network and per sourc
 verify signatures themselves. `POST /announce` (a signed record), `GET /directory?network=ID` (up to 100 live records)
 and `POST /check {port, fp?}` (the gateway opens a TLS connection back to the caller's own IP only, ports 1024-65535,
 to tell a peer whether it is reachable from outside). All three are rate limited per IP. Code: `gateway/app/directory.py`.
+
+## Zero-config join (matrix)
+
+| command | behaviour |
+|---|---|
+| `common join` | auto-direct: directory lookup, address decision (flags, router mapping, STUN; ports 7471/7472, free port if busy), verified by the gateway `/check` and the DHT; verified => direct, else Cloudflare tunnel. Announces to the gateway directory every ~15 s either way |
+| `common join --no-direct` | tunnel only (still uses the directory) |
+| `common join --direct ...` | as before: forced direct (tunnel fallback unless `--no-tunnel-fallback`) |
+| `COMMONNET_GATEWAY=off` | no directory; `=URL` another gateway |
+
+Gateway down or old: everything behaves as before.

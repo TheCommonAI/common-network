@@ -66,10 +66,11 @@ def _default_fetch_manifest(url: str, timeout: float):
 class Network:
     def __init__(self, seeds=(), manifest=None, *, cache_dir=None, timeout: float = 5.0,
                  refresh_interval: float = 2.0, wait_s: float = 30.0, now=time.time, clock=time.monotonic,
-                 exchange=None, table=None, fetch_manifest=None, dht=None):
+                 exchange=None, table=None, fetch_manifest=None, dht=None, gateway=None):
         # `dht` (optional): an object with find_peers() -> [signed record], normally a started commonnet.dht.DhtNode.
         # With it, refresh() also asks the DHT, so no seed URL is needed. Without it nothing changes.
         self.dht = dht
+        self.gateway = gateway   # optional rendezvous directory URL: one more peer source in refresh(); fails soft
         self._pins: dict[str, str] = {}      # "ip:port" -> certificate fingerprint of each direct peer (shared with the BlockClients)
         self.seeds = [s.rstrip("/") for s in seeds]
         self._manifest = Manifest.load(manifest) if manifest is not None else None
@@ -110,6 +111,11 @@ class Network:
         to bootstrap from."""
         from commonnet.dht.bootstrap import load_bootstrap, parse_addr
         dht_mode = spec in (None, "", "dht")
+        # The gateway's directory is a peer source for a client with no URL, or whenever COMMONNET_GATEWAY names one.
+        from commonnet.mesh import directory as mesh_directory
+        if "gateway" not in kw:
+            explicit = mesh_directory.GATEWAY_ENV in os.environ
+            kw["gateway"] = mesh_directory.gateway_url() if (dht_mode or explicit) else None
         if dht_mode:
             from commonnet.node import DEFAULT_MANIFEST
             net = cls(seeds=[], manifest=str(DEFAULT_MANIFEST), **kw)
@@ -118,9 +124,10 @@ class Network:
         if dht_mode or bootstrap:
             addrs = [parse_addr(b) for b in bootstrap] + [a for a in load_bootstrap() if a not in
                                                            [parse_addr(b) for b in bootstrap]]
-            if not addrs:
+            if addrs:
+                net.start_dht(addrs)
+            elif not net.gateway:
                 raise NetworkUnreachable("no bootstrap node: give --bootstrap HOST:PORT (or set COMMONNET_DHT_BOOTSTRAP)")
-            net.start_dht(addrs)
         return net
 
     def start_dht(self, addrs, bind=("0.0.0.0", 0)) -> None:
@@ -232,6 +239,12 @@ class Network:
                 answered += 1 if found or len(self.dht.table) else 0
             except Exception as e:
                 errors.append(f"dht: {e}")
+        if self.gateway:
+            from commonnet.mesh import directory as mesh_directory
+            found = mesh_directory.fetch(self.gateway, self.manifest.id, timeout=self.timeout, now=self._now())
+            if found:
+                table.merge_many(found)
+                answered += 1
         live = table.live()
         if not answered and not live:
             raise NetworkUnreachable("no seed or known peer answered"

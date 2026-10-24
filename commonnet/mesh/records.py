@@ -27,7 +27,8 @@ SIGNED_FIELDS = ("v", "network", "peer", "pub", "url", "token", "window", "backe
 # Optional fields of a directly reachable peer (https://IP:PORT): `fp` is the sha256 of its TLS certificate and
 # `fpsig` the identity's signature binding it (commonnet.net.secure). canonical() already signs every key but
 # `sig`, so they are covered by the record signature; a peer that does not know them ignores them (see DIRECT.md).
-OPTIONAL_FIELDS = ("fp", "fpsig")
+# `dht` is the UDP port of the peer's DHT node (a directly reachable peer only; the host is the one in `url`).
+OPTIONAL_FIELDS = ("fp", "fpsig", "dht")
 
 
 class RecordError(ValueError):
@@ -112,6 +113,8 @@ class Identity:
             fp = secure.normalize_fingerprint(fields["fp"])
             record["fp"] = fp
             record["fpsig"] = fields.get("fpsig") or secure.bind_fingerprint(self, fp)
+        if fields.get("dht"):
+            record["dht"] = int(fields["dht"])
         check_shape(record)
         record["sig"] = _b64e(self._key.sign(canonical(record)))
         return record
@@ -147,6 +150,8 @@ def check_shape(record: dict) -> None:
         raise RecordError("gib must be a number")
     if isinstance(record["ts"], bool) or not isinstance(record["ts"], (int, float)):
         raise RecordError("ts must be a number")
+    if "dht" in record and (type(record["dht"]) is not int or not 1 <= record["dht"] <= 65535):
+        raise RecordError("dht must be a port number")
     if ("fp" in record) != ("fpsig" in record):
         raise RecordError("fp and fpsig come together")
     if "fp" in record:
