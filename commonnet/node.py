@@ -55,6 +55,7 @@ DEFAULT_MANIFEST = Path(__file__).resolve().parent / "networks" / "main.json"
 NETWORK_MODELS = {
     "qwen3-8b": "main.json",
     "bonsai-8b": "bonsai-8b.json",
+    "bonsai-27b": "bonsai-27b.json",
     "bonsai-2-9b": "bonsai-2-9b.json",
     "bonsai-2-27b": "bonsai-2-27b.json",
 }
@@ -1095,7 +1096,7 @@ def check_backend_supported(manifest: Manifest, hardware: Hardware) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="commonnet.node", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--network", metavar="MODEL|URL|FILE", help=f"model name (qwen3-8b, bonsai-8b, bonsai-2-9b, bonsai-2-27b), a seed peer URL, or manifest file (or set {NETWORK_ENV})")
+    p.add_argument("--network", metavar="MODEL|URL|FILE", help=f"model name (qwen3-8b, bonsai-8b, bonsai-27b, bonsai-2-9b, bonsai-2-27b), a seed peer URL, or manifest file (or set {NETWORK_ENV})")
     p.add_argument("--seed", action="append", default=[], metavar="URL", help="another peer to learn from (repeatable)")
     p.add_argument("--port", type=int, default=0, help="port for the block server (default: any free port; loopback only, "
                                                        "or with --direct the public TCP port, listening on all interfaces over TLS)")
