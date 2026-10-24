@@ -52,10 +52,11 @@ def _b64d(s: str) -> bytes:
 
 
 def caller_ip(request: Request) -> str:
-    """The caller's address: Railway's proxy sets the first X-Forwarded-For entry; never taken from a body."""
+    """The caller's address from the proxy header; never from a body. Uses the LAST entry (the one our own proxy
+    appended), so a client cannot aim /check at a third party by sending its own X-Forwarded-For."""
     xff = request.headers.get("x-forwarded-for", "")
     if xff and (TRUST_TEST_HEADER or os.environ.get("RAILWAY_ENVIRONMENT")):
-        first = xff.split(",")[0].strip()
+        first = xff.split(",")[-1].strip()
         if first:
             return first
     return request.client.host if request.client else "0.0.0.0"
