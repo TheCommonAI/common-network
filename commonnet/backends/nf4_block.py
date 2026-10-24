@@ -84,6 +84,13 @@ def _quantise(bnb, Params4bit, w: torch.Tensor, n_in: int, n_out: int, device, d
     return new
 
 
+def _plain_keys(state_keys, quantized) -> list[str]:
+    """The state-dict keys to read as plain tensors: everything except a quantised Linear's weight AND the
+    statistics bitsandbytes hangs under it (weight.absmax, weight.quant_map, weight.quant_state.*). A checkpoint
+    quantised on load has no such tensors, so asking for them raised KeyError (Patrick's first Bonsai start)."""
+    return [k for k in state_keys if not any(k == q or k.startswith(q + ".") for q in quantized)]
+
+
 @dataclass
 class Nf4BlockRange(BlockRange):
     device: torch.device | str = "cuda"
@@ -153,9 +160,7 @@ class Nf4BlockRange(BlockRange):
             # Norms are not quantized. Load them in the compute dtype.
             # Everything that is not a quantized Linear (norms, conv1d, A_log, dt_bias) is a plain tensor.
             plain = {}
-            for key in layer.state_dict().keys():
-                if key in quantized:
-                    continue
+            for key in _plain_keys(layer.state_dict().keys(), quantized):
                 plain[key] = _raw_tensor(reader, prefix + key, device).to(self.dtype)
             layer.load_state_dict(plain, strict=False, assign=True)
             for mod in (getattr(layer, "self_attn", None), getattr(layer, "linear_attn", None)):

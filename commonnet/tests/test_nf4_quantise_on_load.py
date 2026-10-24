@@ -126,6 +126,21 @@ class Selection(unittest.TestCase):
         with self.assertRaises(ValueError):
             nf4_block._load_linear(FakeBnb, FakeParams4bit, self.reader, name, mod, "cpu", torch.bfloat16)
 
+class PlainKeys(unittest.TestCase):
+    def test_quantised_linears_and_their_statistics_are_not_read_as_plain_tensors(self):
+        quantized = {"self_attn.q_proj.weight", "mlp.down_proj.weight"}
+        state = ["self_attn.q_proj.weight", "self_attn.q_proj.weight.absmax", "self_attn.q_proj.weight.quant_map",
+                 "self_attn.q_proj.weight.nested_absmax", "self_attn.q_proj.weight.quant_state.bitsandbytes__nf4",
+                 "mlp.down_proj.weight", "mlp.down_proj.weight.absmax", "input_layernorm.weight",
+                 "self_attn.q_norm.weight", "post_attention_layernorm.weight"]
+        self.assertEqual(nf4_block._plain_keys(state, quantized),
+                         ["input_layernorm.weight", "self_attn.q_norm.weight", "post_attention_layernorm.weight"])
+
+    def test_a_norm_whose_name_extends_a_quantised_one_is_kept(self):
+        # q_proj.weight must not swallow q_proj_norm.weight: only keys under "q_proj.weight." are statistics
+        self.assertEqual(nf4_block._plain_keys(["self_attn.q_proj_norm.weight"], {"self_attn.q_proj.weight"}),
+                         ["self_attn.q_proj_norm.weight"])
+
 
 if __name__ == "__main__":
     unittest.main()
