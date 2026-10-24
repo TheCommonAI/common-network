@@ -99,7 +99,10 @@ LLAMA_URL = f"http://127.0.0.1:{LLAMA_PORT}"
 # weights are in.
 WORKER_PORT = 11435
 WORKER_URL = f"http://127.0.0.1:{WORKER_PORT}"
-TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
+# `api.trycloudflare.com` is Cloudflare's own endpoint for requesting a tunnel. cloudflared names it in its error
+# lines (a failed first attempt on a slow or filtered network), so a first-match search published it as this
+# peer's address and every request to the peer then answered HTTP 405.
+TUNNEL_URL_PATTERN = re.compile(r"https://(?!api\.trycloudflare\.com)[a-zA-Z0-9.-]+\.trycloudflare\.com")
 
 # cloudflared's own errors arrive on the same stream the tunnel URL does --
 # stderr is merged into stdout in start_tunnel() -- and that stream was read for

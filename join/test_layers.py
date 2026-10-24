@@ -273,6 +273,18 @@ class JoinFlag(unittest.TestCase):
         self.assertEqual(source.count("import_module(\"layers\")"), body.count("import_module(\"layers\")"))  # only the loader imports it
 
 
+class TunnelUrlPattern(unittest.TestCase):
+    def test_cloudflares_own_api_host_is_never_taken_for_the_tunnel(self):
+        pattern = join.TUNNEL_URL_PATTERN
+        error_line = 'ERR failed to request quick Tunnel error="Post \\"https://api.trycloudflare.com/tunnel\\": dial tcp: lookup"'
+        self.assertIsNone(pattern.search(error_line))
+        banner = "|  https://tip-performed-champions-logan.trycloudflare.com                                  |"
+        self.assertEqual(pattern.search(banner).group(0), "https://tip-performed-champions-logan.trycloudflare.com")
+        # an error line followed by the real banner: the real address wins
+        found = [m.group(0) for line in (error_line, banner) if (m := pattern.search(line))]
+        self.assertEqual(found, ["https://tip-performed-champions-logan.trycloudflare.com"])
+
+
 class ExecHelper(unittest.TestCase):
     """os.execv on Windows detaches (the prompt returns while the program runs); _exec must wait instead."""
 
