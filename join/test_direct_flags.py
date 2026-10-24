@@ -14,7 +14,8 @@ GLOBAL = "93.184.216.34"
 class DirectFlags(unittest.TestCase):
     def test_without_direct_nothing_is_added(self):
         off = argparse.Namespace(network="", no_update=True, api=None, layers=None, direct=False, bootstrap=[])
-        self.assertEqual(join._direct_flags(off), [])
+        self.assertEqual(join._direct_flags(off), ["--auto-direct"])   # plain join tries direct, falls back to the tunnel
+        self.assertEqual(join._direct_flags(argparse.Namespace(direct=False, no_direct=True)), [])
         self.assertEqual(join._service_argv(off)[-1], "--network")
         self.assertNotIn("--direct", join._service_argv(off))
 

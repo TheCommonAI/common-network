@@ -246,12 +246,12 @@ class JoinFlag(unittest.TestCase):
                 mock.patch.object(join, "announce_layer_first"), \
                 mock.patch.object(sys, "argv", ["join.py", "--no-update", "--api"]):
             join.main()
-        run.assert_called_once_with(None, ["--api", "11440"])
+        run.assert_called_once_with(None, ["--api", "11440", "--auto-direct"])
 
     def test_api_is_passed_to_the_node(self):
-        for argv, expected in ((["--network"], ["--api", "11440"]), (["--network", "--no-api"], []),
-                               (["--network", "--api"], ["--api", "11440"]),
-                               (["--network", "https://seed", "--api", "12345"], ["--api", "12345"])):
+        for argv, expected in ((["--network"], ["--api", "11440", "--auto-direct"]), (["--network", "--no-api"], ["--auto-direct"]),
+                               (["--network", "--api"], ["--api", "11440", "--auto-direct"]),
+                               (["--network", "https://seed", "--api", "12345"], ["--api", "12345", "--auto-direct"])):
             with self.subTest(argv=argv):
                 with mock.patch.object(join, "run_network_member") as run, \
                         mock.patch.object(sys, "argv", ["join.py", "--no-update", *argv]):
@@ -262,7 +262,7 @@ class JoinFlag(unittest.TestCase):
         with mock.patch.object(join, "run_network_member") as run, \
                 mock.patch.object(sys, "argv", ["join.py", "--no-update", "--network", "--layers", "27-36"]):
             join.main()
-        run.assert_called_once_with(None, ["--api", "11440", "--layers", "27-36"])
+        run.assert_called_once_with(None, ["--api", "11440", "--layers", "27-36", "--auto-direct"])
         import argparse
         args = argparse.Namespace(network="", api=11440, layers="27-36", no_update=False)
         self.assertIn("--layers=27-36", join._service_argv(args))

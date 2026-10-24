@@ -57,7 +57,7 @@ class ServiceKeepsItsMode(unittest.TestCase):
         for flag in ("--model", "--gateway", "--legacy"):
             self.assertNotIn(flag, argv)
         self.assertEqual(join._service_argv(ns(network="https://x.example", no_update=True))[-2:],
-                         ["--no-update", "--network=https://x.example"])
+                         ["--auto-direct", "--network=https://x.example"])
 
     def test_the_recorded_command_line_parses_back_to_the_same_mode(self):
         self.assertEqual(join.choose_mode(ns(legacy=True, model="qwen-x"), supported=lambda: True), "legacy")
