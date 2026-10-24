@@ -134,7 +134,13 @@ class BlockClient:
     def __init__(self, *, token=_TOKEN_FROM_ENV, retries: int = DEFAULT_RETRIES,
                  backoff: float = RETRY_BACKOFF_SECONDS,
                  max_backoff: float = RETRY_MAX_BACKOFF_SECONDS,
-                 max_request_bytes: int = MAX_REQUEST_BYTES, sleep=time.sleep):
+                 max_request_bytes: int = MAX_REQUEST_BYTES, sleep=time.sleep,
+                 pin=None, ssl_context=None):
+        """pin (default None) pins the certificate of https endpoints by sha256 fingerprint
+        (commonnet/net/secure.py): a fingerprint string for every https endpoint, or a dict
+        mapping "host:port" to one, which wins over the string form. An endpoint with a pin is
+        never verified through the system CAs. ssl_context (default None) replaces the context
+        for https endpoints without a pin. With neither, behaviour is unchanged."""
         if retries < 0:
             raise ValueError("retries must be zero or more")
         self.token = auth.load_token() if token is _TOKEN_FROM_ENV else (
@@ -144,6 +150,9 @@ class BlockClient:
         self.max_backoff = max_backoff
         self.max_request_bytes = max_request_bytes
         self._sleep = sleep
+        self._pin = pin
+        self._ssl_context = ssl_context
+        self._pinned: dict[str, object] = {}
         self._idle: dict[tuple, http.client.HTTPConnection] = {}
         self._lock = threading.Lock()
         self.timings: collections.deque = collections.deque(maxlen=4096)
@@ -184,12 +193,25 @@ class BlockClient:
         for conn in idle:
             conn.close()
 
+    def _context_for(self, host: str, port: int):
+        pin = self._pin.get(f"{host}:{port}") if isinstance(self._pin, dict) else self._pin
+        if pin:
+            from commonnet.net import secure
+            with self._lock:
+                ctx = self._pinned.get(pin)
+                if ctx is None:
+                    ctx = self._pinned[pin] = secure.client_ssl_context(pin)
+            return ctx
+        return self._ssl_context  # None: http.client builds its default verifying context
+
     def _take(self, key: tuple, timeout: float):
         with self._lock:
             conn = self._idle.pop(key, None)
         if conn is None:
-            cls = _HTTPSConnection if key[0] == "https" else _HTTPConnection
-            return cls(key[1], key[2], timeout=timeout), False
+            if key[0] == "https":
+                return _HTTPSConnection(key[1], key[2], timeout=timeout,
+                                        context=self._context_for(key[1], key[2])), False
+            return _HTTPConnection(key[1], key[2], timeout=timeout), False
         conn.timeout = timeout
         try:
             if conn.sock is not None:
@@ -249,6 +271,8 @@ class BlockClient:
                 status, status_reason, raw, reused, server_ms = self._once(
                     method, parts, path, data, headers, timeout)
             except (OSError, http.client.HTTPException) as e:
+                if type(e).__name__ == "PinMismatch":  # an impostor or a stale pin: retrying cannot help
+                    raise Unreachable(f"{method} {url}: {e}") from None
                 reason = _reason(e)
             else:
                 self.timings.append({
