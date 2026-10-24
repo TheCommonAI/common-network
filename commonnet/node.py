@@ -50,6 +50,13 @@ NETWORK_ENV = "COMMONNET_NETWORK"
 # The operator fills in always-on peers here once there are any; --seed and the manifest add more.
 DEFAULT_SEEDS: tuple[str, ...] = ()
 DEFAULT_MANIFEST = Path(__file__).resolve().parent / "networks" / "main.json"
+# Short names accepted by common join --network NAME. Keep this explicit so test
+# manifests in the same directory are never exposed as user choices.
+NETWORK_MODELS = {
+    "qwen3-8b": "main.json",
+    "bonsai-8b": "bonsai-8b.json",
+    "bonsai-2-9b": "bonsai-2-9b.json",
+}
 # Seeds change without a release: this file on main lists peers that are normally up.
 SEEDS_URL = "https://raw.githubusercontent.com/TheCommonAI/common-network/main/commonnet/networks/seeds.json"
 
@@ -214,7 +221,7 @@ def fetch_default_seeds(environ=None, opener=None) -> list[str]:
 
 
 def resolve_network(network: str | None, seeds: list[str], environ=None) -> tuple[Manifest, list[str]]:
-    """(manifest, seed URLs) from --network: a manifest file or JSON, or a seed peer's URL."""
+    """(manifest, seed URLs) from --network: a model name, manifest file/JSON, or seed peer URL."""
     environ = os.environ if environ is None else environ
     network = network or environ.get(NETWORK_ENV) or None
     seeds = list(seeds)
@@ -232,6 +239,8 @@ def resolve_network(network: str | None, seeds: list[str], environ=None) -> tupl
             # Nothing named: the built-in network. A peer with no seed to reach starts the network itself.
             network = str(DEFAULT_MANIFEST)
             seeds = fetch_default_seeds(environ)
+    if network in NETWORK_MODELS:
+        network = str(DEFAULT_MANIFEST.parent / NETWORK_MODELS[network])
     if re.match(r"^https?://", network):
         manifest = fetch_manifest(network)
         seeds = [network] + [s for s in seeds if s != network]
@@ -1085,7 +1094,7 @@ def check_backend_supported(manifest: Manifest, hardware: Hardware) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="commonnet.node", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--network", metavar="URL|FILE", help=f"a seed peer's URL, or a manifest file (or set {NETWORK_ENV})")
+    p.add_argument("--network", metavar="MODEL|URL|FILE", help=f"model name (qwen3-8b, bonsai-8b, bonsai-2-9b), a seed peer URL, or manifest file (or set {NETWORK_ENV})")
     p.add_argument("--seed", action="append", default=[], metavar="URL", help="another peer to learn from (repeatable)")
     p.add_argument("--port", type=int, default=0, help="port for the block server (default: any free port; loopback only, "
                                                        "or with --direct the public TCP port, listening on all interfaces over TLS)")
