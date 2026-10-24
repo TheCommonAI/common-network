@@ -1,0 +1,57 @@
+{
+ "results": [
+  {
+   "prefill": {
+    "steps": 2,
+    "ms_mean": 414.72922950197244,
+    "ms_p50": 396.71908400487155,
+    "ms_p95": 432.73937499907333,
+    "tok_s": 2.4112117711135284,
+    "compute_ms": 87.89,
+    "network_ms": 118.6043130062602,
+    "client_ms": 208.23491649571224,
+    "client_embed_ms": 0.0668125030642841,
+    "client_head_ms": 0.6253749997995328,
+    "client_sample_ms": 0.04850000186706893,
+    "client_codec_ms": 207.49422899098136,
+    "hops": 2.0,
+    "reuse_rate": 1.0,
+    "bytes_per_step": 43996.0
+   },
+   "decode": {
+    "steps": 38,
+    "ms_mean": 193.45737060441598,
+    "ms_p50": 193.42649999452988,
+    "ms_p95": 196.30870800028788,
+    "tok_s": 5.169097444443263,
+    "compute_ms": 87.75447368421052,
+    "network_ms": 104.1985075802348,
+    "client_ms": 1.5043893399706576,
+    "client_embed_ms": 0.08708452553132941,
+    "client_head_ms": 0.6288158156645582,
+    "client_sample_ms": 0.042891393892013616,
+    "client_codec_ms": 0.7455976048827564,
+    "hops": 2.0,
+    "reuse_rate": 1.0,
+    "bytes_per_step": 3034.0
+   },
+   "config": {
+    "stages": 2,
+    "replicas": 1,
+    "layers": 2,
+    "layer_ms": 40.0,
+    "rtt_ms": 50.0,
+    "jitter_ms": 0.0,
+    "loss": 0.0,
+    "hidden": 256,
+    "prompt_tokens": 16,
+    "new_tokens": 20,
+    "keepalive": true
+   },
+   "expected": {
+    "compute_ms": 80.0,
+    "network_ms_floor": 100.0
+   }
+  }
+ ]
+}
