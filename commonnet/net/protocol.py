@@ -146,6 +146,22 @@ def decode_session_request(obj) -> str:
     return check_session_id(obj["id"])
 
 
+def encode_truncate_request(session_id: str, length: int) -> dict:
+    if type(length) is not int or length < 0:
+        raise ProtocolError(f"length must be a non-negative int, got {length!r}")
+    return {"id": check_session_id(session_id), "length": length}
+
+
+def decode_truncate_request(obj) -> tuple:
+    """Returns (session_id, length)."""
+    _fields(obj, "truncate request", ("id", "length"))
+    session_id = check_session_id(obj["id"])
+    length = obj["length"]
+    if type(length) is not int or length < 0:
+        raise ProtocolError(f"length must be a non-negative int, got {length!r}")
+    return session_id, length
+
+
 def encode_forward_request(session_id: str, hidden: Tensor, start_pos: int) -> dict:
     body = {"id": check_session_id(session_id), "start_pos": check_start_pos(start_pos)}
     body.update(encode_tensor(hidden))

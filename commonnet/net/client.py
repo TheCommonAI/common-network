@@ -160,6 +160,11 @@ class BlockClient:
         body = protocol.encode_session_request(session_id)
         protocol.decode_ok(self._call("POST", endpoint, "/close", body, timeout))
 
+    def truncate(self, endpoint: str, session_id: str, length: int, timeout: float = CONTROL_TIMEOUT_SECONDS) -> None:
+        """Cut the session back to `length` positions. Idempotent. An old server answers 404 'no endpoint'."""
+        body = protocol.encode_truncate_request(session_id, length)
+        protocol.decode_ok(self._call("POST", endpoint, "/truncate", body, timeout))
+
     def forward(self, endpoint: str, session_id: str, hidden: Tensor, start_pos: int,
                 timeout: float = FORWARD_TIMEOUT_SECONDS) -> Tensor:
         if not isinstance(hidden, Tensor):

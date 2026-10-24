@@ -76,6 +76,7 @@ class HttpTransport:
         self._active: dict[tuple[str, str], int] = {}
         self._history: dict[tuple[str, str], list] = {}
         self._dead: dict[tuple[str, int], float] = {}
+        self._truncate_ok: dict[str, bool] = {}
         self.failovers: list[tuple[str, int, int]] = []  # (endpoint, from index, to index), for tests and logs
 
     def _candidates(self, name: str) -> list:
@@ -196,6 +197,66 @@ class HttpTransport:
                 if isinstance(e, RemoteError) and e.status != 404:
                     raise  # an answer from a live server, not a lost one (404: it forgot the session)
                 self._recover(name, session_id, index, e)
+
+    # --- rollback for speculative decoding -----------------------------------------------
+
+    @staticmethod
+    def _cut_history(pieces: list, length: int) -> list:
+        """The pieces of a session's history, cut to the first `length` positions (a piece may be cut in the middle)."""
+        out = []
+        for start_pos, piece in pieces:
+            if start_pos >= length:
+                continue
+            seq = piece.shape[1]
+            if start_pos + seq > length:
+                keep = length - start_pos
+                arr = np.frombuffer(piece.data, dtype=_NP[piece.dtype]).reshape(piece.shape)[:, :keep]
+                piece = Tensor(tuple(arr.shape), piece.dtype, np.ascontiguousarray(arr).tobytes())
+            out.append((start_pos, piece))
+        return out
+
+    def supports_truncate(self, endpoints) -> bool:
+        """True if every server on the route has the /truncate op. An old server answers 404 'no endpoint'.
+
+        Asks about a throwaway session: a new server says that session is not open (404), an old one has no such path."""
+        import uuid
+        for ep in endpoints:
+            cached = self._truncate_ok.get(ep.name)
+            if cached is None:
+                client, url = self._target(ep.name, self._first_alive(ep.name))
+                try:
+                    client.truncate(url, "probe-" + uuid.uuid4().hex[:16], 0)
+                    cached = True
+                except RemoteError as e:
+                    cached = e.status == 404 and "no endpoint" not in e.message
+                except BlockError:
+                    cached = False
+                self._truncate_ok[ep.name] = cached
+            if not cached:
+                return False
+        return True
+
+    def truncate(self, endpoint, session_id: str, length: int) -> None:
+        """Cut this endpoint's session back to `length` positions. Idempotent. The kept history is cut first, so a
+        failover during or after this replays exactly the truncated session."""
+        name, key = endpoint.name, (endpoint.name, session_id)
+        if key not in self._open:
+            return
+        if key in self._history:
+            self._history[key] = self._cut_history(self._history[key], length)
+        while True:
+            index = self._active[key]
+            client, url = self._target(name, index)
+            try:
+                client.truncate(url, session_id, length)
+                return
+            except (Unreachable, RemoteError) as e:
+                if len(self._candidates(name)) < 2 and self._on_exhausted is None:
+                    raise
+                if isinstance(e, RemoteError) and e.status != 404:
+                    raise
+                self._recover(name, session_id, index, e)  # replays the truncated history: nothing more to cut
+                return
 
     def forward(self, endpoint, session_id: str, hidden: torch.Tensor, start_pos: int) -> torch.Tensor:
         name, key = endpoint.name, (endpoint.name, session_id)

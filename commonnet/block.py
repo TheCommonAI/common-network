@@ -190,6 +190,22 @@ class BlockRange:
         session.length += q_len
         return hidden
 
+    def truncate(self, session_id: str, length: int) -> None:
+        """Cut the session's KV cache back to `length` positions (speculative rollback). Idempotent."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise KeyError(f"unknown session {session_id!r}")
+        if length >= session.length:
+            return
+        if self.arch == "qwen3_5":
+            raise NotImplementedError("this block has non-attention layers; its cache cannot be truncated")
+        cache = session.cache
+        for i in range(len(cache.keys)):
+            if cache.keys[i] is not None:
+                cache.keys[i] = cache.keys[i][:, :, :length].contiguous()
+                cache.values[i] = cache.values[i][:, :, :length].contiguous()
+        session.length = length
+
     def _causal_mask(self, start_pos: int, q_len: int, dtype: torch.dtype) -> torch.Tensor:
         kv_len = start_pos + q_len
         q_pos = torch.arange(start_pos, kv_len, device=self.device)

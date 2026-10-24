@@ -54,10 +54,21 @@ class SynthBlock:
             return self._weights[key]
 
     def open(self, session_id: str) -> None:
-        self._sessions[session_id] = {"pos": 0, "sum": None}
+        self._sessions[session_id] = {"pos": 0, "sum": None, "cs": None}
 
     def close(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
+
+    def truncate(self, session_id: str, length: int) -> None:
+        state = self._sessions[session_id]
+        if length >= state["pos"]:
+            return
+        state["pos"] = length
+        if length == 0:
+            state["sum"], state["cs"] = None, None
+        else:
+            state["cs"] = state["cs"][:, :length]
+            state["sum"] = state["cs"][:, -1:, :].copy()
 
     def forward(self, session_id: str, hidden: Tensor, start_pos: int) -> Tensor:
         state = self._sessions[session_id]
@@ -70,6 +81,8 @@ class SynthBlock:
         if state["sum"] is not None:
             csum = csum + state["sum"]
         state["sum"] = csum[:, -1:, :].copy()
+        # per-position running sums: what a truncate (rollback) restores
+        state["cs"] = csum.copy() if state["cs"] is None else np.concatenate([state["cs"], csum], axis=1)
         counts = np.arange(state["pos"] + 1, state["pos"] + seq + 1, dtype=np.float32).reshape(1, seq, 1)
         ctx = csum / counts
         state["pos"] += seq
@@ -150,3 +163,27 @@ class SynthClient(Client):
         finally:
             for ep in endpoints:
                 self.transport.close(ep, session_id)
+
+
+class OracleDrafter:
+    """A drafter with a controlled acceptance rate: it knows the true greedy continuation and gets each draft
+    token right with probability `accept` (a wrong token is a different random id)."""
+
+    def __init__(self, prompt_len: int, truth: list[int], accept: float, vocab: int = 2048, seed: int = 0):
+        self.prompt_len, self.truth, self.accept, self.vocab = prompt_len, list(truth), accept, vocab
+        self.rng = np.random.default_rng(seed)
+        self.calls = 0
+
+    def reset(self) -> None:
+        pass
+
+    def propose(self, context, k):
+        self.calls += 1
+        idx = len(context) - self.prompt_len
+        out = []
+        for i in range(k):
+            tok = self.truth[idx + i] if idx + i < len(self.truth) else 0
+            if self.rng.random() >= self.accept:
+                tok = (tok + 1 + int(self.rng.integers(self.vocab - 1))) % self.vocab
+            out.append(tok)
+        return out

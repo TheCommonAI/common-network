@@ -212,6 +212,20 @@ class MlxBlockRange:
         sess = self._sessions.get(session_id)
         return 0 if sess is None else sess.length
 
+    def truncate(self, session_id: str, length: int) -> None:
+        """Cut the session's KV cache back to `length` positions (speculative rollback). Idempotent."""
+        sess = self._sessions.get(session_id)
+        if sess is None:
+            raise KeyError(f"unknown session {session_id!r}")
+        if length >= sess.length:
+            return
+        if not all(c.is_trimmable() for c in sess.caches):
+            raise NotImplementedError("this block has non-attention layers; its cache cannot be truncated")
+        drop = sess.length - length
+        for c in sess.caches:
+            c.trim(drop)
+        sess.length = length
+
     def close(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
 
@@ -270,6 +284,9 @@ class OnWorkerThread:
 
     def session_length(self, session_id):
         return self._run("session_length", session_id)
+
+    def truncate(self, session_id, length):
+        return self._run("truncate", session_id, length)
 
     def open_sessions(self):
         return self._run("open_sessions")
