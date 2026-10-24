@@ -489,7 +489,11 @@ def gateway_json(method: str, url: str, body: dict | None = None, headers: dict 
         try:
             return http_json(method, url, body=body, headers=headers,
                              timeout=REQUEST_TIMEOUT_SECONDS)
-        except urllib.error.HTTPError:
+        except urllib.error.HTTPError as e:
+            if e.code == 410:
+                die("the old Common gateway has been retired, so `--legacy` and --model no longer work. "
+                    "Run `common join` (no flags) to join the new decentralised network on a Mac with "
+                    "Apple silicon or a PC with an NVIDIA GPU.")
             raise  # a real answer -- and an HTTPError is a URLError, so this comes first
         except (urllib.error.URLError, socket.timeout, OSError):
             if time.monotonic() >= deadline:
@@ -1771,7 +1775,9 @@ def main() -> None:
         run_network_member(args.network or None, [] if args.api is None else ["--api", str(args.api)])
         return
     if fell_back:
-        print(f"{GLYPH_WORK} {dim('this machine cannot serve the layer network (it needs Apple silicon or an NVIDIA GPU); running as a whole-model node.')}")
+        die("this machine cannot join the Common network: it needs Apple silicon or an NVIDIA GPU "
+            "(on Windows or Linux, `nvidia-smi` must work). The old whole-model gateway is retired, so there is "
+            "no CPU-only mode. If this PC has an NVIDIA GPU, install its driver from nvidia.com/drivers and try again.")
 
     gateway = args.gateway.rstrip("/")
 
