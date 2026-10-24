@@ -6,4 +6,5 @@
            "client_repo": "mlx-community/Qwen3-8B-4bit"},
  "boundaries": [0, 9, 18, 27, 36],
  "gib_per_layer": {"mlx": 0.125, "nf4": 0.17, "cpu": 0.4}, "fixed_gib": 0.3,
+ "io_gib": {"mlx": 0.35, "cpu": 1.2, "nf4": 1.2},
  "min_replicas": 2, "seeds": []}

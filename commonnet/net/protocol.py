@@ -17,6 +17,7 @@ block's edge.
 from __future__ import annotations
 
 import base64
+import math
 import re
 from dataclasses import dataclass
 
@@ -190,6 +191,104 @@ def decode_forward_request_full(obj) -> tuple:
     return session_id, start_pos, hidden, truncate_to
 
 
+MAX_IDS = 1 << 20
+OUTPUTS = ("ids",)
+WHICH = ("last", "all")
+CAPS = ("ids_in", "head_out", "chain_v1", "chain_private_v1", "activation_int8_group_v1")
+
+
+def check_ids(value) -> list:
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_IDS:
+        raise ProtocolError("ids must be a non-empty JSON array of token ids")
+    for t in value:
+        if type(t) is not int or t < 0:
+            raise ProtocolError("every token id must be a non-negative int")
+    return value
+
+
+def check_sampling(value):
+    """None (greedy) or {"temperature": >0, "top_p": in (0, 1], "seed": int >= 0}."""
+    if value is None:
+        return None
+    _fields(value, "sampling", ("temperature", "top_p", "seed"))
+    t, p, seed = value["temperature"], value["top_p"], value["seed"]
+    if type(t) not in (int, float) or type(p) not in (int, float):
+        raise ProtocolError("sampling needs temperature > 0 and 0 < top_p <= 1")
+    try:
+        t, p = float(t), float(p)
+    except (ValueError, OverflowError):
+        raise ProtocolError("sampling needs finite temperature and top_p") from None
+    if not math.isfinite(t) or not t > 0 or not math.isfinite(p) or not 0 < p <= 1:
+        raise ProtocolError("sampling needs temperature > 0 and 0 < top_p <= 1")
+    if type(seed) is not int or seed < 0:
+        raise ProtocolError("sampling seed must be a non-negative int")
+    return {"temperature": float(t), "top_p": float(p), "seed": seed}
+
+
+@dataclass(frozen=True)
+class ForwardRequest:
+    """A /forward body: exactly one of hidden / ids, plus the optional output mode ("ids": return token ids)."""
+    session_id: str
+    start_pos: int
+    hidden: Tensor | None = None
+    ids: list | None = None
+    truncate_to: int | None = None
+    output: str | None = None
+    which: str = "last"
+    sampling: dict | None = None
+
+
+def encode_forward_request_ex(session_id: str, hidden: Tensor | None, start_pos: int, truncate_to: int | None = None, *,
+                              ids=None, output: str | None = None, which: str | None = None, sampling=None) -> dict:
+    """Like encode_forward_request, but the input may be token ids (hidden=None) and the reply token ids
+    (output="ids"; which="last" or "all" positions; sampling None = greedy). Old servers refuse the new fields."""
+    if (hidden is None) == (ids is None):
+        raise ProtocolError("a forward request carries hidden or ids, not both and not neither")
+    body = {"id": check_session_id(session_id), "start_pos": check_start_pos(start_pos)}
+    if truncate_to is not None:
+        body["truncate_to"] = check_start_pos(truncate_to)
+    if ids is not None:
+        body["ids"] = check_ids(list(ids))
+    else:
+        body.update(encode_tensor(hidden))
+    if output is not None:
+        if output not in OUTPUTS:
+            raise ProtocolError(f"output must be one of {OUTPUTS}")
+        body["output"] = output
+        body["which"] = which or "last"
+        if sampling is not None:
+            body["sampling"] = check_sampling(sampling)
+    return body
+
+
+def decode_forward_request_ex(obj) -> ForwardRequest:
+    if isinstance(obj, dict) and "ids" in obj:
+        _fields(obj, "forward request", ("id", "start_pos", "ids"), ("truncate_to", "output", "which", "sampling"))
+        hidden, ids = None, check_ids(obj["ids"])
+    else:
+        _fields(obj, "forward request", ("id", "start_pos", "shape", "dtype", "data"),
+                ("truncate_to", "output", "which", "sampling"))
+        hidden, ids = decode_tensor({k: obj[k] for k in ("shape", "dtype", "data")}, "forward request"), None
+    output = obj.get("output")
+    if output is not None and output not in OUTPUTS:
+        raise ProtocolError(f"output must be one of {OUTPUTS}")
+    which = obj.get("which", "last")
+    if which not in WHICH or (("which" in obj or "sampling" in obj) and output is None):
+        raise ProtocolError("which and sampling need output")
+    return ForwardRequest(check_session_id(obj["id"]), check_start_pos(obj["start_pos"]), hidden, ids,
+                          check_start_pos(obj["truncate_to"]) if "truncate_to" in obj else None, output, which,
+                          check_sampling(obj.get("sampling")))
+
+
+def encode_ids_reply(ids) -> dict:
+    return {"ids": check_ids(list(ids))}
+
+
+def decode_ids_reply(obj) -> list:
+    _fields(obj, "forward reply", ("ids",))
+    return check_ids(obj["ids"])
+
+
 def encode_forward_reply(hidden: Tensor) -> dict:
     return encode_tensor(hidden)
 
@@ -212,13 +311,24 @@ def encode_error(message: str) -> dict:
     return {"ok": False, "error": message}
 
 
-def encode_health(layers, device: str) -> dict:
-    return {"ok": True, "layers": list(check_layers(layers)), "device": str(device)}
+def encode_health(layers, device: str, caps=None) -> dict:
+    """caps (optional): what this block can do beyond the basic protocol. Sent only to a client that asked
+    (GET /health?caps=1), because an old client refuses health replies with fields it does not know."""
+    out = {"ok": True, "layers": list(check_layers(layers)), "device": str(device)}
+    if caps:
+        out["caps"] = [c for c in caps if c in CAPS]
+    return out
+
+
+def decode_health_caps(obj) -> tuple:
+    """The capability names in a health reply (empty from an old server)."""
+    caps = obj.get("caps", []) if isinstance(obj, dict) else []
+    return tuple(c for c in caps if isinstance(c, str)) if isinstance(caps, list) else ()
 
 
 def decode_health(obj) -> tuple:
     """Returns (layers, device)."""
-    _fields(obj, "health reply", ("ok", "layers", "device"))
+    _fields(obj, "health reply", ("ok", "layers", "device"), ("caps",))
     if obj["ok"] is not True:
         raise ProtocolError("health reply does not say ok")
     if not isinstance(obj["device"], str):

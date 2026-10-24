@@ -30,5 +30,10 @@
  },
  "fixed_gib": 0.3,
  "min_replicas": 2,
- "seeds": []
+ "seeds": [],
+ "io_gib": {
+  "mlx": 0.3,
+  "cpu": 2.0,
+  "nf4": 2.0
+ }
 }

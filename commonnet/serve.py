@@ -124,11 +124,18 @@ class NetworkBackend:
         self.network = network
         manifest = network.manifest
         self.model_name = manifest.model.get("name", manifest.id)
+        checkpoint_loader = None
         if checkpoint is None:
             from commonnet import hub
             if not manifest.client_repo:
                 raise SystemExit("the manifest names no client_repo; pass --checkpoint DIR")
-            checkpoint = hub.Hub(manifest.client_repo).fetch(client=True)
+            source = hub.Hub(manifest.client_repo)
+            metadata = getattr(source, "fetch_metadata", None)
+            if metadata is None:  # older Hub adapters can still provide a full checkpoint
+                checkpoint = source.fetch(client=True)
+            else:
+                checkpoint = metadata()
+                checkpoint_loader = lambda: source.fetch(client=True)
         self.tokenizer = AutoTokenizer.from_pretrained(checkpoint)
         self.stop_ids = self._stop_ids()
         self._dtype = hidden_dtype or torch.float32
@@ -136,7 +143,9 @@ class NetworkBackend:
 
         def load():
             from commonnet.client4 import Client4
-            return Client4(checkpoint, _NoTransport(), fmt=fmt, hidden_dtype=self._dtype)
+            client = Client4(checkpoint, _NoTransport(), fmt=fmt, hidden_dtype=self._dtype)
+            client._endpoint_checkpoint_loader = checkpoint_loader
+            return client
 
         self.client = self._worker.submit(load).result()
         self.draft_k, self.drafter, self.draft_note = draft_k, None, "off"

@@ -169,14 +169,20 @@ def generate_once(net, client, ids, new_tokens: int, *, drafter=None, draft_k: i
         return out
     steps, prev_t, prev_mark = [], t0, 0
     for k, (t, mark) in enumerate(zip(stamps, marks)):
-        window = rows[prev_mark:mark]
+        # Loopback benchmarks can record server-side forwarding clients in this
+        # process too. Only the generation client's own calls belong to its wall time.
+        window = [r for r in rows[prev_mark:mark] if r["owner"] in owners]
         wall = (t - prev_t) * 1000
         total = sum(r["total_ms"] for r in window)
-        fwd = [r for r in window if r["path"] == "/forward" and r["status"] == 200]
-        server = sum(r["server_ms"] or 0.0 for r in fwd)
+        fwd = [r for r in window if r["path"] in ("/forward", "/chain") and r["status"] == 200]
+        chained = any(r["path"] == "/chain" for r in fwd)
+        # /chain's inclusive server duration includes downstream links and peers.
+        # Calling it compute would invent a breakdown we cannot measure here.
+        server = float("nan") if chained else sum(r["server_ms"] or 0.0 for r in fwd)
         steps.append({"kind": "prefill" if k == 0 else "decode", "wall_ms": wall, "compute_ms": server,
                       "network_ms": total - server, "client_ms": wall - total,
-                      "missing_server_ms": sum(1 for r in fwd if r["server_ms"] is None),
+                      "timing_mode": "chain_inclusive" if chained else "per_stage",
+                      "missing_server_ms": sum(1 for r in fwd if chained or r["server_ms"] is None),
                       "hops": [dict(r, hop=owners.get(r["owner"], (-1, 0))) for r in fwd]})
         prev_t, prev_mark = t, mark
     out["steps"] = steps
@@ -198,7 +204,8 @@ def summarize_steps(steps: list[dict], route: list[dict], rtts: list[dict]) -> d
            "tok_s": 1000.0 / ms if steps else float("nan"),
            "compute_ms": _mean(s["compute_ms"] for s in steps), "network_ms": _mean(s["network_ms"] for s in steps),
            "client_ms": _mean(s["client_ms"] for s in steps),
-           "missing_server_ms": sum(s["missing_server_ms"] for s in steps)}
+           "missing_server_ms": sum(s["missing_server_ms"] for s in steps),
+           "timing_mode": "chain_inclusive" if any(s.get("timing_mode") == "chain_inclusive" for s in steps) else "per_stage"}
     per_hop = {}
     for s in steps:
         for r in s["hops"]:
@@ -209,12 +216,14 @@ def summarize_steps(steps: list[dict], route: list[dict], rtts: list[dict]) -> d
         peer = peers[index] if index < len(peers) else {"peer": "?", "host": "", "backend": "?"}
         served = [c["server_ms"] for c in calls if c["server_ms"] is not None]
         total = _mean(c["total_ms"] for c in calls)
-        server = _mean(served) if served else None
+        chained = any(c["path"] == "/chain" for c in calls)
+        server = None if chained else (_mean(served) if served else None)
         rtt = next((r for r in rtts if r["hop"] == hop), {}) if index == 0 else {}
         rows.append({"hop": hop, "window": route[hop]["window"] if 0 <= hop < len(route) else None,
                      "peer": peer["peer"], "host": peer["host"], "kind": peer.get("kind", ""),
                      "backend": peer["backend"], "replica_index": index, "calls": len(calls), "total_ms": total, "server_ms": server,
-                     "network_ms": total - (server or 0.0), "rtt_ms": rtt.get("warm_ms_p50"),
+                     "network_ms": None if chained else total - (server or 0.0),
+                     "timing_mode": "chain_inclusive" if chained else "per_stage", "rtt_ms": rtt.get("warm_ms_p50"),
                      "reuse_rate": sum(1 for c in calls if c["reused"]) / len(calls),
                      "bytes_per_call": _mean(c["bytes_out"] + c["bytes_in"] for c in calls)})
     out["per_hop"] = rows
@@ -319,7 +328,8 @@ def summary_of(report: dict) -> dict:
     ms = w("ms_mean")
     return {"decode_ms_per_tok": ms, "decode_tok_s": 1000.0 / ms, "compute_ms": w("compute_ms"),
             "network_ms": w("network_ms"), "client_ms": w("client_ms"), "hops": len(report["route"]),
-            "rtt_sum_ms": sum(r["warm_ms_p50"] or 0.0 for r in report["hop_rtt"])}
+            "rtt_sum_ms": sum(r["warm_ms_p50"] or 0.0 for r in report["hop_rtt"]),
+            "timing_mode": "chain_inclusive" if any(c["decode"].get("timing_mode") == "chain_inclusive" for c in cases) else "per_stage"}
 
 
 # --- printing ---------------------------------------------------------------------------------------
@@ -344,7 +354,10 @@ def format_report(report: dict) -> str:
         d, p = c["decode"], c["prefill"]
         rows.append((c["prompt_len"], c["new"], _f(d["ms_mean"]), _f(d["ms_p50"]), _f(d["ms_p95"]), _f(d["tok_s"]),
                      _f(d["compute_ms"]), _f(d["network_ms"]), _f(d["client_ms"]), _f(p["ms_mean"]), _f(p["tok_s"])))
-    out += ["", "Per token (decode), mean ms; compute + network + client = ms/tok", _table(head, rows)]
+    chained = any(c["decode"].get("timing_mode") == "chain_inclusive" for c in report["cases"])
+    label = ("Per token (decode), mean ms; chain compute/network breakdown unavailable"
+             if chained else "Per token (decode), mean ms; compute + network + client = ms/tok")
+    out += ["", label, _table(head, rows)]
     for c in report["cases"]:
         for kind in ("decode", "prefill"):
             hops = c[kind]["per_hop"]
@@ -376,6 +389,9 @@ def one_line(report: dict) -> str:
     s = report.get("summary") or {}
     if not s:
         return "no decode steps were measured"
+    if s.get("timing_mode") == "chain_inclusive":
+        return (f"decode {s['decode_ms_per_tok']:.1f} ms/token ({s['decode_tok_s']:.1f} tok/s); "
+                "peer-forwarded chain: compute/network breakdown unavailable")
     return (f"decode {s['decode_ms_per_tok']:.1f} ms/token ({s['decode_tok_s']:.1f} tok/s) = compute "
             f"{s['compute_ms']:.1f} + network {s['network_ms']:.1f} ({s['hops']} hop(s), sum of bare RTTs "
             f"{s['rtt_sum_ms']:.1f} ms, the rest is serialisation and queueing) + client {s['client_ms']:.1f}")

@@ -8,6 +8,10 @@ request limit; the block's KV cache makes chunked prefill equal to one-shot pref
 from __future__ import annotations
 
 import time
+import uuid
+import re
+import os
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -29,6 +33,29 @@ def to_wire(t: torch.Tensor) -> Tensor:
 def from_wire(t: Tensor) -> torch.Tensor:
     arr = np.frombuffer(t.data, dtype=_NP[t.dtype]).reshape(t.shape)
     return torch.from_numpy(arr.copy())
+
+
+@dataclass(frozen=True)
+class Call:
+    """One piece of a session as sent when it is not a plain hidden tensor: token ids in (hidden None) and/or token
+    ids out (output="ids"). Kept in the replay history exactly as sent, so a failover replays the same mode."""
+    hidden: Tensor | None = None
+    ids: tuple | None = None
+    output: str | None = None
+    which: str = "last"
+    sampling: dict | None = None
+
+    @property
+    def seq(self) -> int:
+        return len(self.ids) if self.ids is not None else self.hidden.shape[1]
+
+
+def _send_piece(client, url, session_id, piece, start_pos, truncate_to=None):
+    kw = {} if truncate_to is None else {"truncate_to": truncate_to}
+    if isinstance(piece, Call):
+        return client.forward(url, session_id, piece.hidden, start_pos, ids=piece.ids, output=piece.output,
+                              which=piece.which, sampling=piece.sampling, **kw)
+    return client.forward(url, session_id, piece, start_pos, **kw)
 
 
 DEAD_SECONDS = 60.0
@@ -58,7 +85,8 @@ class HttpTransport:
     def __init__(self, urls: dict[str, str], *, token=None, tokens: dict[str, str] | None = None,
                  replicas: dict[str, list] | None = None, max_request_bytes: int = MAX_REQUEST_BYTES,
                  now=time.monotonic, on_exhausted=None, wait_s: float = 30.0,
-                 wait_sleep=time.sleep, wait_poll_s: float = WAIT_POLL_SECONDS, **client_kwargs):
+                 wait_sleep=time.sleep, wait_poll_s: float = WAIT_POLL_SECONDS,
+                 activation_codec: str | None = None, **client_kwargs):
         self.urls = dict(urls)
         self.max_request_bytes = max_request_bytes
         self._tokens = tokens or {}
@@ -77,7 +105,18 @@ class HttpTransport:
         self._history: dict[tuple[str, str], list] = {}
         self._dead: dict[tuple[str, int], float] = {}
         self._truncate_ok: dict[str, bool] = {}
+        self._caps: dict[str, tuple] = {}
         self._pending_cut: dict[tuple[str, str], int] = {}
+        self._chain_sessions: dict[str, dict] = {}
+        self._chain_caps: dict[tuple, tuple] = {}
+        selected = activation_codec if activation_codec is not None else os.environ.get(
+            "COMMONNET_ACTIVATION_CODEC", "int8_group")
+        if selected in ("float", "uncompressed", "none"):
+            self._activation_codec = "float"
+        elif selected in ("int8_group", "int8_group_v1"):
+            self._activation_codec = "int8_group_v1"
+        else:
+            raise ValueError("COMMONNET_ACTIVATION_CODEC must be int8_group or float")
         self.failovers: list[tuple[str, int, int]] = []  # (endpoint, from index, to index), for tests and logs
 
     def _candidates(self, name: str) -> list:
@@ -155,7 +194,7 @@ class HttpTransport:
                 self._start(name, session_id, index)
                 client, url = self._target(name, index)
                 for start_pos, piece in self._history.get(key, []):
-                    client.forward(url, session_id, piece, start_pos)
+                    _send_piece(client, url, session_id, piece, start_pos)
             except BlockError as e:
                 self._dead[(name, index)] = self._now()
                 self._last_error = e
@@ -185,15 +224,13 @@ class HttpTransport:
             self._wait_sleep(self._wait_poll_s)
         raise Unreachable(f"no live server for {name} after waiting {self._wait_s:g}s; last error: {self._last_error}")
 
-    def _send(self, name: str, session_id: str, piece: Tensor, start_pos: int, truncate_to=None) -> Tensor:
+    def _send(self, name: str, session_id: str, piece, start_pos: int, truncate_to=None):
         key = (name, session_id)
         while True:
             index = self._active[key]
             client, url = self._target(name, index)
             try:
-                if truncate_to is None:
-                    return client.forward(url, session_id, piece, start_pos)
-                return client.forward(url, session_id, piece, start_pos, truncate_to=truncate_to)
+                return _send_piece(client, url, session_id, piece, start_pos, truncate_to)
             except (Unreachable, RemoteError) as e:
                 if len(self._candidates(name)) < 2 and self._on_exhausted is None:
                     raise
@@ -207,14 +244,22 @@ class HttpTransport:
     def _cut_history(pieces: list, length: int) -> list:
         """The pieces of a session's history, cut to the first `length` positions (a piece may be cut in the middle)."""
         out = []
+        def cut_tensor(t, keep):
+            arr = np.frombuffer(t.data, dtype=_NP[t.dtype]).reshape(t.shape)[:, :keep]
+            return Tensor(tuple(arr.shape), t.dtype, np.ascontiguousarray(arr).tobytes())
+
         for start_pos, piece in pieces:
             if start_pos >= length:
                 continue
-            seq = piece.shape[1]
+            seq = piece.seq if isinstance(piece, Call) else piece.shape[1]
             if start_pos + seq > length:
                 keep = length - start_pos
-                arr = np.frombuffer(piece.data, dtype=_NP[piece.dtype]).reshape(piece.shape)[:, :keep]
-                piece = Tensor(tuple(arr.shape), piece.dtype, np.ascontiguousarray(arr).tobytes())
+                if isinstance(piece, Call):
+                    piece = Call(None if piece.hidden is None else cut_tensor(piece.hidden, keep),
+                                 None if piece.ids is None else piece.ids[:keep], piece.output, piece.which,
+                                 piece.sampling)
+                else:
+                    piece = cut_tensor(piece, keep)
             out.append((start_pos, piece))
         return out
 
@@ -242,6 +287,26 @@ class HttpTransport:
     def truncate(self, endpoint, session_id: str, length: int, defer: bool = False) -> None:
         """Cut this endpoint's session back to `length` positions. Idempotent. The kept history is cut first, so a
         failover during or after this replays exactly the truncated session."""
+        chain = self._chain_sessions.get(session_id)
+        if chain is not None:
+            from commonnet.net.protocol import check_start_pos
+            check_start_pos(length)
+            if endpoint.name not in {h["name"] for h in chain["hops"]}:
+                return
+            # The core asks once per stage. One shared cut rides through every peer.
+            history = []
+            for entry in chain["history"]:
+                if entry["start_pos"] < length:
+                    kept = dict(entry)
+                    kept["ids"] = entry["ids"][:length - entry["start_pos"]]
+                    history.append(kept)
+            chain["history"] = history
+            chain["pending_cut"] = length
+            if not defer:
+                hop = next(h for h in chain["hops"] if h["name"] == endpoint.name)
+                client, url = self._target(hop["name"], hop["index"])
+                client.truncate(url, chain["wire_id"], length)
+            return
         name, key = endpoint.name, (endpoint.name, session_id)
         if key not in self._open:
             return
@@ -267,7 +332,202 @@ class HttpTransport:
                 self._recover(name, session_id, index, e)  # replays the truncated history: nothing more to cut
                 return
 
-    def forward(self, endpoint, session_id: str, hidden: torch.Tensor, start_pos: int) -> torch.Tensor:
+    def capabilities(self, endpoint) -> tuple:
+        """What the server for this endpoint advertises in /health (ids_in, head_out). Empty for an old server or on
+        any failure, so the caller falls back to the original protocol. Cached per endpoint name."""
+        cached = self._caps.get(endpoint.name)
+        if cached is None:
+            client, url = self._target(endpoint.name, self._first_alive(endpoint.name))
+            try:
+                cached = tuple(client.health_caps(url))
+            except Exception:
+                cached = ()
+            self._caps[endpoint.name] = cached
+        return cached
+
+    def ids_route(self, endpoints) -> bool:
+        """True if the first server takes token ids and the last returns them (a single server needs both)."""
+        if not endpoints:
+            return False
+        return "ids_in" in self.capabilities(endpoints[0]) and "head_out" in self.capabilities(endpoints[-1])
+
+    def _chain_hops(self, endpoints) -> list:
+        """Check the actual selected servers, not endpoint-name capability caches."""
+        from urllib.parse import urlsplit
+        from commonnet.net.chain import CAPABILITY, MAX_HOPS, check_hop
+        endpoints = list(endpoints)
+        if not endpoints or len(endpoints) > MAX_HOPS:
+            raise ValueError("chain needs a bounded, nonempty route")
+        previous, hops = 0, []
+        for ep in endpoints:
+            if ep.start != previous or ep.end <= ep.start:
+                raise ValueError("chain route must start at zero and cover contiguous layers")
+            previous = ep.end
+            index = self._first_alive(ep.name)
+            client, url = self._target(ep.name, index)
+            key = (ep.name, index, url, ep.start, ep.end)
+            info = self._chain_caps.get(key)
+            if info is None:
+                info = client.health_info(url)
+                if info[0] != (ep.start, ep.end):
+                    raise ValueError("chain peer serves a different layer window")
+                self._chain_caps[key] = info
+            caps = info[2]
+            if CAPABILITY not in caps:
+                raise ValueError("a route peer does not support chain forwarding")
+            parts = urlsplit(url)
+            pin_key = f"{parts.hostname}:{parts.port or (443 if parts.scheme == 'https' else 80)}"
+            pin = client._pin.get(pin_key) if isinstance(client._pin, dict) else client._pin
+            hop = {"name": ep.name, "index": index, "url": url, "token": client.token,
+                   "pin": pin, "layers": [ep.start, ep.end], "caps": caps}
+            hops.append(hop)
+        if "ids_in" not in hops[0]["caps"] or "head_out" not in hops[-1]["caps"]:
+            raise ValueError("chain end peers must hold the embedding and output head")
+        for current, following in zip(hops, hops[1:]):
+            check_hop({k: following[k] for k in ("url", "token", "pin", "layers")},
+                      allow_private="chain_private_v1" in current["caps"])
+        return hops
+
+    def chain_route(self, endpoints) -> bool:
+        """Capability negotiation before generation; old or unreachable peers fall back."""
+        try:
+            self._chain_hops(endpoints)
+            return True
+        except (BlockError, ValueError, KeyError):
+            return False
+
+    @staticmethod
+    def _chain_body(state, ids, start_pos, which, sampling=None, drafts=None, truncate_to=None):
+        hops = state["hops"]
+        wire_hops = [{k: h[k] for k in ("url", "token", "pin", "layers")} for h in hops[1:]]
+        body = {"id": state["wire_id"], "ids": list(ids), "start_pos": start_pos,
+                "layers": hops[0]["layers"], "route": wire_hops, "which": which}
+        if sampling is not None:
+            body["sampling"] = sampling
+        if drafts is not None:
+            body["drafts"] = list(drafts)
+        if truncate_to is not None:
+            body["truncate_to"] = truncate_to
+        if state.get("codec", "float") != "float":
+            body["activation_codec"] = state["codec"]
+        return body
+
+    def _chain_send(self, state, body):
+        first = state["hops"][0]
+        client, url = self._target(first["name"], first["index"])
+        return client.chain(url, body)
+
+    def _chain_restart(self, state, endpoints, error):
+        """Rebuild every KV cache from the retained token-ID history after a failure.
+
+        A new internal session ID prevents a partly completed old chain from being
+        mistaken for the replay. Never switch to a hidden-state route mid-session.
+        """
+        old_hops, old_id = state["hops"], state["wire_id"]
+        lost = isinstance(error, RemoteError) and error.status in (404, 409)
+        if not lost:
+            match = re.search(r"chain hop (\d+)", str(error))
+            failed_layer = int(match.group(1)) if match else old_hops[0]["layers"][0]
+            for hop in old_hops:
+                if hop["layers"][0] == failed_layer:
+                    self._dead[(hop["name"], hop["index"])] = self._now()
+        for ep in endpoints:
+            self.refresh_replicas(ep.name)
+        fresh = self._chain_hops(endpoints)  # rejects a failover peer without the new capabilities
+        if state.get("codec") == "int8_group_v1" and not all(
+                "activation_int8_group_v1" in h["caps"] for h in fresh):
+            raise ValueError("replacement chain peer does not support this session's activation codec")
+        for hop in old_hops:
+            try:
+                client, url = self._target(hop["name"], hop["index"])
+                client.close(url, old_id)
+            except BlockError:
+                pass
+        state["hops"], state["wire_id"] = fresh, "chain-" + uuid.uuid4().hex
+        state["pending_cut"] = None
+        for entry in state["history"]:
+            body = self._chain_body(state, entry["ids"], entry["start_pos"], "last")
+            self._chain_send(state, body)
+        for hop in fresh:
+            self._active[(hop["name"], state["caller_id"])] = hop["index"]
+
+    def chain_step(self, endpoints, session_id: str, ids, start_pos: int, *, which: str = "last",
+                   sampling=None, drafts=None, truncate_to=None) -> dict:
+        """IDs enter the first peer, hidden states pass between peers, IDs return.
+
+        For speculative verification the final peer returns accepted draft IDs and
+        one correction/bonus token, plus accepted and next metadata. History contains
+        input IDs only, so whole-route recovery does not retain activations here.
+        """
+        from commonnet.net import protocol
+        from commonnet.net.chain import ids as check_chain_ids
+        endpoints, token_ids = list(endpoints), check_chain_ids(list(ids))
+        protocol.check_session_id(session_id)
+        protocol.check_start_pos(start_pos)
+        if which not in ("last", "all"):
+            raise ValueError("chain which must be last or all")
+        if drafts is not None and (list(drafts) != token_ids[1:] or which != "all" or sampling is not None):
+            raise ValueError("chain verification needs [last]+drafts and greedy output")
+        state = self._chain_sessions.get(session_id)
+        if state is None:
+            if start_pos != 0 or any((ep.name, session_id) in self._open for ep in endpoints):
+                raise ValueError("a new chain session must start at zero")
+            state = {"hops": self._chain_hops(endpoints), "history": [], "pending_cut": None,
+                     "wire_id": "chain-" + uuid.uuid4().hex, "caller_id": session_id, "closed": set()}
+            state["codec"] = (self._activation_codec if all("activation_int8_group_v1" in h["caps"]
+                             for h in state["hops"]) else "float")
+            self._chain_sessions[session_id] = state
+            for hop in state["hops"]:
+                self._open.add((hop["name"], session_id))
+                self._active[(hop["name"], session_id)] = hop["index"]
+        elif [(ep.name, ep.start, ep.end) for ep in endpoints] != [
+                (h["name"], *h["layers"]) for h in state["hops"]]:
+            raise ValueError("a chain session cannot change its route windows")
+        committed_end = (state["history"][-1]["start_pos"] + len(state["history"][-1]["ids"])) if state["history"] else 0
+        if start_pos != committed_end and truncate_to is None:
+            raise ValueError("chain start position differs from its retained input-ID history")
+        # Qwen3's 4096-wide float32 activations for 256 positions fit under the
+        # standard 8 MiB peer request limit. Long prefills are traversed in order.
+        chunk = min(256, max(1, (self.max_request_bytes - OVERHEAD_BYTES) // (4096 * 4 * 4 // 3)))
+        if drafts is not None and len(token_ids) > chunk:
+            raise ValueError("speculative verification batch exceeds the chain request limit")
+        if truncate_to is not None:
+            protocol.check_start_pos(truncate_to)
+            if truncate_to != start_pos or truncate_to > committed_end:
+                raise ValueError("chain rollback must cut committed history to this step's start")
+            # Public callers normally use truncate(..., defer=True); explicit cuts
+            # obey the same history discipline before any potential route replay.
+            for ep in endpoints:
+                self.truncate(ep, session_id, truncate_to, defer=True)
+        replies = []
+        for offset in range(0, len(token_ids), chunk):
+            piece = token_ids[offset:offset + chunk]
+            cut = state["pending_cut"] if offset == 0 else None
+            body = self._chain_body(state, piece, start_pos + offset, which, sampling, drafts, cut)
+            try:
+                reply = self._chain_send(state, body)
+            except (Unreachable, RemoteError) as error:
+                if isinstance(error, RemoteError) and error.status not in (404, 409):
+                    raise
+                self._chain_restart(state, endpoints, error)
+                body = self._chain_body(state, piece, start_pos + offset, which, sampling, drafts)
+                reply = self._chain_send(state, body)
+            if drafts is not None:
+                accepted = reply.get("accepted")
+                if (type(accepted) is not int or accepted > len(drafts)
+                        or reply["ids"][:-1] != list(drafts)[:accepted]):
+                    raise protocol.ProtocolError("invalid speculative chain reply")
+            state["pending_cut"] = None
+            state["history"].append({"ids": list(piece), "start_pos": start_pos + offset})
+            replies.append(reply)
+        if drafts is not None or which == "last":
+            return replies[-1]
+        return {"ids": [t for reply in replies for t in reply["ids"]]}
+
+    def forward(self, endpoint, session_id: str, hidden: torch.Tensor | None, start_pos: int, *, ids=None,
+                output: str | None = None, which: str = "last", sampling=None):
+        """Hidden states in and out (the original call). With ids (hidden None) the server embeds them; with
+        output="ids" it returns a list of token ids, for the last position or (which="all") every position."""
         name, key = endpoint.name, (endpoint.name, session_id)
         if key not in self._open:
             self.refresh_replicas(name)
@@ -280,22 +540,49 @@ class HttpTransport:
                 self._recover(name, session_id, index, e)  # nothing to replay yet: just find a live server
             self._open.add(key)
         keep = len(self._candidates(name)) > 1 or self._on_exhausted is not None
-        batch, seq, width = hidden.shape
-        wire_name = "float32" if hidden.dtype == torch.float32 else "float16"
-        per_token = batch * width * DTYPE_WIDTH[wire_name] * 4 // 3 + 4
-        chunk = max(1, (self.max_request_bytes - OVERHEAD_BYTES) // per_token)
+        if ids is not None:
+            ids = list(ids)
+            seq = len(ids)
+            chunk = max(1, (self.max_request_bytes - OVERHEAD_BYTES) // 12)  # a token id is at most ~11 JSON bytes
+        else:
+            batch, seq, width = hidden.shape
+            wire_name = "float32" if hidden.dtype == torch.float32 else "float16"
+            per_token = batch * width * DTYPE_WIDTH[wire_name] * 4 // 3 + 4
+            chunk = max(1, (self.max_request_bytes - OVERHEAD_BYTES) // per_token)
         outs = []
         for i in range(0, seq, chunk):
-            piece = to_wire(hidden[:, i:i + chunk])
+            if ids is not None:
+                piece = Call(None, tuple(ids[i:i + chunk]), output, which, sampling)
+            else:
+                t = to_wire(hidden[:, i:i + chunk])
+                piece = t if output is None else Call(t, None, output, which, sampling)
             cut = self._pending_cut.pop(key, None) if i == 0 else None
             out = self._send(name, session_id, piece, start_pos + i, cut)
             if keep:
                 self._history.setdefault(key, []).append((start_pos + i, piece))
-            outs.append(from_wire(out))
+            outs.append(out if output is not None else from_wire(out))
+        if output is not None:
+            return outs[-1] if which == "last" else [t for o in outs for t in o]
         out = outs[0] if len(outs) == 1 else torch.cat(outs, dim=1)
-        return out.to(hidden.dtype)
+        return out.to(hidden.dtype) if hidden is not None else out
 
     def close(self, endpoint, session_id: str) -> None:
+        chain = self._chain_sessions.get(session_id)
+        if chain is not None:
+            hop = next((h for h in chain["hops"] if h["name"] == endpoint.name), None)
+            if hop is None or endpoint.name in chain["closed"]:
+                return
+            try:
+                client, url = self._target(hop["name"], hop["index"])
+                client.close(url, chain["wire_id"])
+            except Exception:
+                pass
+            chain["closed"].add(endpoint.name)
+            self._open.discard((endpoint.name, session_id))
+            self._active.pop((endpoint.name, session_id), None)
+            if len(chain["closed"]) == len(chain["hops"]):
+                del self._chain_sessions[session_id]
+            return
         key = (endpoint.name, session_id)
         if key not in self._open:
             return
@@ -314,7 +601,7 @@ class HttpTransport:
         out = {}
         for (name, index), client in self._clients.items():
             name = name if index == 0 else f"{name}#{index}"
-            rows = [t for t in client.timings if t["path"] == "/forward" and t["status"] == 200]
+            rows = [t for t in client.timings if t["path"] in ("/forward", "/chain") and t["status"] == 200]
             if not rows:
                 continue
             served = [t["server_ms"] for t in rows if t["server_ms"] is not None]
@@ -327,5 +614,9 @@ class HttpTransport:
         return out
 
     def shutdown(self) -> None:
+        from types import SimpleNamespace
+        for session_id, state in list(self._chain_sessions.items()):
+            for hop in state["hops"]:
+                self.close(SimpleNamespace(name=hop["name"]), session_id)
         for client in self._clients.values():
             client.close_connections()

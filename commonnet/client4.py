@@ -5,7 +5,8 @@ fmt:
   fp16  tensors loaded as float16 (torch)
   mlx4  embedding and lm_head quantized to 4-bit with MLX (Mac only); the norm stays fp16
 The 4-bit tables are built from the checkpoint's bf16/fp tensors at load time,
-reading only the three tensors the client needs.
+reading only the three tensors the client needs. Tables load lazily for legacy
+routes; token-only routes leave these local tables unloaded.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from torch import nn
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 
 from commonnet.client import Client, make_norm
-from commonnet.weights import CheckpointReader, build_module
+from commonnet.weights import build_module
 
 FORMATS = ("fp32", "fp16", "mlx4")
 
@@ -109,22 +110,21 @@ class Client4(Client):
                  bits: int = 4, group_size: int = 64, hidden_dtype=torch.float16):
         if fmt not in FORMATS:
             raise ValueError(f"fmt must be one of {FORMATS}, got {fmt!r}")
-        if fmt != "mlx4":
-            super().__init__(checkpoint_dir, transport, device=device,
-                             dtype=torch.float32 if fmt == "fp32" else torch.float16)
-            self.fmt = fmt
-            return
+        self.fmt = fmt
+        self._mlx_bits, self._mlx_group_size = bits, group_size
+        super().__init__(checkpoint_dir, transport, device="cpu" if fmt == "mlx4" else device,
+                         dtype=hidden_dtype if fmt == "mlx4" else (
+                             torch.float32 if fmt == "fp32" else torch.float16))
+
+    def _load_local_weights(self) -> None:
+        if self.fmt != "mlx4":
+            return super()._load_local_weights()
+        bits, group_size = self._mlx_bits, self._mlx_group_size
         try:
             import mlx.core  # noqa: F401
         except ImportError:
             raise RuntimeError("fmt mlx4 needs MLX (Apple silicon); use fp16 elsewhere") from None
-        reader = CheckpointReader(checkpoint_dir)
-        self.config = reader.config
-        self.transport = transport
-        self.device = torch.device("cpu")
-        self.dtype = hidden_dtype  # what crosses the wire: float32 avoids float16 overflow on Qwen
-        self.fmt = fmt
-        self.arch = reader.arch
+        reader = self._reader
         embed_name = reader.prefix + "embed_tokens.weight"
         norm_name = reader.prefix + "norm.weight"
         head_name = reader.head_name
@@ -151,4 +151,4 @@ class Client4(Client):
         self.norm = build_module(partial(make_norm, reader.arch, hidden, self.config.rms_norm_eps, reader.prefix),
                                  {"weight": t[norm_name].to(torch.float16)})
         self.loaded_names = list(reader.read_names)
-        self.client_bytes = self.embed.nbytes + self.head.nbytes + self.norm.weight.numel() * 2
+        self.client_bytes = self._embed.nbytes + self._head.nbytes + self._norm.weight.numel() * 2

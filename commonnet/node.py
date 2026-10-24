@@ -630,7 +630,12 @@ class Node:
             from commonnet import hub
             # an NVIDIA peer may quantise a float16 repo on load: fetch only the window's tensors, not whole 5 GB shards
             ranged = self.hw.backend == "nf4"
-            fetch = lambda r, w: hub.Hub(r, log=self._hub_log).fetch(layers=tuple(w), ranged=ranged)  # noqa: E731
+            nl = self.manifest.num_layers
+            # the first stage also fetches the embedding and the last the final norm + lm_head, so they can take and
+            # return token ids (commonnet/net/endio.py); a middle stage downloads exactly what it did before
+            fetch = lambda r, w: hub.Hub(r, log=self._hub_log).fetch(  # noqa: E731
+                layers=tuple(w), ranged=ranged, embed=w[0] == 0 and os.environ.get("COMMONNET_IDS", "1") != "0",
+                head=w[1] == nl and os.environ.get("COMMONNET_IDS", "1") != "0")
         self.log(f"downloading layers {window[0]}-{window[1]} of {repo} (only these)...")
         self.progress.reset()
         self.set_phase("downloading")

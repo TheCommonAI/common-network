@@ -6,6 +6,7 @@ consecutive stages and two peers with the same window run exactly the same layer
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +25,9 @@ class Manifest:
     fixed_gib: float = 0.0
     min_replicas: int = 2
     seeds: tuple[str, ...] = field(default_factory=tuple)
+    # Optional, default none: extra GiB per backend for the embedding (a window that starts at layer 0) and for the final
+    # norm + lm_head (a window that ends at the last layer), which those stages hold to take and return token ids.
+    io_gib: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, source) -> "Manifest":
@@ -56,7 +60,7 @@ class Manifest:
                 id=data["id"], version=int(data.get("version", 1)), model=dict(data["model"]),
                 boundaries=tuple(data["boundaries"]), gib_per_layer=dict(data.get("gib_per_layer") or {}),
                 fixed_gib=float(data.get("fixed_gib", 0.0)), min_replicas=int(data.get("min_replicas", 2)),
-                seeds=tuple(data.get("seeds") or ()))
+                seeds=tuple(data.get("seeds") or ()), io_gib=dict(data.get("io_gib") or {}))
         except (KeyError, TypeError, ValueError) as e:
             raise ManifestError(f"manifest is missing or has a bad field: {e!r}") from None
         manifest.validate()
@@ -75,6 +79,10 @@ class Manifest:
             raise ManifestError(f"boundaries must rise strictly from 0 to num_layers ({layers})")
         if self.min_replicas < 1:
             raise ManifestError("min_replicas must be at least 1")
+        for backend, cost in self.io_gib.items():
+            if (not isinstance(backend, str) or not backend or type(cost) not in (int, float)
+                    or not math.isfinite(cost) or cost < 0):
+                raise ManifestError("io_gib must map backend names to finite non-negative numbers")
         if not isinstance(self.model.get("repos", {}), dict):
             raise ManifestError("model.repos must be an object")
 
@@ -99,7 +107,9 @@ class Manifest:
         return max((float(v) for v in self.gib_per_layer.values()), default=0.0)
 
     def window_gib(self, a: int, b: int, backend: str) -> float:
-        return self.fixed_gib + (b - a) * self.per_layer(backend)
+        io = float(self.io_gib.get(backend, max(self.io_gib.values(), default=0.0)))
+        ends = (a == 0) + (b == self.boundaries[-1])
+        return self.fixed_gib + (b - a) * self.per_layer(backend) + io * ends
 
     def is_window(self, a: int, b: int) -> bool:
         return a in self.boundaries and b in self.boundaries and a < b
@@ -114,4 +124,5 @@ class Manifest:
     def to_dict(self) -> dict:
         return {"id": self.id, "version": self.version, "model": self.model,
                 "boundaries": list(self.boundaries), "gib_per_layer": self.gib_per_layer,
-                "fixed_gib": self.fixed_gib, "min_replicas": self.min_replicas, "seeds": list(self.seeds)}
+                "fixed_gib": self.fixed_gib, "min_replicas": self.min_replicas, "seeds": list(self.seeds),
+                **({"io_gib": self.io_gib} if self.io_gib else {})}

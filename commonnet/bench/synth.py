@@ -26,6 +26,12 @@ RANK = 16
 DEFAULT_SEED = 1234
 
 
+def synth_tables(seed: int, vocab: int, hidden: int):
+    """The synthetic embedding and head weights (shared by SynthClient and a SynthBlock serving the ends)."""
+    g = torch.Generator().manual_seed(seed)
+    return torch.randn(vocab, hidden, generator=g), torch.randn(vocab, hidden, generator=g) / hidden ** 0.5
+
+
 def _rng(seed: int, *key) -> np.random.Generator:
     return np.random.default_rng([seed, *key])
 
@@ -35,8 +41,15 @@ class SynthBlock:
 
     device = "synth"
 
-    def __init__(self, start: int, end: int, *, layer_ms: float = 0.0, seed: int = DEFAULT_SEED):
+    def __init__(self, start: int, end: int, *, layer_ms: float = 0.0, seed: int = DEFAULT_SEED,
+                 io_layers: int | None = None, hidden: int = 256, vocab: int = 2048, wire_dtype: str = "float16"):
+        """io_layers (the model's layer count) turns on token-id I/O: the window starting at 0 takes ids (ids_in),
+        the one ending at io_layers returns ids (head_out), with the same synthetic tables as SynthClient."""
         self.layers = protocol.check_layers((start, end))
+        self.caps = () if io_layers is None else tuple(
+            c for c, ok in (("ids_in", start == 0), ("head_out", end == io_layers)) if ok)
+        self.hidden, self.vocab, self.wire_dtype = hidden, vocab, wire_dtype
+        self._tables = None
         self.layer_ms = float(layer_ms)
         self.seed = seed
         self._weights: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
@@ -94,6 +107,31 @@ class SynthBlock:
             time.sleep(self.layer_ms * (self.layers[1] - self.layers[0]) / 1000.0)
         return Tensor(hidden.shape, hidden.dtype, np.ascontiguousarray(h.astype(dtype)).tobytes())
 
+    def _io(self):
+        if self._tables is None:
+            e, h = synth_tables(self.seed, self.vocab, self.hidden)
+            self._tables = (e, h, nn.RMSNorm(self.hidden))
+        return self._tables
+
+    def embed(self, ids) -> Tensor:
+        t = self._io()[0][torch.tensor(list(ids))].unsqueeze(0)
+        dt = np.float16 if self.wire_dtype == "float16" else np.float32
+        arr = np.ascontiguousarray(t.numpy().astype(dt))
+        return Tensor(tuple(arr.shape), self.wire_dtype, arr.tobytes())
+
+    def head(self, hidden: Tensor, which: str, sampling, start_pos: int) -> list[int]:
+        from commonnet.net.endio import sample_at
+        _, head, norm = self._io()
+        dt = np.float16 if hidden.dtype == "float16" else np.float32
+        h = torch.from_numpy(np.frombuffer(hidden.data, dtype=dt).reshape(hidden.shape).copy())
+        seq = h.shape[1]
+        if which != "all":
+            h = h[:, -1:]
+        first = start_pos if which == "all" else start_pos + seq - 1
+        with torch.inference_mode():
+            logits = torch.nn.functional.linear(norm(h.float()), head).float()
+        return [sample_at(logits[0, i], sampling, first + i) for i in range(logits.shape[1])]
+
     def shutdown(self) -> None:
         pass
 
@@ -119,13 +157,13 @@ class SynthClient(Client):
         self.device = torch.device("cpu")
         self.dtype = dtype
         self.config = SimpleNamespace(num_hidden_layers=layers, hidden_size=hidden, vocab_size=vocab)
-        g = torch.Generator().manual_seed(seed)
         self.embed = nn.Embedding(vocab, hidden)
         self.head = nn.Linear(hidden, vocab, bias=False)
         self.norm = nn.RMSNorm(hidden)
         with torch.no_grad():
-            self.embed.weight.copy_(torch.randn(vocab, hidden, generator=g))
-            self.head.weight.copy_(torch.randn(vocab, hidden, generator=g) / hidden ** 0.5)
+            e, h = synth_tables(seed, vocab, hidden)
+            self.embed.weight.copy_(e)
+            self.head.weight.copy_(h)
         self.steps: list[dict] = []
 
     @torch.inference_mode()
@@ -139,11 +177,24 @@ class SynthClient(Client):
         session_id = uuid.uuid4().hex
         ids = torch.tensor([list(prompt_ids)], dtype=torch.long)
         pos, produced = 0, 0
+        use_chain = self._use_chain(endpoints)
+        use_ids = use_chain or self._use_ids(endpoints)
         try:
             while produced < max_new_tokens:
                 if before_step is not None:
                     before_step(produced)
                 t0 = time.perf_counter()
+                if use_ids:   # token ids in, token id out: no local embedding or head
+                    next_id = int(self._step_ids(endpoints, session_id, ids[0].tolist(), pos, "last", chain=use_chain)[-1])
+                    t4 = time.perf_counter()
+                    self.steps.append({"kind": "prefill" if pos == 0 else "decode", "tokens_in": int(ids.shape[1]),
+                                       "embed_ms": 0.0, "blocks_ms": (t4 - t0) * 1e3, "head_ms": 0.0,
+                                       "sample_ms": 0.0, "wall_ms": (t4 - t0) * 1e3, "t_start": t0})
+                    pos += ids.shape[1]
+                    produced += 1
+                    yield next_id
+                    ids = torch.tensor([[next_id]], dtype=torch.long)
+                    continue
                 hidden = self.embed(ids).to(self.dtype)
                 t1 = time.perf_counter()
                 hidden = self._run_blocks(endpoints, session_id, hidden, pos)

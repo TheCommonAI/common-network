@@ -74,11 +74,12 @@ class CpuBackendManifest(unittest.TestCase):
         self.assertEqual(m.model["dtype"]["cpu"], "bfloat16")
         # an unquantised bf16 Qwen3-8B layer is ~0.36 GiB; a 9-layer window must be costed at least that
         self.assertGreaterEqual(m.window_gib(0, 9, "cpu"), 0.3 + 9 * 0.36)
-        self.assertEqual(m.windows_fitting(5.0, "cpu")[0], (0, 9))
+        self.assertEqual(m.windows_fitting(5.0, "cpu")[0], (9, 18))
+        self.assertNotIn((0, 9), m.windows_fitting(5.0, "cpu"))
         self.assertEqual(m.windows_fitting(3.0, "cpu"), [])
 
     def test_a_peer_that_does_not_know_cpu_is_unaffected(self):
         from pathlib import Path
         m = Manifest.load(Path(__file__).resolve().parents[1] / "networks" / "main.json")
-        self.assertAlmostEqual(m.window_gib(0, 9, "mlx"), 0.3 + 9 * 0.125)
-        self.assertAlmostEqual(m.window_gib(0, 9, "nf4"), 0.3 + 9 * 0.17)
+        self.assertAlmostEqual(m.window_gib(0, 9, "mlx"), 0.3 + 9 * 0.125 + m.io_gib["mlx"])
+        self.assertAlmostEqual(m.window_gib(0, 9, "nf4"), 0.3 + 9 * 0.17 + m.io_gib["nf4"])

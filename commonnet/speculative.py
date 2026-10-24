@@ -1,5 +1,7 @@
 """Speculative decoding for the layer network: a small local drafter proposes k tokens, the network checks them all in
-one pass through the stages, the client keeps the longest correct prefix and rolls the rest back.
+one pass through the stages. On a token chain, the final peer verifies the longest
+correct prefix and returns it plus a correction/bonus ID; the client rolls caches
+back consistently. Legacy routes compare locally.
 
 Each plain token costs one trip through every stage. A round here costs one trip too, but yields 1 + (accepted
 drafts) tokens, so the per-hop latency is shared across them.
@@ -109,6 +111,20 @@ def _truncate_all(client, endpoints, session_id: str, length: int) -> None:
         client.transport.truncate(ep, session_id, length, defer=True)
 
 
+def _verified_prefix(reply: dict, drafts: list[int], vocab_size: int) -> tuple[int, int]:
+    """Validate the compact verification answer before using it to trim caches."""
+    if not isinstance(reply, dict):
+        raise ValueError("final peer returned a malformed verification answer")
+    accepted, next_id, ids = reply.get("accepted"), reply.get("next"), reply.get("ids")
+    if (type(accepted) is not int or not 0 <= accepted <= len(drafts)
+            or type(next_id) is not int or not 0 <= next_id < vocab_size
+            or not isinstance(ids, list) or len(ids) != accepted + 1
+            or any(type(t) is not int for t in ids)
+            or ids[:accepted] != drafts[:accepted] or ids[-1] != next_id):
+        raise ValueError("final peer returned a malformed verification answer")
+    return accepted, next_id
+
+
 def can_speculate(client, endpoints) -> tuple[bool, str]:
     t = client.transport
     if not hasattr(t, "supports_truncate") or not hasattr(t, "truncate"):
@@ -140,10 +156,15 @@ def speculative_stream(client, endpoints, prompt_ids, max_new_tokens: int, draft
         drafter.reset()
     produced, cur_k = 0, k
     try:
-        ids = torch.tensor([list(prompt_ids)], dtype=torch.long, device=client.device)
-        hidden = client._run_blocks(endpoints, session_id, client.embed(ids).to(client.dtype), 0)
+        use_chain = client._use_chain(endpoints)
+        use_ids = use_chain or client._use_ids(endpoints)
+        if use_ids:
+            last = int(client._step_ids(endpoints, session_id, list(prompt_ids), 0, "last", chain=use_chain)[-1])
+        else:
+            ids = torch.tensor([list(prompt_ids)], dtype=torch.long, device=client.device)
+            hidden = client._run_blocks(endpoints, session_id, client.embed(ids).to(client.dtype), 0)
+            last = int(client._logits(hidden[:, -1:])[0, -1].argmax())
         pos = len(prompt_ids)
-        last = int(client._logits(hidden[:, -1:])[0, -1].argmax())
         context = list(prompt_ids)
         while True:
             if last in stops:
@@ -156,12 +177,21 @@ def speculative_stream(client, endpoints, prompt_ids, max_new_tokens: int, draft
             context.append(last)
             want = min(cur_k, max_new_tokens - produced)       # never draft past the end
             drafts = [int(d) for d in drafter.propose(context, want)][:want]
-            feed = torch.tensor([[last] + drafts], dtype=torch.long, device=client.device)
-            hidden = client._run_blocks(endpoints, session_id, client.embed(feed).to(client.dtype), pos)
-            greedy = client._logits(hidden)[0].argmax(dim=-1).tolist()   # greedy[i] follows feed[i]
-            m = 0
-            while m < len(drafts) and drafts[m] == greedy[m]:
-                m += 1
+            if use_chain:
+                reply = client.transport.chain_step(endpoints, session_id, [last] + drafts, pos,
+                                                    which="all", drafts=drafts)
+                m, next_id = _verified_prefix(reply, drafts, client.config.vocab_size)
+            else:
+                if use_ids:
+                    greedy = client._step_ids(endpoints, session_id, [last] + drafts, pos, "all")
+                else:
+                    feed = torch.tensor([[last] + drafts], dtype=torch.long, device=client.device)
+                    hidden = client._run_blocks(endpoints, session_id, client.embed(feed).to(client.dtype), pos)
+                    greedy = client._logits(hidden)[0].argmax(dim=-1).tolist()
+                m = 0
+                while m < len(drafts) and drafts[m] == greedy[m]:
+                    m += 1
+                next_id = greedy[m]
             stats.rounds += 1
             stats.drafted += len(drafts)
             stats.accepted += m
@@ -183,7 +213,7 @@ def speculative_stream(client, endpoints, prompt_ids, max_new_tokens: int, draft
                 context.append(d)
                 if produced == max_new_tokens:
                     return
-            last = greedy[m]
+            last = next_id
     finally:
         stats.wall_s += time.perf_counter() - t_start
         for ep in endpoints:
