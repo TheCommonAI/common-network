@@ -21,8 +21,16 @@ def build_parser():
     p.add_argument("--loss", type=float, default=0.0, help="chance a chunk waits one 200 ms retransmit timeout")
     p.add_argument("--hidden", type=int, default=256)
     p.add_argument("--prompt-tokens", type=int, default=16)
-    p.add_argument("--new-tokens", type=int, default=20)
+    p.add_argument("--new-tokens", type=int, default=None, help="tokens to generate (default 20; with --live: every case)")
     p.add_argument("--repeats", type=int, default=2)
+    p.add_argument("--live", metavar="URL_OR_MANIFEST",
+                   help="benchmark a REAL running network: a peer URL (as serve --network takes) or a manifest file")
+    p.add_argument("--prompt-lens", help="with --live: comma list of prompt lengths in tokens (default 16,256,1024)")
+    p.add_argument("--checkpoint", help="with --live: local client checkpoint (default: the manifest's client_repo)")
+    p.add_argument("--client-format", choices=["mlx4", "fp16", "fp32"], default="mlx4", help="with --live")
+    p.add_argument("--draft", nargs="?", const="mlx-community/Qwen3-0.6B-4bit", default=None, metavar="MODEL",
+                   help="with --live: also run the Common Flash speculative path with this drafter model")
+    p.add_argument("--draft-k", type=int, default=8, help="with --live --draft: tokens drafted per round")
     p.add_argument("--no-keepalive", action="store_true", help="close the HTTP connection after every request")
     p.add_argument("--sweep", action="store_true", help="the full sweep: stages, RTT, hidden size, keep-alive, failover")
     p.add_argument("--failover", action="store_true", help="only the kill-a-replica scenario")
@@ -73,8 +81,31 @@ def run_sweep(args) -> dict:
             "failover": fo, "sweep": {"layers": L, "layer_ms": ms}}
 
 
+def run_live_cli(args, make_client=None) -> int:
+    from commonnet.bench import live
+    if args.prompt_lens or args.new_tokens:
+        lens = [int(x) for x in args.prompt_lens.split(",")] if args.prompt_lens else [16, 256, 1024]
+        cases = [(n, args.new_tokens or 32) for n in lens]
+    else:
+        cases = list(live.DEFAULT_CASES)
+    make_client = make_client or live.real_client_factory(
+        args.checkpoint, client_format=args.client_format, draft=bool(args.draft), draft_model=args.draft,
+        draft_k=args.draft_k)
+    report = live.run_live(args.live, make_client=make_client, cases=cases, repeats=args.repeats,
+                           draft=bool(args.draft), draft_k=args.draft_k)
+    print(live.format_report(report))
+    print()
+    print(live.one_line(report))
+    out = args.out or str(Path("bench-results") / time.strftime("live-%Y%m%d-%H%M%S.json", time.gmtime()))
+    print(f"wrote {save(report, out)}")
+    return 0
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.live:
+        return run_live_cli(args)
+    args.new_tokens = args.new_tokens or 20
     if args.sweep:
         payload = run_sweep(args)
         path = save(payload, args.out)
