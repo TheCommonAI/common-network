@@ -83,7 +83,10 @@ def build_block(start: int, end: int, backend: str | None = None, checkpoint: st
         inner = OnWorkerThread(MlxBlockRange, checkpoint_dir=checkpoint, start=start, end=end, **extra)
         return ServedBlock(inner, start, end, "metal")
     from commonnet.backends.nf4_block import Nf4BlockRange  # refuses without CUDA
-    return ServedBlock(Nf4BlockRange(checkpoint_dir=checkpoint, start=start, end=end), start, end, "cuda")
+    # bfloat16 compute: float16 activations overflow to NaN on some Qwen prompts (the Mac backend hit it too).
+    # RTX 20-series and older have no bfloat16; set COMMONNET_DTYPE=float16 there.
+    dtype = getattr(torch, env.get("COMMONNET_DTYPE") or "bfloat16")
+    return ServedBlock(Nf4BlockRange(checkpoint_dir=checkpoint, start=start, end=end, dtype=dtype), start, end, "cuda")
 
 
 def FACTORY(start: int, end: int):

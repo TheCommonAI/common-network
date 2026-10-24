@@ -32,3 +32,28 @@ class Nf4Refusal(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Nf4Dtype(unittest.TestCase):
+    """The factory hands the NF4 block bfloat16 compute unless told otherwise (float16 overflows to NaN on Qwen)."""
+
+    def _dtype_for(self, env):
+        import torch
+        from unittest import mock
+        from commonnet.net import factory
+        seen = {}
+
+        class Fake:
+            def __init__(self, **kw):
+                seen.update(kw)
+
+        with mock.patch("commonnet.backends.nf4_block.Nf4BlockRange", Fake), \
+                mock.patch.object(factory, "ServedBlock", lambda inner, *a, **k: inner):
+            factory.build_block(0, 9, backend="nf4", checkpoint="/ckpt", environ=env)
+        return seen["dtype"], torch
+
+    def test_default_is_bfloat16_and_the_env_can_override(self):
+        dtype, torch = self._dtype_for({})
+        self.assertIs(dtype, torch.bfloat16)
+        dtype, torch = self._dtype_for({"COMMONNET_DTYPE": "float16"})
+        self.assertIs(dtype, torch.float16)
