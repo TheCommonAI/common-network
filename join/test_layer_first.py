@@ -112,8 +112,13 @@ class Dispatch(unittest.TestCase):
     def test_model_implies_legacy(self):
         self.assertEqual(dispatch(["--model", "qwen-x"]), ["legacy"])
 
-    def test_plain_join_on_an_unsupported_machine_runs_legacy(self):
-        self.assertEqual(dispatch([], supported=False), ["legacy"])
+    def test_plain_join_on_an_unsupported_machine_explains_and_exits(self):
+        # the legacy gateway is retired, so a machine with no GPU is told so rather than sent there
+        out = subprocess.run([sys.executable, "-c", HARNESS.format(here=str(HERE), argv=[], supported=False)],
+                             capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("NVIDIA GPU", out.stderr)
+        self.assertNotIn("Traceback", out.stderr)
 
     def test_explicit_network_has_no_notice(self):
         self.assertEqual(dispatch(["--network", "https://x.example"]), [["network", "https://x.example"]])
@@ -121,6 +126,17 @@ class Dispatch(unittest.TestCase):
     def test_permanent_installs_a_service_in_the_mode_it_would_run(self):
         self.assertEqual(dispatch(["--permanent"]), ["notice", ["service", ""]])
         self.assertEqual(dispatch(["--permanent", "--legacy"]), ["legacy"])  # legacy path installs after resolving a model
+
+
+class RetiredGateway(unittest.TestCase):
+    def test_gateway_410_is_a_clear_message_not_a_traceback(self):
+        import urllib.error
+        from unittest import mock
+        import join
+
+        err = urllib.error.HTTPError("http://x/assign", 410, "Gone", {}, None)
+        with mock.patch.object(join, "http_json", side_effect=err), self.assertRaises(SystemExit):
+            join.gateway_json("POST", "http://x/assign", body={})
 
 
 if __name__ == "__main__":
