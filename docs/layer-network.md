@@ -184,7 +184,16 @@ The production gateway also runs a small in-memory directory so `common join` ne
 signed peer records (90 s TTL, newest per peer, capped per network and per source IP) and never trusts them: readers
 verify signatures themselves. `POST /announce` (a signed record), `GET /directory?network=ID` (up to 100 live records)
 and `POST /check {port, fp?}` (the gateway opens a TLS connection back to the caller's own IP only, ports 1024-65535,
-to tell a peer whether it is reachable from outside). All three are rate limited per IP. Code: `gateway/app/directory.py`.
+to tell a peer whether it is reachable from outside). Announcements and checks are rate limited per IP. Code: `gateway/app/directory.py`.
+
+On Railway, caller identification uses the edge's documented `X-Real-IP` header
+([Railway request headers](https://docs.railway.com/networking/public-networking/specs-and-limits)),
+with exactly one public IPv4 or IPv6 literal required. Missing, duplicate or invalid headers return HTTP 400;
+the gateway never selects an address from `X-Forwarded-For` or a request body. Outside Railway it uses the socket
+peer and ignores forwarding headers. Reachability checks refuse private, loopback, reserved and multicast targets.
+Only `COMMON_GATEWAY_TEST=1` outside Railway permits the single-address test header and loopback probes.
+Correct caller identification does not open a router's ports: TCP 7471 and UDP 7472 still need reachable mappings
+and local firewall rules for direct mode; otherwise the peer uses its tunnel fallback.
 
 ## Zero-config join (matrix)
 
