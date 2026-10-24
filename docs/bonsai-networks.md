@@ -1,16 +1,18 @@
 # Bonsai networks
 
-Three more models run on the layer network next to the default Qwen3-8B. Each is a manifest file in
+Four more models run on the layer network next to the default Qwen3-8B. Each is a manifest file in
 `commonnet/networks/`; the default network (`main.json`) is untouched.
 
 | Network | Manifest | Model | Layers | Stages | Backends |
 | --- | --- | --- | ---: | --- | --- |
 | Bonsai 1 8B | `bonsai-8b.json` | Ternary Bonsai 8B (Qwen3-8B architecture and tokenizer) | 36 | 0-9-18-27-36 | Apple silicon (MLX), NVIDIA (NF4, quantised on load), CPU |
+| Bonsai 1 27B | `bonsai-27b.json` | Ternary Bonsai 27B (Qwen3.6 lineage, hybrid) | 64 | every 4 layers | Apple silicon (MLX), NVIDIA (NF4), CPU (bf16) |
 | Bonsai 2 9B | `bonsai-2-9b.json` | Ternary Bonsai 2 9B (Qwen3.5 lineage, hybrid) | 32 | 0-8-16-24-32 | Apple silicon (MLX), NVIDIA (NF4 of the dequantised pack), CPU (bf16) |
 | Bonsai 2 27B | `bonsai-2-27b.json` | Ternary Bonsai 2 27B (Qwen3.8 lineage, hybrid) | 64 | every 4 layers | Apple silicon (MLX), NVIDIA (NF4 of the dequantised pack), CPU (bf16) |
 
 ```bash
 common join --network /path/to/commonnet/networks/bonsai-8b.json     # serve a slice of Bonsai 1 8B
+common join --network bonsai-27b                                  # serve a slice of Bonsai 1 27B
 common join --network /path/to/commonnet/networks/bonsai-2-9b.json   # serve a slice of Bonsai 2 9B
 common join --network bonsai-2-27b                                # serve a slice of Bonsai 2 27B
 python -m commonnet.bench --live /path/to/bonsai-8b.json ...          # measure it (see network-bench.md)
@@ -28,6 +30,8 @@ Repo ids were read from the Hugging Face API (organisation `prism-ml`), not gues
   Stock MLX affine 2-bit, group size 128, ternary values {-1, 0, +1}. Standard `model.layers.N.*` names.
 - Bonsai 1 8B, CPU: `prism-ml/Ternary-Bonsai-8B-unpacked`. The same weights as float16 in a plain
   `Qwen3ForCausalLM` checkpoint (4 shards, 16.4 GB). Listed so CPU machines can join. **Not run here.**
+- Bonsai 1 27B, MLX: `prism-ml/Ternary-Bonsai-27B-mlx-2bit`, a single 8.49 GB safetensors pack; CPU/NVIDIA:
+  `prism-ml/Ternary-Bonsai-27B-unpacked` (float16 checkpoint, 12 shards).
 - Bonsai 2 9B, MLX: `prism-ml/Ternary-Bonsai-2-9B-mlx-2bit`. One 3.46 GB file: language model (2-bit, group 128)
   plus an FP16 vision tower that the network never loads. Names are `language_model.model.layers.N.*`.
 - Bonsai 2 27B, all backends: `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit`, one 8.60 GB file. The manifest
@@ -39,12 +43,14 @@ Repo ids were read from the Hugging Face API (organisation `prism-ml`), not gues
 
 `gib_per_layer` was measured from the safetensors headers (sum of each layer's tensors): Bonsai 1 8B MLX 0.0506 GiB
 per layer (every layer equal), CPU 0.359 GiB (float16), NVIDIA 0.101 GiB computed (192.9 M weights x (0.5 B NF4 + 4 B/64 absmax)); Bonsai 2 9B MLX 0.0551 GiB for a full-attention layer and
-0.0584 GiB for a linear-attention one (mean 0.0576), and for the torch paths 0.110-0.115 GiB NF4 / 0.39-0.41 GiB bf16 (218 M / 210 M packed weights per layer). Bonsai 2 27B MLX is 0.0977 GiB per full-attention layer and 0.1025 GiB per linear-attention layer (from the single-file safetensors header); its manifest rounds the layer cost up to 0.103 GiB and budgets 0.204 GiB NF4 / 0.81 GiB bf16 for torch. The manifests round up (0.051, 0.36, 0.058, nf4 0.105 and 0.115, cpu 0.41) and keep the
+0.0584 GiB for a linear-attention one (mean 0.0576), and for the torch paths 0.110-0.115 GiB NF4 / 0.39-0.41 GiB bf16 (218 M / 210 M packed weights per layer). Bonsai 1 27B MLX is 0.0975 GiB per full-attention layer and 0.1005 GiB per linear-attention layer; the unpacked CPU layers are 0.693-0.714 GiB. Bonsai 2 27B MLX is 0.0977 GiB per full-attention layer and 0.1025 GiB per linear-attention layer (from the single-file safetensors header); its manifest rounds the layer cost up to 0.103 GiB and budgets 0.204 GiB NF4 / 0.81 GiB bf16 for torch. The manifests round up (0.051, 0.36, 0.058, nf4 0.105 and 0.115, cpu 0.41) and keep the
 default 0.3 GiB fixed overhead. The embedding and head (the client part) are 0.33 GiB for Bonsai 1 and 0.53 GiB for
-Bonsai 2 9B and about 0.67 GiB for Bonsai 2 27B; these are not counted in a window. A peer fetches only its own layers: the one-file packs are read with
+Bonsai 2 9B and about 0.67 GiB for each Bonsai 27B client part; these are not counted in a window. A peer fetches only its own layers: the one-file packs are read with
 HTTP range requests (`hub.py` now does that for any repo whose index names a single shard, not only for qwen3_5).
 
 ## How a window loads
+
+**Bonsai 1 27B** uses the standard quantized `qwen3_5` loader for its MLX pack; its CPU/NVIDIA manifest points to the unpacked float16 checkpoint. Its 27B path has not been run through Common yet.
 
 **Bonsai 1 8B loads as is.** `MlxBlockRange` already uses a checkpoint's own quantization when it stores `.scales`
 next to the layer weights; this pack says `bits 2, group_size 128` in `config.json`, and `mlx_lm`'s Qwen3 block
@@ -146,4 +152,4 @@ The Mac was busy (other peers running, swap nearly full), so treat all timings a
   (8.0-8.7 tok/s; compute about 98-105 ms). The two were measured minutes apart under different load, so do not read
   the 8B/9B ordering as real; the prism-ml reports roughly 30 ms/token on a quiet machine.
   Memory was not measured.
-- **Not verified**: the CPU repo for Bonsai 1 (never run), Bonsai 2 27B on any Common backend, more than one peer on these networks, the chat API (`--api`) with these models, drafter acceptance on Bonsai 1.
+- **Not verified**: the CPU repo for Bonsai 1 8B (never run), either 27B model on any Common backend, more than one peer on these networks, the chat API (`--api`) with these models, drafter acceptance on Bonsai 1.
