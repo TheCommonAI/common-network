@@ -31,7 +31,10 @@ of Qwen3-8B (`Qwen/Qwen3-8B`, about 0.36 GiB per layer) needs about 3.6 GiB, so 
 serve one stage and a 31 GB PC can serve several. Routes prefer GPU peers when the number of hops is the same
 (a CPU peer is never the cheapest choice for a hop a GPU peer also serves), and a CPU peer still adds capacity
 and replicas. Replicas are same-backend only (see below). A machine with too little RAM for even one stage is
-told how much it needs and exits. **The NVIDIA path is written but has not been run on real hardware yet, and
+told how much it needs and exits. **Measured on an M-series Mac's CPU (4 torch threads, 9 Qwen3-8B layers): bf16 decode 58 ms/token, but bf16
+prefill of 64 tokens took 9.3 s because that CPU has no fast bf16 matmul (float32: 0.40 s prefill, 120 ms/token
+and twice the RAM). Speed on x86 depends on AVX512-BF16/AMX support and has not been measured; `COMMONNET_DTYPE=float32`
+switches a CPU peer to float32 (and its `gib` cost doubles, so only with RAM to spare). The NVIDIA path is written but has not been run on real hardware yet, and
 the CPU path has been run on a Mac's CPU only, not on Windows.**
 
 ## Chat with it
