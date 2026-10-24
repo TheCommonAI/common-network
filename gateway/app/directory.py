@@ -172,6 +172,12 @@ def directory(network: str = ""):
 
 
 def _probe(ip: str, port: int, fp: str | None) -> dict:
+    out = _probe_one(ip, port, fp)
+    out["ip"] = ip   # lets the caller confirm the gateway saw the address it expects
+    return out
+
+
+def _probe_one(ip: str, port: int, fp: str | None) -> dict:
     try:
         with socket.create_connection((ip, port), timeout=CHECK_TIMEOUT) as raw:
             raw.settimeout(CHECK_TIMEOUT)

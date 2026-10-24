@@ -207,7 +207,7 @@ class Check(unittest.TestCase):
         return self.c.post("/check", content=json.dumps(body), headers={"x-forwarded-for": ip})
 
     def test_reachable_with_and_without_matching_fingerprint(self):
-        self.assertTrue(self.check({"port": self.srv.port}).json()["reachable"])
+        self.assertEqual(self.check({"port": self.srv.port}).json(), {"reachable": True, "ip": "127.0.0.1"})
         self.assertTrue(self.check({"port": self.srv.port, "fp": self.srv.fp}).json()["reachable"])
         r = self.check({"port": self.srv.port, "fp": "00" * 32}).json()
         self.assertFalse(r["reachable"])
