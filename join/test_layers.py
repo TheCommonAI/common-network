@@ -177,6 +177,30 @@ class Source(unittest.TestCase):
 
 
 class Run(unittest.TestCase):
+    def test_an_existing_installed_launcher_is_refreshed_after_mode_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            installed = Path(tmp)
+            launcher = installed / "layers.py"
+            launcher.write_text("version = 'old'\ndef platform_kind(): return 'cpu'\n")
+            cached = sys.modules.pop("layers", None)
+            try:
+                with mock.patch.object(join, "__file__", str(installed / "join.py")), \
+                        mock.patch.object(sys, "path", [str(installed), *sys.path]):
+                    self.assertTrue(join.layer_network_supported())  # choose_mode's early import
+                    self.assertEqual(join._load_layers().version, "old")
+                    # Same-size update also exercises invalidation of cached bytecode.
+                    replacement = launcher.read_bytes().replace(b"'old'", b"'new'")
+                    def fetch(url, timeout):
+                        return io.BytesIO(replacement if url.endswith("layers.py") else b"# sibling\n")
+                    with mock.patch.object(join.urllib.request, "urlopen", side_effect=fetch):
+                        self.assertTrue(join.refresh_siblings())
+                    self.assertEqual(launcher.read_bytes(), replacement)
+                    self.assertEqual(join._load_layers().version, "new")
+            finally:
+                sys.modules.pop("layers", None)
+                if cached is not None:
+                    sys.modules["layers"] = cached
+
     def test_run_builds_the_node_command_and_passes_the_environment(self):
         started = []
 
@@ -200,8 +224,41 @@ class Run(unittest.TestCase):
             if sys.platform == "darwin":
                 self.assertEqual(code, 7)
                 command, env = started[0]
-                self.assertEqual(command[1:], ["-m", "commonnet.node", "--network", "https://seed", "--port", "9"])
+                self.assertEqual(command, layers.build_command(command[0], "https://seed", ["--port", "9"], source=src))
                 self.assertTrue(env["PYTHONPATH"].startswith(str(src)))
+
+    def test_selected_source_wins_over_an_old_checkout_without_changing_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "selected source's checkout"
+            old = root / "old-checkout"
+            for directory in (source, old):
+                (directory / "commonnet").mkdir(parents=True)
+            (source / "commonnet" / "__init__.py").write_text("selected = True\n")
+            (source / "commonnet" / "node.py").write_text(
+                "import argparse\nfrom pathlib import Path\n"
+                "p = argparse.ArgumentParser()\np.add_argument('--network')\n"
+                "p.add_argument('--auto-direct', action='store_true')\na = p.parse_args()\n"
+                "assert a.auto_direct\nassert Path(a.network).read_text() == 'relative manifest'\n"
+                "Path('selected-ran').write_text(__file__)\n")
+            (old / "commonnet" / "__init__.py").write_text("raise RuntimeError('old checkout imported')\n")
+            (old / "commonnet" / "node.py").write_text("raise RuntimeError('old node ran')\n")
+            (old / "network.json").write_text("relative manifest")
+            previous = Path.cwd()
+            try:
+                os.chdir(old)
+                # Relative COMMONNET_SRC paths still refer to the caller's directory.
+                relative_source = Path("..") / source.name
+                with mock.patch.object(layers, "IMPORT_CHECK", "import commonnet; assert commonnet.selected"):
+                    self.assertTrue(layers.can_import(sys.executable, relative_source))
+                with mock.patch.object(layers, "ensure_runtime", return_value=sys.executable):
+                    code = layers.run("network.json", ["--auto-direct"],
+                                      env={**os.environ, "COMMONNET_SRC": str(relative_source)},
+                                      nvidia=False, log=lambda *_: None)
+                self.assertEqual(code, 0)
+                self.assertEqual(Path((old / "selected-ran").read_text()), (source / "commonnet" / "node.py").resolve())
+            finally:
+                os.chdir(previous)
 
     def test_dry_run_starts_no_process(self):
         with tempfile.TemporaryDirectory() as tmp:

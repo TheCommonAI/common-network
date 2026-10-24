@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import importlib
+import importlib.util
 import json
 import os
 import platform
@@ -139,7 +140,7 @@ UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
 
 # Everything join.py drives that lives beside it, and has to be refreshed when
 # join.py refreshes itself. See refresh_siblings().
-SIBLING_MODULES = ("worker.py", "runtime.py")
+SIBLING_MODULES = ("worker.py", "runtime.py", "layers.py")
 SIBLING_UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/{{}}"
 
 # The schemes a `--model` value may name explicitly. Anything else is read as a
@@ -557,7 +558,7 @@ def fetch_update() -> bytes | None:
 def refresh_siblings() -> bool:
     """Bring every sibling module join.py drives up to date with this script.
 
-    join.py imports the worker and the runtime as siblings, so a self-update
+    join.py imports the worker, runtime and layer launcher as siblings, so a self-update
     that replaced only join.py would leave a new joiner driving an old worker or
     an old runtime -- exactly the kind of version skew that shows up as a
     security fix silently not applying. A failure here must not block the join,
@@ -565,7 +566,7 @@ def refresh_siblings() -> bool:
     the return value, though, because the caller about to replace join.py has to
     hold off when it cannot be sure the siblings match it.
 
-    Writes only what differs, so the common case is two small GETs per run. Note
+    Writes only what differs, so the common case is three small GETs per run. Note
     that this compares contents and nothing else -- there is no checksum or
     signature on this path, which is pre-existing behaviour rather than an
     oversight introduced here, and is worth knowing when reasoning about what a
@@ -597,6 +598,18 @@ def refresh_siblings() -> bool:
                 pass  # missing locally -- writing it below is the fix
             with open(path, "wb") as f:
                 f.write(remote)
+            if name == "layers.py":
+                # choose_mode may already have imported the old launcher. The next
+                # _load_layers must use this update, even for equal-size changes
+                # written within the same filesystem timestamp tick.
+                cached = sys.modules.get("layers")
+                if cached is not None and os.path.abspath(getattr(cached, "__file__", "")) == path:
+                    sys.modules.pop("layers", None)
+                try:
+                    os.unlink(importlib.util.cache_from_source(path))
+                except (OSError, NotImplementedError):
+                    pass
+                importlib.invalidate_caches()
         except (urllib.error.URLError, socket.timeout, OSError):
             current = False
     return current
