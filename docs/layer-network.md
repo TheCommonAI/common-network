@@ -114,6 +114,38 @@ for everyone, list its URL in `commonnet/networks/seeds.json` on `main` (fetched
 needed). A network is defined by its manifest (`commonnet/networks/main.json`): the model, and the fixed
 stage boundaries every peer's window is made of.
 
+## Direct mode (experimental)
+
+Off by default. Without `--direct` nothing in this section applies and the Cloudflare tunnel plus gossip path
+runs exactly as before. With it, a peer serves over TLS on its own public address and is found through a
+Kademlia DHT (UDP), so a client needs no seed URL.
+
+```
+common join --direct --bootstrap BOOT.HOST:7480 --direct-port 7471 --public-ip YOUR.IP --external-port 7471
+python -m commonnet.node --direct --bootstrap BOOT.HOST:7480 --stage-gib 4      # without the launcher
+python -m commonnet.serve --bootstrap BOOT.HOST:7480                              # a client: no --network, no URL
+python -m commonnet.bench --live --bootstrap BOOT.HOST:7480                       # per-hop kind: direct / tunnel / plain
+```
+
+- **Address.** `--public-ip` / `--external-port` (a port you forwarded by hand, a first-class path) else an automatic
+  router mapping (UPnP, PCP, NAT-PMP) else the public address STUN reports. Two or three DHT peers are asked to dial
+  back; only a successful dial-back (or, for a manual forward when nobody can be asked, your word) publishes
+  `https://IP:PORT`. A private, loopback or carrier-grade address is never published.
+- **Not reachable** (school or office network, carrier-grade NAT): the peer opens the Cloudflare tunnel as today and
+  joins the same mesh through it. `--no-tunnel-fallback` makes it refuse instead and print the port to forward.
+- **Trust.** Each peer has a self-signed certificate; its fingerprint (`fp`) and the identity's signature over it
+  (`fpsig`) travel in the signed record. Clients pin that fingerprint per peer; a record with a missing or forged
+  binding is dropped. Tunnel URLs are unpinned, as before.
+- **Mixed meshes.** Direct and tunnel peers gossip and share one table. A node that predates this change still
+  verifies and relays the new records (extra fields are ignored), but cannot connect to a direct peer (the certificate
+  does not verify), so it fails over to its tunnel peers. Run direct-capable clients to use direct peers.
+- **Cold start needs a bootstrap node.** `python -m commonnet.dht --bind 0.0.0.0:7480` on any always-on machine with
+  UDP 7480 open; its address goes in `commonnet/networks/bootstrap.json` or `--bootstrap`. None is listed yet.
+- **Not built:** relaying for unreachable peers (they use the tunnel), IPv6, automatic switch from direct to tunnel if a
+  working address stops working later (the node logs a warning), and any of this verified over the real Internet.
+
+How to test it on real machines: `docs/direct-test.md`. Design and security notes: `commonnet/net/DIRECT.md`.
+
 ## What survives a dropout
 
 - **A peer dies while others hold the same layers** — the client switches to a replica and replays what it

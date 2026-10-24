@@ -23,7 +23,9 @@ def build_parser():
     p.add_argument("--prompt-tokens", type=int, default=16)
     p.add_argument("--new-tokens", type=int, default=None, help="tokens to generate (default 20; with --live: every case)")
     p.add_argument("--repeats", type=int, default=2)
-    p.add_argument("--live", metavar="URL_OR_MANIFEST",
+    p.add_argument("--bootstrap", action="append", default=[], metavar="HOST:PORT",
+                   help="with --live: join the DHT through this node (repeatable); with no URL, peers are found by DHT only")
+    p.add_argument("--live", metavar="URL_OR_MANIFEST", nargs="?", const="dht",
                    help="benchmark a REAL running network: a peer URL (as serve --network takes) or a manifest file")
     p.add_argument("--prompt-lens", help="with --live: comma list of prompt lengths in tokens (default 16,256,1024)")
     p.add_argument("--checkpoint", help="with --live: local client checkpoint (default: the manifest's client_repo)")
@@ -91,7 +93,7 @@ def run_live_cli(args, make_client=None) -> int:
     make_client = make_client or live.real_client_factory(
         args.checkpoint, client_format=args.client_format, draft=bool(args.draft), draft_model=args.draft,
         draft_k=args.draft_k)
-    report = live.run_live(args.live, make_client=make_client, cases=cases, repeats=args.repeats,
+    report = live.run_live(args.live, make_client=make_client, bootstrap=args.bootstrap, cases=cases, repeats=args.repeats,
                            draft=bool(args.draft), draft_k=args.draft_k)
     print(live.format_report(report))
     print()

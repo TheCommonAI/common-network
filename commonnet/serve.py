@@ -459,7 +459,11 @@ def make_server(backend, port: int = DEFAULT_PORT, *, max_context: int = DEFAULT
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="commonnet.serve", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--network", required=True, help="a peer URL, or a manifest file that lists seeds")
+    p.add_argument("--network", default=None,
+                   help="a peer URL, or a manifest file that lists seeds. Omit it (or say `dht`) to find peers through the DHT: "
+                        "the built-in manifest, no seed URL; needs --bootstrap or commonnet/networks/bootstrap.json")
+    p.add_argument("--bootstrap", action="append", default=[], metavar="HOST:PORT",
+                   help="a DHT node to discover peers through (repeatable; experimental, see docs/layer-network.md)")
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument("--checkpoint", help="local client checkpoint (embed, final norm, head); default: download the manifest's client_repo")
     p.add_argument("--client-format", choices=["mlx4", "fp16", "fp32"], default="mlx4",
@@ -474,7 +478,7 @@ def main(argv=None) -> int:
     import torch
     from commonnet.netclient import Network, NetworkUnreachable
     try:
-        network = Network.from_spec(args.network, cache_dir=args.cache_dir)
+        network = Network.open(args.network, args.bootstrap, cache_dir=args.cache_dir)
         network.manifest  # fail now, not on the first request
         backend = NetworkBackend(network, args.checkpoint, fmt=args.client_format, hidden_dtype=torch.float32,
                                  draft=args.draft, draft_k=args.draft_k)

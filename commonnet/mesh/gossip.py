@@ -107,14 +107,17 @@ def manifest_body(manifest: Manifest) -> dict:
 
 # --- talking to another peer ------------------------------------------------------------------
 
-def _request(method: str, url: str, path: str, body: dict | None, timeout: float):
+def _request(method: str, url: str, path: str, body: dict | None, timeout: float, context=None):
     parts = urllib.parse.urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise GossipError(f"not an http(s) URL: {url!r}")
     port = parts.port or (443 if parts.scheme == "https" else 80)
     base = parts.path.rstrip("/")
     cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
-    conn = cls(parts.hostname, port, timeout=timeout)
+    if context is not None and parts.scheme == "https":  # a direct peer: its certificate is pinned, not CA-signed
+        conn = cls(parts.hostname, port, timeout=timeout, context=context)
+    else:
+        conn = cls(parts.hostname, port, timeout=timeout)
     try:
         # connect to the resolved address (public DNS fallback for brand-new quick-tunnel names)
         address = dns.resolve(parts.hostname, port)
@@ -141,25 +144,46 @@ def _request(method: str, url: str, path: str, body: dict | None, timeout: float
         conn.close()
 
 
-def exchange(table: PeerTable, url: str, timeout: float = GOSSIP_TIMEOUT_SECONDS) -> int:
+def exchange(table: PeerTable, url: str, timeout: float = GOSSIP_TIMEOUT_SECONDS, context=None) -> int:
     """Send our records to the peer at `url` (POST /gossip) and merge theirs. Returns how many were new to us."""
-    reply = _request("POST", url, "/gossip", {"records": table.export()}, timeout)
+    reply = _request("POST", url, "/gossip", {"records": table.export()}, timeout, context)
     if not isinstance(reply, dict):
         raise GossipError("reply is not an object")
     return table.merge_many(reply.get("records"))
 
 
-def fetch_peers(table: PeerTable, url: str, timeout: float = GOSSIP_TIMEOUT_SECONDS) -> int:
+def fetch_peers(table: PeerTable, url: str, timeout: float = GOSSIP_TIMEOUT_SECONDS, context=None) -> int:
     """Pull only (GET /peers), for a client that does not publish itself."""
-    reply = _request("GET", url, "/peers", None, timeout)
+    reply = _request("GET", url, "/peers", None, timeout, context)
     if not isinstance(reply, dict):
         raise GossipError("reply is not an object")
     return table.merge_many(reply.get("records"))
 
 
-def fetch_manifest(url: str, timeout: float = GOSSIP_TIMEOUT_SECONDS) -> Manifest:
+def fetch_manifest(url: str, timeout: float = GOSSIP_TIMEOUT_SECONDS, context=None) -> Manifest:
     """GET /manifest from any peer."""
-    return Manifest.from_dict(_request("GET", url, "/manifest", None, timeout))
+    return Manifest.from_dict(_request("GET", url, "/manifest", None, timeout, context))
+
+
+def pinned_context(table: PeerTable, url: str):
+    """The TLS context for gossiping with `url`: pinned to the fingerprint its record carries, or None for any
+    other URL (tunnels and plain peers behave exactly as before)."""
+    from commonnet.net import secure
+    if not rec.is_direct_url(url):
+        return None
+    for r in table.export(limit=MAX_RECORDS):
+        if r.get("url") == url and r.get("fp"):
+            return secure.client_ssl_context(r["fp"])
+    return None
+
+
+def pinned_exchange(table: PeerTable, url: str, timeout: float = GOSSIP_TIMEOUT_SECONDS) -> int:
+    """exchange() that pins a direct peer's certificate from its record. Same signature as exchange."""
+    return exchange(table, url, timeout, pinned_context(table, url))
+
+
+def pinned_fetch_peers(table: PeerTable, url: str, timeout: float = GOSSIP_TIMEOUT_SECONDS) -> int:
+    return fetch_peers(table, url, timeout, pinned_context(table, url))
 
 
 # --- the gossip loop --------------------------------------------------------------------------

@@ -48,6 +48,7 @@ from commonnet.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
 
 LOOPBACK = "127.0.0.1"
 HANDLER_TIMEOUT_SECONDS = 60.0
+TLS_HANDSHAKE_TIMEOUT_SECONDS = 10.0
 POST_PATHS = frozenset(("/session", "/forward", "/close", "/truncate"))
 
 
@@ -140,16 +141,21 @@ class BlockServer:
 
     def __init__(self, block, host: str = LOOPBACK, port: int = 0, *,
                  max_request_bytes: int = MAX_REQUEST_BYTES, token: str | None = None,
-                 extra_handlers: dict | None = None):
+                 extra_handlers: dict | None = None, ssl_context=None):
         """token=None serves without authentication. Only tests and --stub do that;
         the command line refuses to start a real block without a token.
 
         extra_handlers maps ("GET" | "POST", path) to callable(body_or_None) -> (status, obj).
         They are public (no bearer token): a node uses them for the manifest and gossip, whose
         contents are signed. They share the request-size limit. The dict may be changed after
-        construction."""
-        if host != LOOPBACK:
+        construction.
+
+        ssl_context (default None) serves TLS (see commonnet/net/secure.py). It is also what allows
+        a host other than 127.0.0.1, for a directly reachable peer, and then a token is required."""
+        if host != LOOPBACK and ssl_context is None:
             raise ValueError("the block server listens on 127.0.0.1 only; the tunnel is what reaches it")
+        if host != LOOPBACK and token is None:
+            raise ValueError("a block server that listens beyond loopback needs a token")
         if max_request_bytes < 1:
             raise ValueError("max_request_bytes must be positive")
         self.token = None if token is None else auth.check_token(token)
@@ -162,6 +168,7 @@ class BlockServer:
         self._sessions: dict[str, _Session] = {}
         self._httpd = _Httpd((host, port), _Handler)
         self._httpd.block_server = self
+        self._httpd.ssl_context = ssl_context
         self._thread: threading.Thread | None = None
 
     @property
@@ -170,7 +177,9 @@ class BlockServer:
 
     @property
     def url(self) -> str:
-        return f"http://{LOOPBACK}:{self.port}"
+        if self._httpd.ssl_context is None:
+            return f"http://{LOOPBACK}:{self.port}"
+        return f"https://{self._httpd.server_address[0]}:{self.port}"
 
     def start(self) -> "BlockServer":
         """Serve in a background thread. Pair with close()."""
@@ -243,6 +252,23 @@ class _Httpd(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     block_server: BlockServer
+    ssl_context = None
+
+    def finish_request(self, request, client_address):
+        # TLS is set up here, in the connection's own thread, so one slow or stalled handshake
+        # cannot hold up accepting the next connection.
+        if self.ssl_context is None:
+            return super().finish_request(request, client_address)
+        try:
+            request.settimeout(TLS_HANDSHAKE_TIMEOUT_SECONDS)
+            secured = self.ssl_context.wrap_socket(request, server_side=True)
+        except OSError:  # plain HTTP to a TLS port, a scanner, a client that pinned another cert
+            request.close()
+            return
+        try:
+            super().finish_request(secured, client_address)
+        finally:
+            secured.close()
 
     def server_bind(self) -> None:
         # HTTPServer.server_bind resolves this machine's name, which can stall on a
