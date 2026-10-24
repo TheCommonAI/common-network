@@ -24,6 +24,10 @@ FUTURE_SKEW_SECONDS = 120.0
 MAX_TOKEN_CHARS = 256
 MAX_URL_CHARS = 512
 SIGNED_FIELDS = ("v", "network", "peer", "pub", "url", "token", "window", "backend", "state", "gib", "seq", "ts")
+# Optional fields of a directly reachable peer (https://IP:PORT): `fp` is the sha256 of its TLS certificate and
+# `fpsig` the identity's signature binding it (commonnet.net.secure). canonical() already signs every key but
+# `sig`, so they are covered by the record signature; a peer that does not know them ignores them (see DIRECT.md).
+OPTIONAL_FIELDS = ("fp", "fpsig")
 
 
 class RecordError(ValueError):
@@ -103,6 +107,11 @@ class Identity:
                   "window": None if window is None else [int(window[0]), int(window[1])],
                   "backend": fields.get("backend", ""), "state": fields.get("state", "up"),
                   "gib": float(fields.get("gib", 0.0)), "seq": int(seq), "ts": float(fields.get("ts", now))}
+        if fields.get("fp") or fields.get("fpsig"):
+            from commonnet.net import secure
+            fp = secure.normalize_fingerprint(fields["fp"])
+            record["fp"] = fp
+            record["fpsig"] = fields.get("fpsig") or secure.bind_fingerprint(self, fp)
         check_shape(record)
         record["sig"] = _b64e(self._key.sign(canonical(record)))
         return record
@@ -138,6 +147,37 @@ def check_shape(record: dict) -> None:
         raise RecordError("gib must be a number")
     if isinstance(record["ts"], bool) or not isinstance(record["ts"], (int, float)):
         raise RecordError("ts must be a number")
+    if ("fp" in record) != ("fpsig" in record):
+        raise RecordError("fp and fpsig come together")
+    if "fp" in record:
+        if not isinstance(record["fp"], str) or not isinstance(record["fpsig"], str) or len(record["fpsig"]) > 128:
+            raise RecordError("fp and fpsig must be strings")
+        from commonnet.net import secure
+        try:
+            secure.normalize_fingerprint(record["fp"])
+        except ValueError:
+            raise RecordError("fp must be a sha256 fingerprint") from None
+
+
+def is_direct_url(url) -> bool:
+    """https://<IP literal>[:port]: a peer reached without a hostname, trusted by certificate pin only."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return False
+    try:
+        host = urlsplit(url).hostname
+        ipaddress.ip_address(host or "")
+    except ValueError:
+        return False
+    return True
+
+
+def route_kind(url) -> str:
+    """How a peer is reached, for people: "direct" (pinned https://IP), "tunnel" (https hostname) or "plain" (http)."""
+    if is_direct_url(url):
+        return "direct"
+    return "tunnel" if isinstance(url, str) and url.startswith("https://") else "plain"
 
 
 def verify_record(record: dict) -> bool:
@@ -151,6 +191,14 @@ def verify_record(record: dict) -> bool:
         if not isinstance(sig, str):
             return False
         Ed25519PublicKey.from_public_bytes(pub).verify(_b64d(sig), canonical(record))
+        # A direct (https://IP) peer has no CA certificate: its pin must be bound to its identity, or it is refused.
+        # Records of tunnel and plain peers never carry fp and are unaffected.
+        if "fp" in record or is_direct_url(record.get("url")):
+            if "fp" not in record:
+                return False
+            from commonnet.net import secure
+            if not secure.verify_binding(record["pub"], record["fp"], record["fpsig"]):
+                return False
         return True
     except (RecordError, InvalidSignature, ValueError, TypeError):
         return False

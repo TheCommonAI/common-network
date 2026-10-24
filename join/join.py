@@ -1459,6 +1459,22 @@ SYSTEMD_UNIT = "common-join.service"
 SCHTASKS_NAME = "CommonNetworkJoin"
 
 
+def _direct_flags(args: argparse.Namespace) -> list[str]:
+    """The --direct options as `commonnet.node` flags, in `--name=value` form. Empty unless --direct was given."""
+    if not getattr(args, "direct", False):
+        return []
+    flags = ["--direct"]
+    flags += [f"--bootstrap={b}" for b in (getattr(args, "bootstrap", None) or [])]
+    for name, attr in (("--public-ip", "public_ip"), ("--external-port", "external_port"), ("--dht-port", "dht_port"),
+                       ("--port", "direct_port")):
+        value = getattr(args, attr, None)
+        if value is not None:
+            flags.append(f"{name}={value}")
+    if getattr(args, "no_tunnel_fallback", False):
+        flags.append("--no-tunnel-fallback")
+    return flags
+
+
 def _service_argv(args: argparse.Namespace) -> list[str]:
     if getattr(args, "network", None) is not None:
         # A layer-network service: the spec goes last, as --network=SPEC, so it can never swallow another flag.
@@ -1469,6 +1485,7 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
             argv += [f"--api={args.api}"]
         if getattr(args, "layers", None):
             argv += [f"--layers={args.layers}"]
+        argv += _direct_flags(args)   # [] unless --direct, so existing services are unchanged
         return argv + ([f"--network={args.network}"] if args.network else ["--network"])
     argv = [
         sys.executable, os.path.abspath(__file__),
@@ -1730,6 +1747,13 @@ def main() -> None:
     parser.add_argument("--layers", metavar="A-B", help="With the layer network: serve exactly this window of layers (for example 27-36) instead of the one the network picks for you. It must start and end on a stage boundary and fit in memory")
     parser.add_argument("--no-api", action="store_true", help="With the layer network: do not serve the local chat API (on by default, so `common ask` and chat apps work). Saves the ~1 GB client part of the model")
     parser.add_argument("--api", nargs="?", const=11440, default=None, type=int, metavar="PORT", help="With --network: also serve an OpenAI-compatible chat API on 127.0.0.1:PORT (default 11440) from the same process, so a desktop app or any OpenAI-style client can chat with the network. The client part of the model (about 1 GB for Qwen3-8B) loads in the background")
+    parser.add_argument("--direct", action="store_true", help="With the layer network (experimental): serve over TLS on a public address and be found through a DHT, with no Cloudflare tunnel unless this machine proves unreachable. Default off; see docs/layer-network.md")
+    parser.add_argument("--bootstrap", action="append", default=[], metavar="HOST:PORT", help="With --direct: a DHT node to join through (repeatable)")
+    parser.add_argument("--direct-port", type=int, default=None, metavar="N", help="With --direct: the TCP port to serve on (default: any free port; set it when you forward a port by hand)")
+    parser.add_argument("--public-ip", metavar="IP", help="With --direct: your public IPv4, for a port you forwarded by hand")
+    parser.add_argument("--external-port", type=int, metavar="N", help="With --direct: the TCP port the internet uses to reach --direct-port (default: the same)")
+    parser.add_argument("--dht-port", type=int, default=None, metavar="N", help="With --direct: UDP port for the DHT (default: any)")
+    parser.add_argument("--no-tunnel-fallback", action="store_true", help="With --direct: refuse to start rather than use a tunnel when this machine is not reachable")
     parser.add_argument("--legacy", action="store_true", help="Run as a whole-model gateway node (the original network) instead of the default layer network")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
@@ -1771,6 +1795,12 @@ def main() -> None:
         args.network = ""  # the default: the built-in network
     if args.api is not None and (mode != "network" or args.remove_permanent):
         parser.error("--api is only used with the layer network (--network, or a plain join on a machine that can serve it)")
+    if (args.direct or args.bootstrap or args.public_ip or args.external_port or args.dht_port is not None
+            or args.direct_port is not None or args.no_tunnel_fallback) and mode != "network":
+        parser.error("--direct and its options are only used with the layer network (--network, or a plain join on a machine that can serve it)")
+    if not args.direct and (args.bootstrap or args.public_ip or args.external_port or args.dht_port is not None
+                            or args.direct_port is not None or args.no_tunnel_fallback):
+        parser.error("--bootstrap, --public-ip, --external-port, --direct-port, --dht-port and --no-tunnel-fallback need --direct")
     if args.layers and mode != "network":
         parser.error("--layers is only used with the layer network (--network, or a plain join on a machine that can serve it)")
     if mode == "network" and args.api is None and not args.no_api and not args.remove_permanent:
@@ -1803,7 +1833,9 @@ def main() -> None:
         node_args = [] if args.api is None else ["--api", str(args.api)]
         if args.layers:
             node_args += ["--layers", args.layers]
-        run_network_member(args.network or None, node_args)
+        node_args += _direct_flags(args)
+        # Direct mode with no network named: the built-in manifest and the DHT, no seed URL (name one with --network URL)
+        run_network_member(args.network or ("dht" if args.direct else None), node_args)
         return
     if fell_back:
         die("this machine cannot join the Common network: it needs macOS, Windows or Linux with Python 3.10+ "

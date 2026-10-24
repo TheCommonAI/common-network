@@ -19,6 +19,7 @@ import time
 import urllib.parse
 
 from commonnet.bench.harness import pct
+from commonnet.mesh.records import route_kind
 from commonnet.net.client import BlockClient
 
 DEFAULT_CASES = ((16, 16), (16, 64), (256, 32), (1024, 16))   # (prompt tokens, new tokens)
@@ -92,7 +93,7 @@ def describe_route(net) -> list[dict]:
     for i, hop in enumerate(net._hops):
         records = [hop.primary, *hop.alternates]
         out.append({"hop": i, "window": list(hop.window),
-                    "peers": [{"peer": str(r.get("peer", ""))[:8], "host": clean_url(r.get("url", "")),
+                    "peers": [{"peer": str(r.get("peer", ""))[:8], "host": clean_url(r.get("url", "")), "kind": route_kind(r.get("url", "")),
                                "backend": r.get("backend", "") or "?"} for r in records]})
     return out
 
@@ -211,8 +212,8 @@ def summarize_steps(steps: list[dict], route: list[dict], rtts: list[dict]) -> d
         server = _mean(served) if served else None
         rtt = next((r for r in rtts if r["hop"] == hop), {}) if index == 0 else {}
         rows.append({"hop": hop, "window": route[hop]["window"] if 0 <= hop < len(route) else None,
-                     "peer": peer["peer"], "host": peer["host"], "backend": peer["backend"],
-                     "replica_index": index, "calls": len(calls), "total_ms": total, "server_ms": server,
+                     "peer": peer["peer"], "host": peer["host"], "kind": peer.get("kind", ""),
+                     "backend": peer["backend"], "replica_index": index, "calls": len(calls), "total_ms": total, "server_ms": server,
                      "network_ms": total - (server or 0.0), "rtt_ms": rtt.get("warm_ms_p50"),
                      "reuse_rate": sum(1 for c in calls if c["reused"]) / len(calls),
                      "bytes_per_call": _mean(c["bytes_out"] + c["bytes_in"] for c in calls)})
@@ -250,7 +251,7 @@ def run_speculative(net, client, ids, new_tokens, *, drafter, draft_k, run=None,
 
 # --- the whole run ---------------------------------------------------------------------------------
 
-def run_live(spec: str, *, make_client, cases=DEFAULT_CASES, repeats: int = 2, draft: bool = False, draft_k: int = 8,
+def run_live(spec: str | None, *, make_client, bootstrap=(), cases=DEFAULT_CASES, repeats: int = 2, draft: bool = False, draft_k: int = 8,
              log=print, settle_s: float = 1.0) -> dict:
     """Learn the network from `spec`, show the route, measure every case. Returns the JSON-able report.
 
@@ -258,7 +259,7 @@ def run_live(spec: str, *, make_client, cases=DEFAULT_CASES, repeats: int = 2, d
     a function that runs a callable on the client's thread, stop ids, and the drafter (or None).
     """
     from commonnet.netclient import Network
-    net = Network.from_spec(spec)
+    net = Network.open(spec, bootstrap)   # a URL or manifest: gossip as before; none/"dht" or bootstrap: the DHT too
     manifest = net.manifest
     net.refresh(force=True)
     time.sleep(settle_s)
@@ -268,12 +269,12 @@ def run_live(spec: str, *, make_client, cases=DEFAULT_CASES, repeats: int = 2, d
     transport.shutdown()
     route = describe_route(net)
     model = manifest.model.get("name", manifest.id)
-    log(f"network {manifest.id}  model {model}  seed {clean_url(spec) or spec}")
+    log(f"network {manifest.id}  model {model}  seed {clean_url(spec or '') or spec or 'dht (no seed URL)'}")
     log(f"route: {len(route)} stage(s), {len(net.table.live())} live peer(s) known")
     for h in route:
         extra = f"  (+{len(h['peers']) - 1} replica)" if len(h["peers"]) > 1 else ""
         p = h["peers"][0]
-        log(f"  hop {h['hop']}: layers {h['window'][0]}-{h['window'][1]}  peer {p['peer']}  {p['backend']}  {p['host']}{extra}")
+        log(f"  hop {h['hop']}: layers {h['window'][0]}-{h['window'][1]}  peer {p['peer']}  {p['backend']}  {p['kind']:<6} {p['host']}{extra}")
     warnings = route_warnings(route, manifest.model.get("num_layers"))
     for w in warnings:
         log(f"WARNING: {w}")
@@ -282,7 +283,7 @@ def run_live(spec: str, *, make_client, cases=DEFAULT_CASES, repeats: int = 2, d
         if r["error"]:
             log(f"  hop {r['hop']} /health failed: {r['error']}")
     report = {"version": 1, "when": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "network": manifest.id,
-              "model": model, "seed": clean_url(spec), "route": route, "warnings": warnings, "hop_rtt": rtts,
+              "model": model, "seed": clean_url(spec or ""), "route": route, "warnings": warnings, "hop_rtt": rtts,
               "config": {"repeats": repeats, "cases": [list(c) for c in cases], "draft": bool(draft), "draft_k": draft_k},
               "cases": [], "speculative": []}
     # warm-up: open the connections (TLS to every tunnel) before anything is timed

@@ -212,6 +212,12 @@ def resolve_network(network: str | None, seeds: list[str], environ=None) -> tupl
     environ = os.environ if environ is None else environ
     network = network or environ.get(NETWORK_ENV) or None
     seeds = list(seeds)
+    if network == "dht":
+        # Direct mode: the built-in manifest and no seed URL; peers are found through the DHT.
+        try:
+            return Manifest.load(str(DEFAULT_MANIFEST)), seeds
+        except ManifestError as e:
+            raise NodeError(str(e)) from None
     if network is None:
         pool = seeds or list(DEFAULT_SEEDS)
         if pool:
@@ -323,7 +329,16 @@ class Node:
                  cooldown_s: float = MOVE_COOLDOWN_SECONDS, gossip_s: float | None = None, clock=time.time,
                  status: StatusFile | None = None, status_s: float = STATUS_SECONDS,
                  api_port: int | None = None, api_backend=None,
-                 fixed_window: tuple[int, int] | None = None):
+                 fixed_window: tuple[int, int] | None = None,
+                 direct=None, state_dir=None, decider=None):
+        # direct (a commonnet.direct.DirectConfig) turns on direct mode: DHT discovery, a TLS block server on a
+        # public address, no tunnel unless the node proves unreachable. None (the default) changes nothing.
+        self.direct, self.state_dir, self._decider = direct, state_dir, decider
+        self.dht = None
+        self.fp: str | None = None
+        self.fpsig: str | None = None
+        self.decision = None
+        self._direct_failures = 0
         self.fixed_window = fixed_window
         self.manifest, self.seeds, self.identity, self.hw = manifest, list(seeds), identity, hardware
         self.cpu_dtype = None
@@ -438,7 +453,8 @@ class Node:
             return self.identity.sign_record({
                 "network": self.manifest.id, "url": self.url, "token": self.token,
                 "window": None if self.window is None else list(self.window),
-                "backend": self.hw.backend, "state": self.state, "gib": self.hw.gib}, now=self.clock())
+                "backend": self.hw.backend, "state": self.state, "gib": self.hw.gib,
+                "fp": self.fp, "fpsig": self.fpsig}, now=self.clock())
 
     def publish(self) -> dict:
         record = self.record()
@@ -455,7 +471,10 @@ class Node:
             self.write_status()
             self._spawn(self._status_loop, "node-status")
         self._learn()
-        self._gossiper = Gossiper(self.table, self.manifest, self.record, self.seeds)
+        if self.direct is not None:
+            self._start_dht()
+        self._gossiper = Gossiper(self.table, self.manifest, self.record, self.seeds,
+                                  **({"exchange_fn": mesh_gossip.pinned_exchange} if self.direct is not None else {}))
         if self.gossip_s is not None:
             self._gossiper.interval = (self.gossip_s, self.gossip_s)
         self.publish()
@@ -468,7 +487,7 @@ class Node:
         self._serve(window)
         with self._lock:
             self.window, self.state, self.phase = window, "up", "up"
-        self.publish()
+        self._announce(self.publish())
         self._push_to_peers()
         self.write_status()
         self.log(f"up at {self.url}")
@@ -488,7 +507,7 @@ class Node:
                 self.phase = "leaving"
         self.write_status()
         try:
-            self.publish()
+            self._announce(self.publish())
             self._push_to_peers()
         except Exception as e:  # leaving is best effort
             self.log(f"could not announce leaving ({type(e).__name__})")
@@ -497,6 +516,7 @@ class Node:
         self._teardown_api()
         self._teardown_server()
         self._close_tunnel()
+        self._stop_direct()
         for t in self._threads:
             if t is not threading.current_thread():
                 t.join(timeout=5)
@@ -520,9 +540,10 @@ class Node:
     # -- learning about peers ------------------------------------------------------------------
 
     def _learn(self) -> None:
+        fetch = mesh_gossip.pinned_fetch_peers if self.direct is not None else mesh_gossip.fetch_peers
         for seed in self.seeds:
             try:
-                mesh_gossip.fetch_peers(self.table, seed, timeout=15)
+                fetch(self.table, seed, timeout=15)
             except (GossipError, ValueError, OSError):
                 self.log(f"seed {urlsplit(seed).netloc} did not answer; continuing")
 
@@ -530,9 +551,10 @@ class Node:
         """Tell a few peers our latest record now rather than at the next gossip round."""
         self.table.merge(self.record())
         targets = [r["url"] for r in self.table.live() if r["peer"] != self.identity.peer and r.get("url")][:4]
+        swap = mesh_gossip.pinned_exchange if self.direct is not None else mesh_gossip.exchange
         for url in targets + self.seeds[:1]:
             try:
-                mesh_gossip.exchange(self.table, url, timeout=8)
+                swap(self.table, url, timeout=8)
             except (GossipError, ValueError, OSError):
                 pass
 
@@ -601,6 +623,8 @@ class Node:
 
     def _serve(self, window) -> None:
         block = self._make_block(window)
+        if self.direct is not None and self._serve_direct(block):
+            return
         server = BlockServer(block, port=self.port, token=self.token, extra_handlers=self.handlers()).start()
         with self._lock:
             self._block, self.server = block, server
@@ -611,6 +635,113 @@ class Node:
         else:
             with self._lock:
                 self.url = self.advertise or server.url
+
+    # -- direct mode (experimental; see commonnet/direct.py and commonnet/net/DIRECT.md) -------------
+
+    def _start_dht(self) -> None:
+        from commonnet.dht import DhtNode, load_bootstrap
+        from commonnet.dht.bootstrap import parse_addr
+        cfg = self.direct
+        boots = [parse_addr(b) for b in cfg.bootstrap]
+        boots += [a for a in load_bootstrap() if a not in boots]
+        host = "127.0.0.1" if cfg.loopback else "0.0.0.0"
+        self.dht = DhtNode(self.identity, bind=(host, cfg.dht_port), bootstrap=boots, network_id=self.manifest.id,
+                           allow_private_dial=cfg.loopback)
+        self.dht.start()
+        self.log(f"DHT on udp {self.dht.address[1]} ({len(boots)} bootstrap node(s))")
+        try:
+            self.dht.bootstrap()
+        except Exception as e:
+            self.log(f"DHT bootstrap failed ({type(e).__name__}); continuing")
+        self._merge_dht()
+        if not boots and not self.seeds:
+            self.log("no bootstrap node and no seed: this peer starts the network; others join with "
+                     f"--bootstrap <this machine's address>:{self.dht.address[1]}")
+
+    def _merge_dht(self) -> None:
+        if self.dht is None:
+            return
+        try:
+            self.table.merge_many(self.dht.find_peers())
+        except Exception as e:
+            self.log(f"DHT lookup failed ({type(e).__name__})")
+
+    def _announce(self, record) -> None:
+        """Put the freshly signed record into the DHT (direct mode only; failures are not fatal)."""
+        if self.dht is None or record is None or not record.get("url"):
+            return
+        try:
+            self.dht.announce(record)
+        except Exception as e:
+            self.log(f"DHT announce failed ({type(e).__name__}: {e})")
+
+    def _serve_direct(self, block) -> bool:
+        """Serve `block` over TLS on a public address. False means unreachable and the tunnel should be used."""
+        from commonnet import direct as direct_mod
+        from commonnet.net import secure
+        cfg = self.direct
+        if self.state_dir is None:
+            raise NodeError("direct mode needs a state directory for the TLS certificate")
+        cert, key, fp = secure.make_peer_cert(self.identity, self.state_dir)
+        ctx = secure.server_ssl_context(cert, key)
+        host = "127.0.0.1" if cfg.loopback else "0.0.0.0"
+        server = BlockServer(block, host, self.port, token=self.token, extra_handlers=self.handlers(),
+                             ssl_context=ctx).start()
+        with self._lock:
+            self._block, self.server = block, server
+            self.port = server.port
+        if self.decision is None:   # decided once; a move to another window keeps the same address
+            decide = self._decider or direct_mod.decide
+            dial = self.dht.dial_back if self.dht is not None else (lambda ip, port: None)
+            self.decision = decide(cfg, server.port, dial, log=self.log)
+            self.log(f"direct address decision: {self.decision.kind}"
+                     + (f" {self.decision.ip}:{self.decision.port}" if self.decision.direct else "")
+                     + (f" ({self.decision.detail})" if self.decision.detail else ""))
+        d = self.decision
+        if d.direct:
+            with self._lock:
+                self.url, self.fp = d.url, fp
+                self.fpsig = secure.bind_fingerprint(self.identity, fp)
+            return True
+        # unreachable
+        port = server.port
+        if not cfg.tunnel_fallback:
+            server.stop()
+            with self._lock:
+                self.server = self._block = None
+            raise NodeError(f"this machine is not reachable from the internet on TCP port {port} ({d.detail}). "
+                            + direct_mod.forward_hint(port, cfg.dht_port or None)
+                            + ", or drop --no-tunnel-fallback to use a Cloudflare tunnel instead.")
+        self.log(f"not reachable directly ({d.detail}); using a Cloudflare tunnel instead. To serve directly, "
+                 + direct_mod.forward_hint(port, cfg.dht_port or None))
+        server.stop()      # the tunnel needs the plain loopback server, as without --direct
+        with self._lock:
+            self.server = None
+        return False
+
+    def _check_direct(self) -> None:
+        """Re-ask a few peers whether our address still answers; say so loudly when it does not."""
+        d = self.decision
+        if self.dht is None or d is None or not d.direct or d.kind == "loopback":
+            return
+        answers = [self.dht.dial_back(d.ip, d.port) for _ in range(2)]
+        if any(a is True for a in answers):
+            self._direct_failures = 0
+        elif any(a is False for a in answers):
+            self._direct_failures += 1
+            if self._direct_failures in (1, 5):
+                self.log(f"WARNING: peers can no longer reach {d.ip}:{d.port}; check the port forward and your public IP")
+
+    def _stop_direct(self) -> None:
+        d = self.decision
+        if d is not None and d.mapping is not None:
+            try:
+                d.mapping.release()
+            except Exception:
+                pass
+        dht, self.dht = self.dht, None
+        if dht is not None:
+            dht.stop()
 
     def _teardown_server(self) -> None:
         with self._lock:
@@ -632,6 +763,11 @@ class Node:
         """Send requests for this node's own window to its loopback block server, not out through the tunnel."""
         with self._lock:
             own, local = self.url, (self.server.url if self.server is not None else None)
+            if self.fp and self.server is not None:   # direct: our own server, over loopback, pinned to our own certificate
+                local = f"https://127.0.0.1:{self.server.port}"
+                pins = transport._kw.get("pin")
+                if isinstance(pins, dict):
+                    pins[f"127.0.0.1:{self.server.port}"] = self.fp
         if not own or not local:
             return
 
@@ -778,11 +914,14 @@ class Node:
         last_move_check = last_tunnel_check = time.monotonic()
         while not self._stop.wait(self.resign_s):
             try:
-                self.publish()
+                self._announce(self.publish())
                 now = time.monotonic()
+                if self.direct is not None:
+                    self._merge_dht()
                 if now - last_tunnel_check >= TUNNEL_CHECK_SECONDS:
                     last_tunnel_check = now
                     self._check_tunnel()
+                    self._check_direct()
                 if now - last_move_check >= self.rebalance_s:
                     last_move_check = now
                     self._maybe_move()
@@ -860,7 +999,8 @@ def build_parser() -> argparse.ArgumentParser:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--network", metavar="URL|FILE", help=f"a seed peer's URL, or a manifest file (or set {NETWORK_ENV})")
     p.add_argument("--seed", action="append", default=[], metavar="URL", help="another peer to learn from (repeatable)")
-    p.add_argument("--port", type=int, default=0, help="loopback port for the block server (default: any free port)")
+    p.add_argument("--port", type=int, default=0, help="port for the block server (default: any free port; loopback only, "
+                                                       "or with --direct the public TCP port, listening on all interfaces over TLS)")
     p.add_argument("--backend", choices=["mlx", "nf4", "cpu"], help="override the detected backend")
     p.add_argument("--stage-gib", type=float, help="memory to offer, in GiB (default: detected)")
     p.add_argument("--layers", metavar="A-B", help="serve exactly this window of layers (for example 27-36) instead of the one the network picks; it must start and end on a stage boundary")
@@ -874,7 +1014,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--api", nargs="?", const=DEFAULT_API_PORT, default=None, type=int, metavar="PORT",
                    help=f"also serve the OpenAI-compatible chat API on 127.0.0.1:PORT (default {DEFAULT_API_PORT}) "
                         "from this process. The client part of the model (about 1 GB for Qwen3-8B) loads in the background")
+    d = p.add_argument_group("direct mode (experimental): no Cloudflare tunnel, peers found through a DHT; see docs/layer-network.md")
+    d.add_argument("--direct", action="store_true", help="serve over TLS on a public address and announce into the DHT. "
+                   "The tunnel is used only if this machine proves unreachable (unless --no-tunnel-fallback). Off by default")
+    d.add_argument("--bootstrap", action="append", default=[], metavar="HOST:PORT",
+                   help="a DHT node to join through (repeatable; also commonnet/networks/bootstrap.json and COMMONNET_DHT_BOOTSTRAP)")
+    d.add_argument("--public-ip", metavar="IP", help="your public IPv4, for a port you forwarded by hand")
+    d.add_argument("--external-port", type=int, metavar="N", help="the TCP port the internet uses to reach --port (default: the same)")
+    d.add_argument("--dht-port", type=int, default=0, metavar="N", help="UDP port for the DHT (default: any; forward it so others can reach you)")
+    d.add_argument("--no-tunnel-fallback", action="store_true", help="with --direct: refuse to start rather than use a tunnel when unreachable")
+    d.add_argument("--direct-loopback", action="store_true", help=argparse.SUPPRESS)  # tests only: publish https://127.0.0.1
     return p
+
+
+def direct_config(args):
+    """The DirectConfig for the parsed arguments, or None without --direct. Raises NodeError on a bad combination."""
+    from commonnet.direct import DirectConfig, is_public_ipv4
+    if not args.direct:
+        stray = [f for f, v in (("--bootstrap", args.bootstrap), ("--public-ip", args.public_ip),
+                                ("--external-port", args.external_port), ("--dht-port", args.dht_port),
+                                ("--no-tunnel-fallback", args.no_tunnel_fallback), ("--direct-loopback", args.direct_loopback)) if v]
+        if stray:
+            raise NodeError(f"{', '.join(stray)} only apply with --direct")
+        return None
+    if args.no_tunnel:
+        raise NodeError("--direct and --no-tunnel do not combine: direct mode publishes its own address")
+    if args.public_ip and not (is_public_ipv4(args.public_ip) or args.direct_loopback):
+        raise NodeError(f"--public-ip {args.public_ip} is not a public IPv4 address")
+    for name, port in (("--external-port", args.external_port), ("--dht-port", args.dht_port)):
+        if port is not None and not 0 <= port < 65536:
+            raise NodeError(f"{name} must be a port number")
+    return DirectConfig(bootstrap=list(args.bootstrap), external_port=args.external_port, public_ip=args.public_ip,
+                        dht_port=args.dht_port, tunnel_fallback=not args.no_tunnel_fallback, loopback=args.direct_loopback)
 
 
 def main(argv=None) -> int:
@@ -885,6 +1056,7 @@ def main(argv=None) -> int:
     status = StatusFile(args.status_file or default_status_path())
     status.write(blank_status("starting"))
     try:
+        direct = direct_config(args)
         manifest, seeds = resolve_network(args.network, args.seed)
         status.write(blank_status("starting", network=manifest.id, model=manifest.model.get("name", manifest.id)))
         if args.stub:
@@ -909,7 +1081,8 @@ def main(argv=None) -> int:
         status.write(blank_status("error", error=friendly(e)))
         return 2
     node = Node(manifest, seeds, identity, hardware, port=args.port, stub=args.stub, tunnel=not args.no_tunnel,
-                advertise=args.advertise, status=status, api_port=args.api, fixed_window=fixed_window)
+                advertise=args.advertise, status=status, api_port=args.api, fixed_window=fixed_window,
+                direct=direct, state_dir=directory)
 
     def leave(signum, frame):
         node.request_leave()

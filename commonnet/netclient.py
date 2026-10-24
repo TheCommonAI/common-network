@@ -18,8 +18,10 @@ import random
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from commonnet.client import BlockEndpoint
+from commonnet.mesh import records as rec_mod
 from commonnet.mesh.manifest import Manifest
 from commonnet.mesh.placement import NoRoute, best_route, coverage
 from commonnet.net.transport import HttpTransport
@@ -48,9 +50,12 @@ def _record_window(record: dict) -> tuple[int, int] | None:
 
 
 def _default_exchange(table, url: str, timeout: float) -> None:
-    """Pull one peer's records (GET /peers). A client publishes no record of its own, so it does not push."""
-    from commonnet.mesh.gossip import fetch_peers
-    fetch_peers(table, url, timeout)
+    """Pull one peer's records (GET /peers). A client publishes no record of its own, so it does not push.
+
+    A direct peer (https://IP:PORT) is reached with its certificate pinned from its record; every other URL
+    goes exactly as before."""
+    from commonnet.mesh.gossip import pinned_fetch_peers
+    pinned_fetch_peers(table, url, timeout)
 
 
 def _default_fetch_manifest(url: str, timeout: float):
@@ -61,7 +66,11 @@ def _default_fetch_manifest(url: str, timeout: float):
 class Network:
     def __init__(self, seeds=(), manifest=None, *, cache_dir=None, timeout: float = 5.0,
                  refresh_interval: float = 2.0, wait_s: float = 30.0, now=time.time, clock=time.monotonic,
-                 exchange=None, table=None, fetch_manifest=None):
+                 exchange=None, table=None, fetch_manifest=None, dht=None):
+        # `dht` (optional): an object with find_peers() -> [signed record], normally a started commonnet.dht.DhtNode.
+        # With it, refresh() also asks the DHT, so no seed URL is needed. Without it nothing changes.
+        self.dht = dht
+        self._pins: dict[str, str] = {}      # "ip:port" -> certificate fingerprint of each direct peer (shared with the BlockClients)
         self.seeds = [s.rstrip("/") for s in seeds]
         self._manifest = Manifest.load(manifest) if manifest is not None else None
         if self._manifest is not None:
@@ -73,6 +82,7 @@ class Network:
         self._now = now
         self._clock = clock
         self._exchange = exchange or _default_exchange
+        self._own_dht = None
         self._fetch_manifest = fetch_manifest or _default_fetch_manifest
         self._table = table
         self._last_refresh: float | None = None
@@ -91,6 +101,42 @@ class Network:
             return cls(seeds=[spec], **kw)
         manifest = Manifest.load(spec)
         return cls(seeds=list(manifest.seeds), manifest=manifest, **kw)
+
+    @classmethod
+    def open(cls, spec: str | None = None, bootstrap=(), **kw) -> "Network":
+        """The one entry point for command lines. `spec` is None or "dht" (the built-in manifest, peers found through
+        the DHT only), a peer URL, or a manifest file. If `bootstrap` (HOST:PORT list) is given, or the spec is
+        None/"dht", a DHT node is started and used next to gossip. Raises NetworkUnreachable if DHT mode has nothing
+        to bootstrap from."""
+        from commonnet.dht.bootstrap import load_bootstrap, parse_addr
+        dht_mode = spec in (None, "", "dht")
+        if dht_mode:
+            from commonnet.node import DEFAULT_MANIFEST
+            net = cls(seeds=[], manifest=str(DEFAULT_MANIFEST), **kw)
+        else:
+            net = cls.from_spec(spec, **kw)
+        if dht_mode or bootstrap:
+            addrs = [parse_addr(b) for b in bootstrap] + [a for a in load_bootstrap() if a not in
+                                                           [parse_addr(b) for b in bootstrap]]
+            if not addrs:
+                raise NetworkUnreachable("no bootstrap node: give --bootstrap HOST:PORT (or set COMMONNET_DHT_BOOTSTRAP)")
+            net.start_dht(addrs)
+        return net
+
+    def start_dht(self, addrs, bind=("0.0.0.0", 0)) -> None:
+        """Join the DHT as a client (it publishes no record) and use it for discovery from now on."""
+        from commonnet.dht import DhtNode
+        from commonnet.mesh.records import Identity
+        node = DhtNode(Identity.generate(), bind=bind, bootstrap=addrs, network_id=self.manifest.id)
+        node.start()
+        node.bootstrap()
+        self.dht = node
+        self._own_dht = node
+
+    def close(self) -> None:
+        node, self._own_dht = getattr(self, "_own_dht", None), None
+        if node is not None:
+            node.stop()
 
     def _add_seeds(self, urls) -> None:
         for url in urls:
@@ -180,12 +226,26 @@ class Network:
                 answered += 1
             except Exception as e:
                 errors.append(f"{url}: {e}")
+        if self.dht is not None:
+            try:
+                found = table.merge_many(self.dht.find_peers())
+                answered += 1 if found or len(self.dht.table) else 0
+            except Exception as e:
+                errors.append(f"dht: {e}")
         live = table.live()
         if not answered and not live:
             raise NetworkUnreachable("no seed or known peer answered"
                                      + (f" ({'; '.join(errors[-3:])})" if errors else " (no seeds given)"))
-        self._write_cache([r["url"] for r in live if r.get("url")])
+        self._write_cache([r["url"] for r in live if r.get("url") and not rec_mod.is_direct_url(r["url"])])
+        self._learn_pins(live)
         return len(live)
+
+    def _learn_pins(self, records) -> None:
+        """Remember each direct peer's certificate pin (the record was verified, so fp is bound to its identity)."""
+        for r in records:
+            url = r.get("url")
+            if r.get("fp") and rec_mod.is_direct_url(url):
+                self._pins[urlsplit(url).netloc] = r["fp"]
 
     def route(self, prefer_backend: str | None = None) -> list:
         """The current chain of hops (mesh.placement.Hop). Refreshes once and retries before giving up."""
@@ -231,6 +291,7 @@ class Network:
         window = self._windows.get(name)
         if window is None:
             return []
+        self._learn_pins(self.table.live())
         want = self._backends.get(name)
         records = [r for r in self.table.live()
                    if r.get("state") == "up" and r.get("url") and _record_window(r) == window]
@@ -242,6 +303,8 @@ class Network:
         """A transport over the current route. Each hop's alternates are its replicas; an emptied hop waits for a newcomer."""
         self._token_for = token_for
         hops = self.route(prefer_backend)
+        self._learn_pins(self.table.live())
+        transport_kwargs.setdefault("pin", self._pins)  # {} unless a direct peer is known: then nothing changes
         self._hops = hops
         self._windows = {f"hop{i}": h.window for i, h in enumerate(hops)}
         self._backends = {f"hop{i}": h.primary.get("backend") for i, h in enumerate(hops)}

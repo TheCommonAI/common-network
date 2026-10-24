@@ -1,7 +1,9 @@
 # Direct connectivity (no Cloudflare tunnel)
 
-Status: building blocks only. Nothing in the launcher calls them yet; a later integration step wires them in behind
-an opt-in flag. Existing behaviour is unchanged: the new `ssl_context` / `pin` parameters default to `None`.
+Status: wired in behind `--direct` (experimental, off by default). `commonnet/direct.py` decides the address,
+`commonnet/node.py` serves and announces, `commonnet/netclient.py` discovers and pins. Everything below marked
+"not built" is not built. Verified so far: loopback processes in CI (`commonnet/tests/test_direct_e2e.py`) and unit
+tests with fakes; never over a real WAN. The `ssl_context` / `pin` parameters still default to `None`.
 
 | File | What it does |
 |---|---|
@@ -10,21 +12,43 @@ an opt-in flag. Existing behaviour is unchanged: the new `ssl_context` / `pin` p
 | `commonnet/net/server.py` | `BlockServer(..., ssl_context=None)`: TLS, and (only with TLS and a token) a non-loopback bind |
 | `commonnet/net/client.py` | `BlockClient(..., pin=None, ssl_context=None)`: certificate pinning for `https://IP:PORT` endpoints |
 
-## The flow the integration step should follow
+## The flow, as built
 
-1. `cert, key, fp = secure.make_peer_cert(identity, state_dir)`; `sig = secure.bind_fingerprint(identity, fp)`.
-2. `BlockServer(block, "0.0.0.0", port, token=token, ssl_context=secure.server_ssl_context(cert, key))`.
-3. `m = nat.map_port(server.port)` (UPnP, then PCP, then NAT-PMP). It renews itself; call `m.release()` on shutdown.
-   If it raises `MappingFailed`, the router will not open a port: use the tunnel fallback.
-4. `report = nat.check_reachability(m.external_ip, m.external_port, dial_back)` where `dial_back(ip, port)` asks a
-   DHT peer to run `nat.tcp_dial(ip, port, requester_ip=<the address the request came from>)` and answers the
-   result. `report.verdict` is `direct` or `unreachable`. Believe the dial-back, not the router: the router's
-   "external IP" can be a private address behind carrier-grade NAT, and some routers accept a mapping they never forward.
-5. If `direct`, publish `url = "https://IP:PORT"` and `fp` in the signed record. Else fall back to the existing tunnel.
-6. Clients: `BlockClient(pin=record["fp"])` (or `pin={"IP:PORT": fp}` for many peers) after checking the record's
-   signature with `records.verify_record`.
+1. `Node.start()` joins the DHT (`commonnet.dht.DhtNode`, UDP, same ed25519 identity, network id from the manifest) using
+   `--bootstrap`, `commonnet/networks/bootstrap.json` and `COMMONNET_DHT_BOOTSTRAP`, and merges what it finds into its
+   peer table (so window placement sees DHT-only peers).
+2. `_serve_direct`: `secure.make_peer_cert` (kept in the identity directory, so the pinned fingerprint is stable),
+   `BlockServer("0.0.0.0", port, token, ssl_context)`.
+3. `direct.decide()` picks the address: manual forward (`--public-ip`/`--external-port`), else `nat.map_port`, else
+   STUN public IP + local port. It then asks DHT peers to dial back (`DhtNode.dial_back`, below) via
+   `nat.check_reachability`. Verdict `direct` publishes `https://IP:PORT`; `unreachable` stops the TLS server and runs
+   the existing tunnel path, or raises with the port to forward when `--no-tunnel-fallback`. The decision is made once;
+   a window move keeps the address. Mappings are released on shutdown.
+4. The 15 s re-sign loop signs the record (now with `fp`, `fpsig`), merges it into the gossip table, and announces it
+   into the DHT. Gossip endpoints (`/peers`, `/gossip`, `/manifest`) are served on the same TLS port, so direct and
+   tunnel peers interoperate; direct peers gossip with pinned TLS.
+5. Clients (`Network.open`): `--network` omitted or `dht` uses the built-in manifest (the network id is the DHT key);
+   `refresh()` asks the DHT and gossip. Every record is verified (`records.verify_record`); the pin map
+   (`"ip:port" -> fp`) feeds `BlockClient(pin=...)` and is updated on every refresh and failover.
+6. Every 120 s a direct node re-asks two peers to dial back and logs a warning if its address stopped answering.
 
-If there is no port mapping but STUN says `open` (a public address on this machine), skip step 3.
+### The dial-back RPC (`dial`, in `commonnet/dht/node.py`)
+
+The requester sends a request signed with its identity (`pub`, `sig`) carrying the fresh per-IP token a previous reply gave it
+(the same anti-spoofing token `STORE` uses), `ip` and `port`. The helper dials only the address the datagram came from,
+and only if it equals `ip`, via `nat.tcp_dial` (global addresses only; private, loopback and link-local refused), at most
+4 at a time, then answers `dialed {ok}`. A spoofed source cannot get a dial because it cannot present the token. It is a
+TCP connect, not a TLS handshake.
+
+### Record fields
+
+`fp` and `fpsig` are optional fields of the signed record (`records.OPTIONAL_FIELDS`); `SIGNED_FIELDS` and
+`RECORD_VERSION` are unchanged. `canonical()` already signs every key but `sig`, and `check_shape` ignores unknown keys, so a
+node that predates this change **still verifies, stores and relays these records unchanged** (tested, including the DHT
+size budget: `REQ_PAD` went from 1100 to 1190 so a record with the fields always fits one reply). What an old node
+cannot do is use a direct peer: it connects without the pin and certificate verification fails, so it skips that peer.
+New nodes enforce: `fp` and `fpsig` come together, the binding must verify against the record's own key, and an
+`https://<IP>` URL without a valid binding is refused. Tunnel and plain records carry neither field.
 
 ## What `secure.py` guarantees, and what it does not
 
@@ -41,32 +65,12 @@ If there is no port mapping but STUN says `open` (a public address on this machi
 * A non-loopback bind is refused unless a TLS context and a token are both given. The bearer token still guards
   `/health`, `/session`, `/forward`, ... exactly as before; `extra_handlers` stay public (signed content).
 
-### Proposed `records.py` change (NOT made here)
-
-`canonical()` already signs every key except `sig`, so a record that carries `fp` has it covered by the record
-signature today. What is missing is (a) `sign_record` accepting it and (b) a shape check. Backwards compatible,
-`SIGNED_FIELDS` and `RECORD_VERSION` unchanged (old records stay valid):
-
-```python
-OPTIONAL_FIELDS = ("fp",)
-# sign_record: after building `record`:
-#     if fields.get("fp"): record["fp"] = secure.normalize_fingerprint(fields["fp"])
-# check_shape: after the SIGNED_FIELDS loop:
-#     fp = record.get("fp")
-#     if fp is not None:
-#         try: secure.normalize_fingerprint(fp)
-#         except ValueError: raise RecordError("fp must be a sha256 fingerprint")
-```
-
-Also allow `url` to be `https://<ipv4>:<port>` (it already is: any http(s) URL under 512 chars). Old peers that
-do not know `fp` ignore the key but would connect without a pin and fail certificate verification, which is safe.
-
 ## What works and what does not
 
 | Situation | Result |
 |---|---|
 | Home router with UPnP / PCP / NAT-PMP enabled, public IPv4 | Works: mapping, dial-back, `direct` |
-| Router without those protocols, user can forward a port by hand | Works if the user forwards the port and tells the peer its public port (integration step) |
+| Router without those protocols, user can forward a port by hand | Works: `--public-ip` / `--external-port` (see docs/direct-test.md) |
 | Machine with a public IPv4 (cloud VM, some ISPs) | Works with no mapping; STUN reports `open` |
 | Carrier-grade NAT (mobile, many ISPs), double NAT | Cannot be reached inbound. The router may even report a mapping with a private "external" address; dial-back fails, verdict `unreachable` |
 | School, office, hotel networks that block inbound or UPnP | Cannot be reached. These peers can still act as clients (outbound works) but cannot serve a block without a relay |
@@ -92,7 +96,7 @@ and time out every call (2 to 3 s). The only mapping created is TCP to this mach
 
 When the verdict is `unreachable`, two options:
 
-**A. Keep the Cloudflare tunnel as the fallback (recommended default).** The integration step tries direct first, falls back
+**A. Keep the Cloudflare tunnel as the fallback (recommended default).** Implemented: the node tries direct first, falls back
 to `tunnel.py` for that peer, and publishes whichever URL works. No new protocol, no new abuse surface, but it keeps a
 dependency on Cloudflare for exactly the peers that most need help.
 

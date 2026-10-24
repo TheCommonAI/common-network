@@ -27,9 +27,11 @@ from .table import Contact, RoutingTable
 MAX_PACKET = 1200          # bytes; below a typical path MTU so nothing fragments
 MAX_INBOUND = 1500         # anything larger is dropped unread
 REPLY_FLOOR = 300          # a reply may be this big even for a tiny request (a signed pong is ~230)
-REQ_PAD = 1100             # requests that want a full-size reply are padded to this
-REQUEST_TYPES = ("ping", "fn", "fv", "st")
-RESPONSE_TYPES = {"ping": "pong", "fn": "nodes", "fv": "vals", "st": "ok"}
+REQ_PAD = 1190             # requests that want a full-size reply are padded to this
+REQUEST_TYPES = ("ping", "fn", "fv", "st", "dial")
+RESPONSE_TYPES = {"ping": "pong", "fn": "nodes", "fv": "vals", "st": "ok", "dial": "dialed"}
+DIAL_SECONDS = 3.0          # a helper waits this long for the requester's TCP port to answer
+MAX_DIALS = 4               # concurrent dial-backs a node performs for others
 TOKEN_SECONDS = 300.0
 MAX_NODES_PER_REPLY = 16
 MAX_PAGES = 64
@@ -84,7 +86,8 @@ class DhtNode:
     def __init__(self, identity, bind=("0.0.0.0", 0), bootstrap=(), network_id="", clock=time.time, now_rng=None,
                  *, k: int = 20, alpha: int = 3, rpc_timeout: float = 0.5, retries: int = 2,
                  rate=(100.0, 200.0), ip_rate=(1000.0, 2000.0), max_per_key: int = 256,
-                 max_per_source: int = 128, refresh_seconds: float = 300.0, read_fanout: int = 8):
+                 max_per_source: int = 128, refresh_seconds: float = 300.0, read_fanout: int = 8,
+                 allow_private_dial: bool = False):
         self.identity = identity
         self.peer = identity.peer
         self.id = node_id(self.peer)
@@ -115,6 +118,9 @@ class DhtNode:
         self._threads: list[threading.Thread] = []
         self._last_boot = 0.0
         self._seen_sigs: set = set()
+        self.allow_private_dial = allow_private_dial   # tests only: a helper may dial loopback/private requesters
+        self._dial_slots = threading.BoundedSemaphore(MAX_DIALS)
+        self._dial_next = 0
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -341,7 +347,7 @@ class DhtNode:
         except OSError:
             pass
 
-    def _rpc_many(self, jobs):
+    def _rpc_many(self, jobs, *, timeout=None, retries=None):
         """Send each (addr, expected peer or None, message) in parallel, retrying on silence. Responses or None."""
         if self._sock is None:
             raise RuntimeError("node is not started")
@@ -351,6 +357,9 @@ class DhtNode:
             m = dict(msg)
             pad = m.pop("_pad", 0)
             m.update(n=nonce, id=self.peer)
+            if m.get("t") == "dial":    # signed: the helper must know which identity is asking
+                m["pub"] = self.identity.pub_b64
+                m["sig"] = _b64e(self.identity._key.sign(canonical(m)))
             if pad:
                 m["p"] = ""
                 m["p"] = "0" * max(0, pad - len(_encode(m)))
@@ -358,12 +367,14 @@ class DhtNode:
         with self._cv:
             for nonce, p in pend:
                 self._pending[nonce] = p
+        timeout = self.rpc_timeout if timeout is None else timeout
+        retries = self.retries if retries is None else retries
         try:
-            for _ in range(self.retries + 1):
+            for _ in range(retries + 1):
                 for _, p in pend:
                     if p.resp is None:
                         self._sendto(p.data, p.addr)
-                deadline = time.monotonic() + self.rpc_timeout
+                deadline = time.monotonic() + timeout
                 with self._cv:
                     while not self._stopped.is_set() and any(p.resp is None for _, p in pend):
                         left = deadline - time.monotonic()
@@ -513,6 +524,8 @@ class DhtNode:
             self._reply(addr, size, "vals", nonce, fields, "vals", self.store.get(key, after), "more")
         elif kind == "st":
             self._on_store(msg, addr, size)
+        elif kind == "dial":
+            self._on_dial(msg, addr, size)
 
     def _on_store(self, msg: dict, addr, size: int) -> None:
         nonce = msg["n"]
@@ -525,6 +538,64 @@ class DhtNode:
         except StoreError as e:
             return self._reply(addr, size, "err", nonce, {"why": str(e)[:60]})
         self._reply(addr, size, "ok", nonce)
+
+    # ------------------------------------------------------------------ dial-back (reachability)
+    def dial_back(self, ip: str, port: int) -> bool | None:
+        """Ask one known node (a different one each call) to open a TCP connection to ip:port from outside.
+
+        True: it connected. False: it tried and could not. None: nobody could be asked or nobody answered.
+        The helper dials the address our request came from, and only if it is `ip`, so this cannot be used
+        to scan anyone else (see _on_dial)."""
+        contacts = self.table.contacts()
+        if not contacts:
+            return None
+        contacts.sort(key=lambda c: c.peer)
+        c = contacts[self._dial_next % len(contacts)]
+        self._dial_next += 1
+        if self._fresh_token(c.addr) is None:
+            self._rpc_many([(c.addr, c.peer, {"t": "ping"})])
+        tok = self._fresh_token(c.addr)
+        if tok is None:
+            return None
+        r = self._rpc_many([(c.addr, c.peer, {"t": "dial", "ip": ip, "port": int(port), "tok": tok})],
+                           timeout=DIAL_SECONDS + 1.5, retries=0)[0]
+        if r is None or r.get("t") != "dialed" or not isinstance(r.get("ok"), bool):
+            return None
+        return r["ok"]
+
+    def _on_dial(self, msg: dict, addr, size: int) -> None:
+        nonce = msg["n"]
+        try:
+            pub = _b64d(msg.get("pub"))
+            if len(pub) != 32 or peer_id(pub) != msg["id"] or not isinstance(msg.get("sig"), str):
+                return
+            Ed25519PublicKey.from_public_bytes(pub).verify(_b64d(msg["sig"]), canonical(msg))
+        except (InvalidSignature, ValueError, TypeError):
+            return
+        if not self._token_ok(addr[0], msg.get("tok")):       # proves the request really came from addr[0] (not spoofed)
+            return self._reply(addr, size, "err", nonce, {"why": "token"})
+        port = msg.get("port")
+        if msg.get("ip") != addr[0] or type(port) is not int or not 0 < port < 65536:
+            return self._reply(addr, size, "dialed", nonce, {"ok": False})
+        if not self._dial_slots.acquire(blocking=False):
+            return self._reply(addr, size, "err", nonce, {"why": "busy"})
+
+        def work():
+            try:
+                if self.allow_private_dial:
+                    try:
+                        with socket.create_connection((addr[0], port), DIAL_SECONDS):
+                            ok = True
+                    except OSError:
+                        ok = False
+                else:
+                    from ..net import nat
+                    ok = nat.tcp_dial(addr[0], port, timeout=DIAL_SECONDS, requester_ip=addr[0])
+                self._reply(addr, size, "dialed", nonce, {"ok": bool(ok)})
+            finally:
+                self._dial_slots.release()
+
+        threading.Thread(target=work, name="dht-dial", daemon=True).start()
 
     # ------------------------------------------------------------------ maintenance
     def _queue(self, task) -> None:
