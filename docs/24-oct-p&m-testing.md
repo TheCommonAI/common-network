@@ -219,3 +219,26 @@ Sharded repos (Qwen3-8B) download whole shards that contain needed tensors; sing
 - `sweep-2026-10-24.json`, `spec-synth.json`, `spec-real.json`
 
 Reproduce: see `docs/network-bench.md` and `docs/flash-drafter.md`.
+
+## 10. GPU profile of Patrick's RTX 4060 stage (layers 27-36, NF4)
+
+`python -m commonnet.bench.gpu_profile --layers 27-36` on Patrick's PC (torch 2.11.0+cu128, bitsandbytes 0.50.2, 8 GB card), one decode token at a time, local, no network. Raw: `gpu-profile-rtx4060-27-36.txt`.
+This was the first real CUDA run of the NF4 path: it worked.
+
+| Quantity | Value |
+|---|---|
+| Wall time per decode step (40 steps) | 18.8 ms median, p95 21.3 |
+| Python/launch side | 18.7 ms |
+| GPU kernels (profiler) | 9.7 ms per step (about 52% of wall) |
+| Kernel launches per step | 545 (about 9.2 ms of CPU time in `cudaLaunchKernel`) |
+| 4-bit matmuls (`bitsandbytes::gemm_4bit`, 63 calls) | 4.06 ms |
+| Weights in memory (parameters) | 0.81 GiB |
+| Memory throughput measured by a device copy | about 234 GB/s (rated peak for the 4060 is about 272) |
+| Floor for reading the weights once per token | 0.81 GiB / 234 GB/s = about 3.7 ms |
+
+Reading:
+- The matmuls (4.06 ms) are within about 10% of the memory floor (3.7 ms): the weight reads are already efficient. Halving the weight bytes (a 2-bit kernel) would save about 2 ms of the 18.8 ms local step, and roughly 1% of a whole 187 ms network token.
+- The step is launch/Python bound: the GPU is busy for about half the wall time, waiting for 545 small launches. Fewer launches (CUDA graphs, `torch.compile`) is where local speed would come from.
+- In the live network the same stage took 31-38 ms of server time per token (section 5c), so about 15 ms is outside this local step: wire decoding/encoding of the 21 KB tensor, the retry-cache hash, HTTP handling. Not yet profiled.
+- Correction: the printed `VERDICT: close to memory-bound` and "floor 7.4 ms" in this run came from two bugs in the first version of the profiler (CUDA events spanning the whole step were treated as GPU busy time, and the copy bandwidth was halved). Fixed in the next commit; the numbers above are recomputed from the profiler's kernel totals.
+- Estimates, not measurements: the 2 ms saving from a 2-bit format and the effect of fewer launches.

@@ -30,7 +30,8 @@ def parse_layers(text: str) -> tuple[int, int]:
 
 
 def device_bandwidth_gbs(device, megabytes: int = 512, repeats: int = 8) -> float | None:
-    """GB/s of a device-to-device copy (reads and writes each byte once, so the figure counts both)."""
+    """GB/s of memory traffic in a device-to-device copy (each byte is read once and written once, both counted).
+    The memory system moves about this much per second whichever direction, so it is also the read bandwidth."""
     if device.type != "cuda":
         return None
     src = torch.empty(megabytes * 2**20, dtype=torch.uint8, device=device)
@@ -123,17 +124,20 @@ def profiled_steps(block, hidden_size: int, device, prefill: int, steps: int, to
             "top_by_gpu": [row(e) for e in by_gpu], "top_by_cpu": [row(e) for e in by_cpu]}
 
 
-def verdict(timing: dict, nbytes: int, bw_gbs: float | None) -> list[str]:
+def verdict(timing: dict, nbytes: int, bw_gbs: float | None, gpu_kernel_ms: float | None = None) -> list[str]:
     lines = []
     wall = timing["wall_ms_median"]
     if bw_gbs:
-        floor = nbytes / (bw_gbs * 1e9 / 2) * 1000  # one read of the weights; copy bandwidth counts read+write
-        lines.append(f"weights {nbytes / 2**30:.2f} GiB; achievable read bandwidth about {bw_gbs / 2:.0f} GB/s; "
+        floor = nbytes / (bw_gbs * 1e9) * 1000  # one read of the weights at the measured memory throughput
+        lines.append(f"weights {nbytes / 2**30:.2f} GiB; achievable memory bandwidth about {bw_gbs:.0f} GB/s; "
                      f"floor for reading the weights once per token: {floor:.1f} ms")
         lines.append(f"measured step: {wall:.1f} ms median ({wall / floor:.1f}x the floor)")
-    if "gpu_event_ms_median" in timing:
-        busy = timing["gpu_event_ms_median"]
-        lines.append(f"GPU busy (events): {busy:.1f} ms of {wall:.1f} ms wall; Python/launch side: {timing['python_launch_ms_median']:.1f} ms")
+    busy = gpu_kernel_ms
+    if busy is None and "gpu_event_ms_median" in timing:
+        busy = None  # events span the whole step including idle gaps, so they say nothing about busy time
+    if busy is not None:
+        lines.append(f"GPU kernels busy: {busy:.1f} ms of {wall:.1f} ms wall ({100 * busy / wall:.0f}%); "
+                     f"Python/launch side: {timing['python_launch_ms_median']:.1f} ms")
         if busy < 0.6 * wall:
             lines.append("VERDICT: launch/Python bound. The GPU waits for work; a smaller weight format would barely help.")
         elif bw_gbs and busy > 3 * floor:
@@ -198,7 +202,7 @@ def main(argv=None) -> int:
     bw = device_bandwidth_gbs(device)
     timing = timed_steps(block, hidden, device, args.prefill, args.steps)
     prof = profiled_steps(block, hidden, device, args.prefill, args.profile_steps, args.top)
-    lines = verdict(timing, nbytes, bw)
+    lines = verdict(timing, nbytes, bw, prof["gpu_kernel_ms_per_step"] if device.type == "cuda" else None)
     result = {"info": info, "copy_bandwidth_gbs": bw, "timing": timing, "profile": prof, "verdict": lines}
 
     print("\nstep timing:", json.dumps(timing))
