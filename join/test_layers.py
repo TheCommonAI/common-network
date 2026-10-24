@@ -273,6 +273,37 @@ class JoinFlag(unittest.TestCase):
         self.assertEqual(source.count("import_module(\"layers\")"), body.count("import_module(\"layers\")"))  # only the loader imports it
 
 
+class ExecHelper(unittest.TestCase):
+    """os.execv on Windows detaches (the prompt returns while the program runs); _exec must wait instead."""
+
+    def test_windows_waits_for_the_child_and_passes_its_exit_code(self):
+        waits = [KeyboardInterrupt(), 7]  # Ctrl+C reaches the parent too; it keeps waiting
+
+        class Child:
+            def wait(self):
+                outcome = waits.pop(0)
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return outcome
+
+        for module in (join,):
+            with self.subTest(module=module.__name__):
+                waits[:] = [KeyboardInterrupt(), 7]
+                with mock.patch.object(module.os, "name", "nt"), \
+                        mock.patch.object(module.subprocess, "Popen", return_value=Child()) as popen, \
+                        mock.patch.object(module.os, "execv") as execv:
+                    with self.assertRaises(SystemExit) as caught:
+                        module._exec(["python", "x.py"])
+                self.assertEqual(caught.exception.code, 7)
+                popen.assert_called_once_with(["python", "x.py"])
+                execv.assert_not_called()
+
+    def test_posix_replaces_the_process(self):
+        with mock.patch.object(join.os, "name", "posix"), mock.patch.object(join.os, "execv") as execv:
+            join._exec(["python", "x.py"])
+        execv.assert_called_once_with("python", ["python", "x.py"])
+
+
 class BackendImportCheck(unittest.TestCase):
     def test_a_python_without_the_backend_modules_is_not_a_runtime(self):
         seen = []
