@@ -1,0 +1,26 @@
+{
+ "id": "common-bonsai-2-9b-v1",
+ "version": 1,
+ "model": {
+  "name": "Ternary Bonsai 2 9B",
+  "num_layers": 32,
+  "repos": {
+   "mlx": "prism-ml/Ternary-Bonsai-2-9B-mlx-2bit"
+  },
+  "client_repo": "prism-ml/Ternary-Bonsai-2-9B-mlx-2bit",
+  "no_speculation": "Ternary Bonsai 2 9B is a hybrid model (3 of 4 layers are linear attention), so its state cannot be rolled back, and the Qwen3-0.6B Common Flash drafter has a different tokenizer (151,669 vs 248,077 tokens)"
+ },
+ "boundaries": [
+  0,
+  8,
+  16,
+  24,
+  32
+ ],
+ "gib_per_layer": {
+  "mlx": 0.058
+ },
+ "fixed_gib": 0.3,
+ "min_replicas": 2,
+ "seeds": []
+}

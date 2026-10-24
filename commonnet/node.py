@@ -836,6 +836,18 @@ class Node:
         self.write_status()
 
 
+def check_backend_supported(manifest: Manifest, hardware: Hardware) -> None:
+    """Refuse up front when the network has no checkpoint for this machine's backend (stub peers need none)."""
+    if hardware.backend == "stub" or manifest.repo(hardware.backend):
+        return
+    names = {"mlx": "Apple silicon (MLX)", "nf4": "NVIDIA GPU (4-bit)", "cpu": "CPU"}
+    have = [b for b in ("mlx", "nf4", "cpu") if manifest.repo(b)]
+    supported = ", ".join(names[b] for b in have) or "none"
+    raise NodeError(f"{manifest.model.get('name', manifest.id)} (network {manifest.id}) has no {names.get(hardware.backend, hardware.backend)} "
+                    f"checkpoint, so this machine cannot serve it. Supported here: {supported}. "
+                    "Join the default network instead (`common join --network`), or use a supported machine.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="commonnet.node", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -876,6 +888,7 @@ def main(argv=None) -> int:
                 hardware = Hardware(args.backend, hardware.gib, hardware.name)
             if args.stage_gib:
                 hardware = Hardware(hardware.backend, args.stage_gib, hardware.name)
+        check_backend_supported(manifest, hardware)
         fixed_window = None
         if args.layers:
             m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", args.layers)

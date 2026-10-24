@@ -81,6 +81,29 @@ class _MlxQuantized:
         return torch.from_numpy(np.array(out.astype(mx.float32)))
 
 
+class _MlxHadamard:
+    """torch -> torch callable around a Hadamard pack's embedding or lm_head (see backends/hadamard.py)."""
+
+    def __init__(self, weight_map: dict, name: str, kind: str, block: int):
+        import mlx.core as mx
+        from mlx.utils import tree_flatten
+        from commonnet.backends.hadamard import Packed
+        self.mx = mx
+        files: dict = {}
+
+        def get(suffix):
+            path = weight_map[f"{name}.{suffix}"]
+            if path not in files:
+                files[path] = mx.load(path)
+            return files[path][f"{name}.{suffix}"]
+
+        self.layer = Packed(get("weight"), get("scales"), get("biases"), block, get("signs"), kind == "embed")
+        mx.eval(self.layer.parameters())
+        self.nbytes = sum(v.nbytes for _, v in tree_flatten(self.layer.parameters()))
+
+    __call__ = _MlxQuantized.__call__
+
+
 class Client4(Client):
     def __init__(self, checkpoint_dir: str, transport, fmt: str = "fp16", device="cpu",
                  bits: int = 4, group_size: int = 64, hidden_dtype=torch.float16):
@@ -113,8 +136,13 @@ class Client4(Client):
             bits, group_size = q.get("bits", bits), q.get("group_size", group_size)
             t = reader.load([norm_name], dtype=torch.float32)
             base = lambda n: n[: -len(".weight")]
-            self.embed = _MlxQuantized.from_prequantized(reader.weight_map, base(embed_name), "embed", bits, group_size)
-            self.head = _MlxQuantized.from_prequantized(reader.weight_map, base(head_name), "linear", bits, group_size)
+            if reader.has(base(embed_name) + ".signs"):  # Hadamard pack: embed and head sit in a rotated basis
+                block = self.config.hidden_size  # the pack's blocks are the hidden width (4096)
+                self.embed = _MlxHadamard(reader.weight_map, base(embed_name), "embed", block)
+                self.head = _MlxHadamard(reader.weight_map, base(head_name), "linear", block)
+            else:
+                self.embed = _MlxQuantized.from_prequantized(reader.weight_map, base(embed_name), "embed", bits, group_size)
+                self.head = _MlxQuantized.from_prequantized(reader.weight_map, base(head_name), "linear", bits, group_size)
             reader.read_names += [embed_name, head_name]
         else:
             t = reader.load([embed_name, norm_name, head_name], dtype=torch.float32)

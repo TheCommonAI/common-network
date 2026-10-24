@@ -22,7 +22,15 @@ SINGLE_NAME = "model.safetensors"
 def load_text_config(checkpoint_dir: str):
     """Decoder config. For qwen3_5 the text_config of the (vision + text) wrapper config."""
     with open(os.path.join(checkpoint_dir, "config.json")) as f:
-        mt = json.load(f).get("model_type", "")
+        raw = json.load(f)
+    mt = raw.get("model_type", "")
+    if mt == "prism_hadamard_qwen35":
+        # a Hadamard pack (Bonsai 2): our own model_type, so AutoConfig cannot resolve it; the decoder config is
+        # the nested text_config of a stock qwen3_5, plus the pack's quantization block.
+        from transformers import Qwen3_5TextConfig
+        cfg = Qwen3_5TextConfig(**{k: v for k, v in raw["text_config"].items() if k != "model_type"})
+        cfg.quantization = raw.get("quantization")
+        return cfg
     if mt.startswith("qwen3_5"):
         cfg = AutoConfig.from_pretrained(checkpoint_dir)
         return getattr(cfg, "text_config", cfg)

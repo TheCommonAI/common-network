@@ -140,7 +140,11 @@ class NetworkBackend:
 
         self.client = self._worker.submit(load).result()
         self.draft_k, self.drafter, self.draft_note = draft_k, None, "off"
-        if draft:
+        no_spec = manifest.model.get("no_speculation")
+        if draft and no_spec:   # the network itself says speculation cannot work on this model
+            self.draft_note = f"off: {no_spec}"[:300]
+            print(f"speculative decoding is off: {self.draft_note}", file=sys.stderr, flush=True)
+        elif draft:
             def load_drafter():
                 from commonnet.speculative import MlxDrafter
                 return MlxDrafter(draft, target_tokenizer=self.tokenizer)

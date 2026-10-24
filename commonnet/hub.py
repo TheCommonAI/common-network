@@ -325,9 +325,10 @@ class Hub:
             layout = detect_layout(wm)
             prefixes = needed_prefixes(layers, client, layout)
             shards = sorted({wm[n] for n in select_names(wm, prefixes)})
-            if layout != "model.":
-                # qwen3_5 repos have ~5 GB shards that also hold vision/other layers: range-download only the
-                # needed tensors of each shard into a compact copy with a filtered index.
+            if layout != "model." or len(set(wm.values())) == 1:
+                # qwen3_5 repos have ~5 GB shards that also hold vision/other layers, and a one-file pack (the
+                # Bonsai MLX packs) is a single shard holding every layer: range-download only the needed
+                # tensors of each shard into a compact copy with a filtered index.
                 sel = ("L%d-%d" % tuple(layers) if layers else "") + ("+client" if client else "")
                 self.dir = os.path.join(base, "compact-" + sel.strip("+"))
                 self.fetch_config()
