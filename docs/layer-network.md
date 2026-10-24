@@ -15,7 +15,11 @@ it). A background service keeps the mode it was installed with.
 common join                      # the built-in network (same as --network)
 common join --network URL        # a network a friend runs: any peer's URL
 common join --network manifest.json
-common join --network commonnet/networks/bonsai-8b.json   # other models: see docs/bonsai-networks.md
+common join --network bonsai-8b          # Ternary Bonsai 8B
+common join --network bonsai-27b         # Ternary Bonsai 27B
+common join --network bonsai-2-9b        # Ternary Bonsai 2 9B
+common join --network bonsai-2-27b       # Ternary Bonsai 2 27B
+common join --network qwen3-8b           # default model
 common join --layers 27-36       # serve exactly this window (a stage boundary pair) instead of the one the network picks
 common join --permanent          # keep serving after reboots (records the mode)
 common join --legacy             # the original whole-model gateway node instead
@@ -111,8 +115,7 @@ serving and the status `error` says so. On NVIDIA and CPU peers the client part 
 Run `common join --network` with nobody else around and you are the network's first peer. Share the
 tunnel URL it prints; others join with `common join --network <that URL>`. To make a peer the default
 for everyone, list its URL in `commonnet/networks/seeds.json` on `main` (fetched at join time, no release
-needed). A network is defined by its manifest (`commonnet/networks/main.json`): the model, and the fixed
-stage boundaries every peer's window is made of.
+needed). A network is defined by its manifest: the model, and the fixed stage boundaries every peer's window is made of. `--network` accepts the built-in names `qwen3-8b`, `bonsai-8b`, `bonsai-27b`, `bonsai-2-9b`, and `bonsai-2-27b`, as well as a manifest path or peer URL. See [the Bonsai manifests](bonsai-networks.md) for their runtime and hardware details.
 
 ## Direct mode (experimental)
 

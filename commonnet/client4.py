@@ -137,9 +137,14 @@ class Client4(Client):
             t = reader.load([norm_name], dtype=torch.float32)
             base = lambda n: n[: -len(".weight")]
             if reader.has(base(embed_name) + ".signs"):  # Hadamard pack: embed and head sit in a rotated basis
-                block = self.config.hidden_size  # the pack's blocks are the hidden width (4096)
-                self.embed = _MlxHadamard(reader.weight_map, base(embed_name), "embed", block)
-                self.head = _MlxHadamard(reader.weight_map, base(head_name), "linear", block)
+                records = getattr(self.config, "hadamard_modules", None) or []
+                blocks = {record.get("path"): int(record.get("block") or 0) for record in records}
+                # Bonsai 2 9B uses a 4096-wide transform; the 27B pack records
+                # 1024-wide transforms even though its hidden width is 5120.
+                embed_block = blocks.get("model.embed_tokens", self.config.hidden_size)
+                head_block = blocks.get("lm_head", self.config.hidden_size)
+                self.embed = _MlxHadamard(reader.weight_map, base(embed_name), "embed", embed_block)
+                self.head = _MlxHadamard(reader.weight_map, base(head_name), "linear", head_block)
             else:
                 self.embed = _MlxQuantized.from_prequantized(reader.weight_map, base(embed_name), "embed", bits, group_size)
                 self.head = _MlxQuantized.from_prequantized(reader.weight_map, base(head_name), "linear", bits, group_size)
