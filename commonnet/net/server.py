@@ -48,7 +48,7 @@ from commonnet.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
 
 LOOPBACK = "127.0.0.1"
 HANDLER_TIMEOUT_SECONDS = 60.0
-POST_PATHS = frozenset(("/session", "/forward", "/close"))
+POST_PATHS = frozenset(("/session", "/forward", "/close", "/truncate"))
 
 
 class UnknownSession(LookupError):
@@ -85,6 +85,9 @@ class StubBlock:
     def close(self, session_id: str) -> None:
         self.calls.append(("close", session_id, None))
         self._open.discard(session_id)
+
+    def truncate(self, session_id: str, length: int) -> None:
+        self.calls.append(("truncate", session_id, length))
 
     def forward(self, session_id: str, hidden: Tensor, start_pos: int) -> Tensor:
         if session_id not in self._open:
@@ -201,14 +204,35 @@ class BlockServer:
             self.block.close(session_id)
             del self._sessions[session_id]
 
-    def forward(self, session_id: str, hidden: Tensor, start_pos: int) -> Tensor:
+    def truncate(self, session_id: str, length: int) -> None:
+        """Cut the session back to `length` positions (speculative decoding's rollback).
+
+        Idempotent: a session already at or below `length` is left alone. The saved last-step reply is dropped,
+        because a forward that repeats it after a rollback must run again, not be answered from the saved reply.
+        Raises NotImplementedError if the block cannot truncate."""
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
                 raise UnknownSession(f"session {session_id!r} is not open")
-            key = _step_key(hidden, start_pos)
+            fn = getattr(self.block, "truncate", None)
+            if fn is None:
+                raise NotImplementedError("this block cannot truncate a session")
+            fn(session_id, length)
+            session.last = None
+
+    def forward(self, session_id: str, hidden: Tensor, start_pos: int, truncate_to: int | None = None) -> Tensor:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                raise UnknownSession(f"session {session_id!r} is not open")
+            key = _step_key(hidden, start_pos) + (truncate_to,)
             if session.last is not None and session.last[0] == key:
                 return session.last[1]
+            if truncate_to is not None:
+                fn = getattr(self.block, "truncate", None)
+                if fn is None:
+                    raise NotImplementedError("this block cannot truncate a session")
+                fn(session_id, truncate_to)
             out = self.block.forward(session_id, hidden, start_pos)
             _check_output(out, hidden)
             session.last = (key, out)
@@ -340,6 +364,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(400, _error(str(e)))
         except UnknownSession as e:
             self._send(404, _error(str(e)))
+        except NotImplementedError as e:
+            self._send(501, _error(str(e)))
         except Exception as e:  # the block failed, or returned something invalid
             traceback.print_exc(file=sys.stderr)
             self._send(500, _error(f"block failed: {type(e).__name__}: {e}"[:300]))
@@ -353,9 +379,14 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/close":
             self._block.close(protocol.decode_session_request(obj))
             return protocol.encode_ok()
-        session_id, start_pos, hidden = protocol.decode_forward_request(obj)
+        if path == "/truncate":
+            session_id, length = protocol.decode_truncate_request(obj)
+            self._block.truncate(session_id, length)
+            return protocol.encode_ok()
+        session_id, start_pos, hidden, truncate_to = protocol.decode_forward_request_full(obj)
         started = time.perf_counter()
-        out = self._block.forward(session_id, hidden, start_pos)
+        out = (self._block.forward(session_id, hidden, start_pos) if truncate_to is None
+               else self._block.forward(session_id, hidden, start_pos, truncate_to))
         self._compute_ms = (time.perf_counter() - started) * 1000
         return protocol.encode_forward_reply(out)
 

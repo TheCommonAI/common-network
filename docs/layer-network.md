@@ -46,6 +46,16 @@ python -m commonnet.serve --network URL     # OpenAI-compatible API on http://12
 
 Any OpenAI-compatible app can point at it. Each request builds a fresh route from the live peers.
 
+### Faster decoding with a drafter (opt in)
+
+```bash
+python -m commonnet.serve --network URL --draft          # Qwen3-0.6B drafter on your machine, 8 tokens per round
+```
+
+A small local model guesses 8 tokens, the network verifies them in one pass and rolls back the rest, so per-hop latency is
+shared across several tokens: about 1.7x on chat and 2.3 to 3.1x on code and quoted text at 50 ms hops, with identical greedy
+output. Greedy only (`temperature: 0`); it switches itself off against older peers. See [flash-drafter.md](flash-drafter.md).
+
 ## Status file (for apps that show what a peer is doing)
 
 `commonnet.node` (so `common join --network`) writes a JSON status document every 2 s and on every change,

@@ -146,8 +146,28 @@ def decode_session_request(obj) -> str:
     return check_session_id(obj["id"])
 
 
-def encode_forward_request(session_id: str, hidden: Tensor, start_pos: int) -> dict:
+def encode_truncate_request(session_id: str, length: int) -> dict:
+    if type(length) is not int or length < 0:
+        raise ProtocolError(f"length must be a non-negative int, got {length!r}")
+    return {"id": check_session_id(session_id), "length": length}
+
+
+def decode_truncate_request(obj) -> tuple:
+    """Returns (session_id, length)."""
+    _fields(obj, "truncate request", ("id", "length"))
+    session_id = check_session_id(obj["id"])
+    length = obj["length"]
+    if type(length) is not int or length < 0:
+        raise ProtocolError(f"length must be a non-negative int, got {length!r}")
+    return session_id, length
+
+
+def encode_forward_request(session_id: str, hidden: Tensor, start_pos: int, truncate_to: int | None = None) -> dict:
+    """truncate_to (optional): cut the session back to that many positions before running this step, so a speculative
+    rollback rides on the next forward instead of costing a round trip of its own. Old servers refuse the field."""
     body = {"id": check_session_id(session_id), "start_pos": check_start_pos(start_pos)}
+    if truncate_to is not None:
+        body["truncate_to"] = check_start_pos(truncate_to)
     body.update(encode_tensor(hidden))
     return body
 
@@ -159,6 +179,15 @@ def decode_forward_request(obj) -> tuple:
     start_pos = check_start_pos(obj["start_pos"])
     hidden = decode_tensor({key: obj[key] for key in ("shape", "dtype", "data")}, "forward request")
     return session_id, start_pos, hidden
+
+
+def decode_forward_request_full(obj) -> tuple:
+    """Returns (session_id, start_pos, hidden, truncate_to or None)."""
+    _fields(obj, "forward request", ("id", "start_pos", "shape", "dtype", "data"), ("truncate_to",))
+    session_id, start_pos = check_session_id(obj["id"]), check_start_pos(obj["start_pos"])
+    truncate_to = check_start_pos(obj["truncate_to"]) if "truncate_to" in obj else None
+    hidden = decode_tensor({key: obj[key] for key in ("shape", "dtype", "data")}, "forward request")
+    return session_id, start_pos, hidden, truncate_to
 
 
 def encode_forward_reply(hidden: Tensor) -> dict:

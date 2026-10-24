@@ -117,7 +117,8 @@ def parse_request(body: dict) -> dict:
 class NetworkBackend:
     """The real backend: a Client4 on one worker thread, a fresh route per request."""
 
-    def __init__(self, network, checkpoint: str | None = None, *, fmt: str = "mlx4", hidden_dtype=None):
+    def __init__(self, network, checkpoint: str | None = None, *, fmt: str = "mlx4", hidden_dtype=None,
+                 draft: str | None = None, draft_k: int = 8):
         import torch
         from transformers import AutoTokenizer
         self.network = network
@@ -138,6 +139,17 @@ class NetworkBackend:
             return Client4(checkpoint, _NoTransport(), fmt=fmt, hidden_dtype=self._dtype)
 
         self.client = self._worker.submit(load).result()
+        self.draft_k, self.drafter, self.draft_note = draft_k, None, "off"
+        if draft:
+            def load_drafter():
+                from commonnet.speculative import MlxDrafter
+                return MlxDrafter(draft, target_tokenizer=self.tokenizer)
+            try:   # no drafter is never fatal: requests then use plain decoding
+                self.drafter = self._worker.submit(load_drafter).result()
+                self.draft_note = f"on ({draft}, k={draft_k})"
+            except Exception as e:
+                self.draft_note = f"off: {type(e).__name__}: {e}"[:300]
+                print(f"speculative decoding is off: {self.draft_note}", file=sys.stderr, flush=True)
 
     def _stop_ids(self) -> list[int]:
         ids = {self.tokenizer.eos_token_id} - {None}
@@ -158,8 +170,16 @@ class NetworkBackend:
     def _generate(self, prompt_ids, max_tokens, temperature, top_p, seed):
         endpoints, transport = self.network.plan()
         self.client.transport = transport
-        yield from self.client.generate_stream(endpoints, prompt_ids, max_tokens, temperature=temperature,
-                                               top_p=top_p, seed=seed, stop_ids=self.stop_ids)
+        if self.drafter is None:
+            yield from self.client.generate_stream(endpoints, prompt_ids, max_tokens, temperature=temperature,
+                                                   top_p=top_p, seed=seed, stop_ids=self.stop_ids)
+            return
+        from commonnet import speculative
+        stats = speculative.SpecStats()
+        yield from speculative.generate_stream(self.client, endpoints, prompt_ids, max_tokens, drafter=self.drafter,
+                                               k=self.draft_k, temperature=temperature, top_p=top_p, seed=seed,
+                                               stop_ids=self.stop_ids, stats=stats)
+        self.last_spec = stats
 
     def health(self) -> dict:
         return self.network.status()
@@ -440,6 +460,10 @@ def main(argv=None) -> int:
     p.add_argument("--checkpoint", help="local client checkpoint (embed, final norm, head); default: download the manifest's client_repo")
     p.add_argument("--client-format", choices=["mlx4", "fp16", "fp32"], default="mlx4",
                    help="how the client's embedding and head are held; mlx4 needs Apple silicon")
+    p.add_argument("--draft", nargs="?", const="mlx-community/Qwen3-0.6B-4bit", default=None, metavar="MODEL",
+                   help="speculative decoding with a small local drafter (default model mlx-community/Qwen3-0.6B-4bit); "
+                        "greedy requests only, off by default")
+    p.add_argument("--draft-k", type=int, default=8, help="tokens drafted per round (default 8; shrinks when acceptance is low)")
     p.add_argument("--max-context", type=int, default=DEFAULT_MAX_CONTEXT)
     p.add_argument("--cache-dir", help="where to remember peer addresses between runs")
     args = p.parse_args(argv)
@@ -448,11 +472,14 @@ def main(argv=None) -> int:
     try:
         network = Network.from_spec(args.network, cache_dir=args.cache_dir)
         network.manifest  # fail now, not on the first request
-        backend = NetworkBackend(network, args.checkpoint, fmt=args.client_format, hidden_dtype=torch.float32)
+        backend = NetworkBackend(network, args.checkpoint, fmt=args.client_format, hidden_dtype=torch.float32,
+                                 draft=args.draft, draft_k=args.draft_k)
     except NetworkUnreachable as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     server = make_server(backend, args.port, max_context=args.max_context)
+    if args.draft:
+        print(f"speculative decoding: {backend.draft_note}", flush=True)
     print(f"serving {backend.model_name} from the network on http://127.0.0.1:{args.port}/v1", flush=True)
     try:
         server.serve_forever()
