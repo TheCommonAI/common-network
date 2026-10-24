@@ -1,0 +1,352 @@
+{
+ "version": 1,
+ "when": "2026-10-24T07:49:05Z",
+ "network": "common-main-8b-v1",
+ "model": "Qwen3-8B",
+ "seed": "https://peak-for-values-consists.trycloudflare.com",
+ "route": [
+  {
+   "hop": 0,
+   "window": [
+    0,
+    27
+   ],
+   "peers": [
+    {
+     "peer": "59890399",
+     "host": "https://peak-for-values-consists.trycloudflare.com",
+     "backend": "mlx"
+    }
+   ]
+  },
+  {
+   "hop": 1,
+   "window": [
+    27,
+    36
+   ],
+   "peers": [
+    {
+     "peer": "6f7d25cb",
+     "host": "https://clubs-polished-you-cheese.trycloudflare.com",
+     "backend": "nf4"
+    },
+    {
+     "peer": "ba7d4aea",
+     "host": "https://aircraft-ali-jersey-cultural.trycloudflare.com",
+     "backend": "cpu"
+    }
+   ]
+  }
+ ],
+ "warnings": [],
+ "hop_rtt": [
+  {
+   "hop": 0,
+   "first_ms": 365.4335000028368,
+   "warm_ms_p50": 52.18958300247323,
+   "warm_ms_min": 40.3903340047691,
+   "error": null
+  },
+  {
+   "hop": 1,
+   "first_ms": 355.4017920032493,
+   "warm_ms_p50": 29.61904199764831,
+   "warm_ms_min": 23.627500006114133,
+   "error": null
+  }
+ ],
+ "config": {
+  "repeats": 2,
+  "cases": [
+   [
+    16,
+    24
+   ],
+   [
+    256,
+    24
+   ]
+  ],
+  "draft": false,
+  "draft_k": 8
+ },
+ "cases": [
+  {
+   "prompt_len": 16,
+   "new": 24,
+   "repeats": 2,
+   "generated": [
+    24,
+    24
+   ],
+   "prefill": {
+    "steps": 2,
+    "ms_mean": 852.4787915048364,
+    "ms_p50": 808.3202500056359,
+    "ms_p95": 896.6373330040369,
+    "tok_s": 18.768795375842764,
+    "compute_ms": 172.63,
+    "network_ms": 656.8612510064022,
+    "client_ms": 22.9875404984341,
+    "missing_server_ms": 0,
+    "per_hop": [
+     {
+      "hop": 0,
+      "window": [
+       0,
+       27
+      ],
+      "peer": "59890399",
+      "host": "https://peak-for-values-consists.trycloudflare.com",
+      "backend": "mlx",
+      "replica_index": 0,
+      "calls": 2,
+      "total_ms": 445.8013335024589,
+      "server_ms": 149.72500000000002,
+      "network_ms": 296.07633350245885,
+      "rtt_ms": 52.18958300247323,
+      "reuse_rate": 1.0,
+      "bytes_per_call": 699208.0
+     },
+     {
+      "hop": 1,
+      "window": [
+       27,
+       36
+      ],
+      "peer": "6f7d25cb",
+      "host": "https://clubs-polished-you-cheese.trycloudflare.com",
+      "backend": "nf4",
+      "replica_index": 0,
+      "calls": 2,
+      "total_ms": 182.6980835030554,
+      "server_ms": 22.905,
+      "network_ms": 159.79308350305539,
+      "rtt_ms": 29.61904199764831,
+      "reuse_rate": 1.0,
+      "bytes_per_call": 699208.0
+     }
+    ]
+   },
+   "decode": {
+    "steps": 46,
+    "ms_mean": 188.53214404336305,
+    "ms_p50": 175.06787499587517,
+    "ms_p95": 270.6689170008758,
+    "tok_s": 5.304135297851365,
+    "compute_ms": 84.3395652173913,
+    "network_ms": 92.46446560791168,
+    "client_ms": 11.728113218060058,
+    "missing_server_ms": 0,
+    "per_hop": [
+     {
+      "hop": 0,
+      "window": [
+       0,
+       27
+      ],
+      "peer": "59890399",
+      "host": "https://peak-for-values-consists.trycloudflare.com",
+      "backend": "mlx",
+      "replica_index": 0,
+      "calls": 46,
+      "total_ms": 105.14326002173576,
+      "server_ms": 46.55369565217391,
+      "network_ms": 58.58956436956185,
+      "rtt_ms": 52.18958300247323,
+      "reuse_rate": 1.0,
+      "bytes_per_call": 43847.0
+     },
+     {
+      "hop": 1,
+      "window": [
+       27,
+       36
+      ],
+      "peer": "6f7d25cb",
+      "host": "https://clubs-polished-you-cheese.trycloudflare.com",
+      "backend": "nf4",
+      "replica_index": 0,
+      "calls": 46,
+      "total_ms": 71.66077080356722,
+      "server_ms": 37.785869565217396,
+      "network_ms": 33.87490123834982,
+      "rtt_ms": 29.61904199764831,
+      "reuse_rate": 1.0,
+      "bytes_per_call": 43847.0
+     }
+    ]
+   },
+   "first_run_ids": [
+    14164,
+    13,
+    576,
+    5426,
+    374,
+    7218,
+    518,
+    264,
+    4628,
+    315,
+    220,
+    18,
+    15,
+    296,
+    2687,
+    13,
+    576,
+    14164,
+    374,
+    220,
+    16,
+    15,
+    15,
+    20044
+   ]
+  },
+  {
+   "prompt_len": 256,
+   "new": 24,
+   "repeats": 2,
+   "generated": [
+    24,
+    24
+   ],
+   "prefill": {
+    "steps": 2,
+    "ms_mean": 7186.344749999989,
+    "ms_p50": 6689.182624999376,
+    "ms_p95": 7683.506875000603,
+    "tok_s": 35.62311702343537,
+    "compute_ms": 1488.63,
+    "network_ms": 5365.367666996293,
+    "client_ms": 332.34708300369675,
+    "missing_server_ms": 0,
+    "per_hop": [
+     {
+      "hop": 0,
+      "window": [
+       0,
+       27
+      ],
+      "peer": "59890399",
+      "host": "https://peak-for-values-consists.trycloudflare.com",
+      "backend": "mlx",
+      "replica_index": 0,
+      "calls": 2,
+      "total_ms": 4540.089854497637,
+      "server_ms": 1180.2849999999999,
+      "network_ms": 3359.8048544976373,
+      "rtt_ms": 52.18958300247323,
+      "reuse_rate": 1.0,
+      "bytes_per_call": 11184970.0
+     },
+     {
+      "hop": 1,
+      "window": [
+       27,
+       36
+      ],
+      "peer": "6f7d25cb",
+      "host": "https://clubs-polished-you-cheese.trycloudflare.com",
+      "backend": "nf4",
+      "replica_index": 0,
+      "calls": 2,
+      "total_ms": 2094.275583498529,
+      "server_ms": 308.345,
+      "network_ms": 1785.9305834985291,
+      "rtt_ms": 29.61904199764831,
+      "reuse_rate": 1.0,
+      "bytes_per_call": 11184970.0
+     }
+    ]
+   },
+   "decode": {
+    "steps": 46,
+    "ms_mean": 185.36211865205627,
+    "ms_p50": 175.27574999985518,
+    "ms_p95": 233.27516699646367,
+    "tok_s": 5.394845544882354,
+    "compute_ms": 79.48543478260869,
+    "network_ms": 94.08233973839224,
+    "client_ms": 11.794344131055329,
+    "missing_server_ms": 0,
+    "per_hop": [
+     {
+      "hop": 0,
+      "window": [
+       0,
+       27
+      ],
+      "peer": "59890399",
+      "host": "https://peak-for-values-consists.trycloudflare.com",
+      "backend": "mlx",
+      "replica_index": 0,
+      "calls": 46,
+      "total_ms": 106.15078536916964,
+      "server_ms": 48.17304347826087,
+      "network_ms": 57.97774189090877,
+      "rtt_ms": 52.18958300247323,
+      "reuse_rate": 1.0,
+      "bytes_per_call": 43848.0
+     },
+     {
+      "hop": 1,
+      "window": [
+       27,
+       36
+      ],
+      "peer": "6f7d25cb",
+      "host": "https://clubs-polished-you-cheese.trycloudflare.com",
+      "backend": "nf4",
+      "replica_index": 0,
+      "calls": 46,
+      "total_ms": 67.41698915183129,
+      "server_ms": 31.312391304347823,
+      "network_ms": 36.10459784748346,
+      "rtt_ms": 29.61904199764831,
+      "reuse_rate": 1.0,
+      "bytes_per_call": 43848.0
+     }
+    ]
+   },
+   "first_run_ids": [
+    264,
+    28727,
+    5426,
+    49435,
+    279,
+    2310,
+    11001,
+    14164,
+    518,
+    38393,
+    13,
+    35639,
+    6777,
+    7343,
+    504,
+    279,
+    23501,
+    311,
+    279,
+    9396,
+    11,
+    323,
+    1449,
+    74642
+   ]
+  }
+ ],
+ "speculative": [],
+ "summary": {
+  "decode_ms_per_tok": 186.94713134770964,
+  "decode_tok_s": 5.349105882454352,
+  "compute_ms": 81.9125,
+  "network_ms": 93.27340267315195,
+  "client_ms": 11.761228674557692,
+  "hops": 2,
+  "rtt_sum_ms": 81.80862500012154
+ }
+}

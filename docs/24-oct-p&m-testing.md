@@ -31,7 +31,7 @@ Model: Qwen3-8B, 36 layers, stage boundaries `[0, 9, 18, 27, 36]`, network `comm
 | #84 | Never publish `api.trycloudflare.com` as a peer's address | A peer published Cloudflare's own endpoint, so every request to it answered 405 |
 | #85 | NVIDIA peers compute in bfloat16 by default | float16 overflows to NaN on some Qwen3 prompts; the NF4 path had never run |
 
-In progress when this was written: `--layers A-B` (pin a peer to a window, branch `feat/layers-flag`).
+Merged after: #86 (this log) and #87 (`--layers A-B`, pin a peer to a window).
 
 ## 2. Synthetic benchmark (fake layers, emulated delay)
 
@@ -173,6 +173,29 @@ Limits: one run of 16 tokens, so noisy; the two peers are on different networks 
 
 Raw: `live-wrong-peer-single-mac-36-layers.json`, `live-mac-0-27-plus-cpu-laptop-27-36.json`.
 
+### 5c. Mac (0-27) + Patrick's RTX 4060 (27-36, NF4): the first real NVIDIA run
+
+Route: hop 0 layers 0-27 on the Mac (MLX), hop 1 layers 27-36 on Patrick's PC (`6f7d25cb`, backend nf4; the CPU laptop is its replica). Pinned/placed so the GPU holds the slow stage.
+Prompts of 16 and 256 tokens, 24 new tokens each, 2 runs per case, over the real internet through Cloudflare tunnels. This is the first time the NVIDIA path has run on real hardware.
+
+| Part | ms/token (mean of both cases) | Note |
+|---|---|---|
+| Compute: Mac, 27 layers | 46.6-48.2 | MLX |
+| Compute: RTX 4060, 9 layers | 31.3-37.8 | NF4, bfloat16 |
+| Network, both hops beyond server time | 92.5-94.1 | bare RTT 52.2 ms (Mac), 29.6 ms (Patrick) |
+| Client | 11.7-11.8 | |
+| Total | **186.9 ms (5.3 tok/s)**; prompt 16: 188.5 (p50 175.1, p95 270.7), prompt 256: 185.4 (p50 175.3, p95 233.3) | |
+
+Per hop, decode (prompt 16): Mac 105.1 ms total (46.6 server, 58.6 network); Patrick 71.7 ms total (37.8 server, 33.9 network). Connection reuse 100%, 42.8 KB per call.
+
+Prefill: 16 tokens 852.5 ms (18.8 tok/s); 256 tokens 7186 ms (35.6 tok/s). In the 256-token case each hop carries 10.9 MB per call: Mac hop 4540 ms total (1180 server, 3360 network), Patrick hop 2094 ms total (308 server, 1786 network). Prefill is dominated by moving the activations, not by compute.
+
+Same route with the CPU laptop holding 27-36 (section 5b): 580.4 ms/token (1.7 tok/s). Moving that stage to the RTX 4060 made decode about 3.1x faster; that stage's compute went from 378 ms to about 31-38 ms.
+
+Limits: this checks speed only. The benchmark does not print or compare the generated text, so correctness of the NF4 output (and absence of NaN) is **not verified** by this run. Two runs per case; the machines are on different home/school networks; one 256-token prompt length.
+
+Raw: `live-mac-0-27-plus-patrick-rtx4060-27-36.json`, `.log`.
+
 ## 6. Why one Mac peer holds all 36 layers
 
 A peer takes the longest window that fits. The Mac offers about 9.9 GiB and the whole 4-bit model costs about 4.8 GiB (`0.3 + 36 x 0.125`), so it serves 0-36 alone;
@@ -202,7 +225,7 @@ Sharded repos (Qwen3-8B) download whole shards that contain needed tensors; sing
 
 ## 8. Not verified
 
-- NVIDIA/CUDA NF4 path on real hardware (Patrick's PC is the first run). Wheels for `torch 2.11.0+cu128` and `bitsandbytes` exist for Windows (checked with pip dry runs, not installed).
+- Correctness of the NF4 output on Patrick's RTX 4060 (it ran and was fast, but generated text was not compared with a reference). Wheels for `torch 2.11.0+cu128` and `bitsandbytes` exist for Windows (checked with pip dry runs, not installed).
 - Any Windows result produced by us; the Windows install steps, `COMMONNET_CACHE` on Windows, the CPU wheel index.
 - Speculative decoding on live peers over a real link, sampling (temperature above 0), and the chat client part on NF4.
 - Multi-run statistics: every live number is a single run.
@@ -214,6 +237,7 @@ Sharded repos (Qwen3-8B) download whole shards that contain needed tensors; sing
 - `synthetic-sweep.json`, `synthetic-sweep.log`, `synthetic-one-run.json`
 - `live-wrong-peer-single-mac-36-layers.json`
 - `live-mac-0-27-plus-cpu-laptop-27-36.json`
+- `live-mac-0-27-plus-patrick-rtx4060-27-36.json` and `.log`
 
 `bench-results/` (from the harness and drafter authors)
 - `sweep-2026-10-24.json`, `spec-synth.json`, `spec-real.json`
