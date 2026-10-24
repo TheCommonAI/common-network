@@ -166,10 +166,10 @@ class BlockClient:
         protocol.decode_ok(self._call("POST", endpoint, "/truncate", body, timeout))
 
     def forward(self, endpoint: str, session_id: str, hidden: Tensor, start_pos: int,
-                timeout: float = FORWARD_TIMEOUT_SECONDS) -> Tensor:
+                timeout: float = FORWARD_TIMEOUT_SECONDS, truncate_to: int | None = None) -> Tensor:
         if not isinstance(hidden, Tensor):
             raise TypeError("forward takes a protocol.Tensor")
-        body = protocol.encode_forward_request(session_id, hidden, start_pos)
+        body = protocol.encode_forward_request(session_id, hidden, start_pos, truncate_to)
         out = protocol.decode_forward_reply(self._call("POST", endpoint, "/forward", body, timeout))
         if out.shape != hidden.shape or out.dtype != hidden.dtype:
             raise ProtocolError(

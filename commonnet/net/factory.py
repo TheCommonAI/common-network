@@ -38,6 +38,12 @@ class ServedBlock:
         if stop:
             stop()
 
+    def truncate(self, session_id: str, length: int) -> None:
+        cut = getattr(self.inner, "truncate", None)
+        if cut is None:
+            raise NotImplementedError("this block cannot truncate a session")
+        cut(session_id, length)
+
     def forward(self, session_id: str, hidden, start_pos: int):
         out = self.inner.forward(session_id, from_wire(hidden), start_pos)
         wire = to_wire(out)

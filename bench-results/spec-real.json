@@ -1,0 +1,133 @@
+{
+ "config": {
+  "checkpoint": "/Users/mileshedrick/.common-network/commonnet/models/mlx-community/Qwen3-8B-4bit/main",
+  "draft": "mlx-community/Qwen3-0.6B-4bit",
+  "stages": 3,
+  "rtt_ms": 50.0,
+  "ks": "4,8",
+  "new_tokens": 64,
+  "out": "bench-results/spec-real.json"
+ },
+ "rows": [
+  {
+   "prompt": "chat",
+   "prompt_tokens": 31,
+   "tokens": 64,
+   "plain_tok_s": 4.0123325832808625,
+   "spec": [
+    {
+     "k": 4,
+     "tok_s": 7.137544777414131,
+     "speedup": 1.7789015813783313,
+     "acceptance": 0.4594594594594595,
+     "tokens_per_round": 2.206896551724138,
+     "rounds": 29,
+     "identical_to_plain": true,
+     "first_diff": null,
+     "mode": "speculative"
+    },
+    {
+     "k": 8,
+     "tok_s": 6.743896013917968,
+     "speedup": 1.680791877029177,
+     "acceptance": 0.36666666666666664,
+     "tokens_per_round": 2.1333333333333333,
+     "rounds": 30,
+     "identical_to_plain": true,
+     "first_diff": null,
+     "mode": "speculative"
+    }
+   ]
+  },
+  {
+   "prompt": "code",
+   "prompt_tokens": 35,
+   "tokens": 64,
+   "plain_tok_s": 4.0244665345212285,
+   "spec": [
+    {
+     "k": 4,
+     "tok_s": 9.115312621399548,
+     "speedup": 2.2649741383633977,
+     "acceptance": 0.671875,
+     "tokens_per_round": 3.0476190476190474,
+     "rounds": 21,
+     "identical_to_plain": true,
+     "first_diff": null,
+     "mode": "speculative"
+    },
+    {
+     "k": 8,
+     "tok_s": 9.581511216543873,
+     "speedup": 2.3808152296348366,
+     "acceptance": 0.6052631578947368,
+     "tokens_per_round": 3.5555555555555554,
+     "rounds": 18,
+     "identical_to_plain": true,
+     "first_diff": null,
+     "mode": "speculative"
+    }
+   ]
+  },
+  {
+   "prompt": "copy",
+   "prompt_tokens": 66,
+   "tokens": 39,
+   "plain_tok_s": 3.8300108602898124,
+   "spec": [
+    {
+     "k": 4,
+     "tok_s": 10.889662760745617,
+     "speedup": 2.843245922263941,
+     "acceptance": 1.0,
+     "tokens_per_round": 4.875,
+     "rounds": 8,
+     "identical_to_plain": true,
+     "first_diff": null,
+     "mode": "speculative"
+    },
+    {
+     "k": 8,
+     "tok_s": 12.035261928771824,
+     "speedup": 3.1423571284236855,
+     "acceptance": 0.875,
+     "tokens_per_round": 7.8,
+     "rounds": 5,
+     "identical_to_plain": true,
+     "first_diff": null,
+     "mode": "speculative"
+    }
+   ]
+  },
+  {
+   "prompt": "chat2",
+   "prompt_tokens": 24,
+   "tokens": 64,
+   "plain_tok_s": 4.092002855138876,
+   "spec": [
+    {
+     "k": 4,
+     "tok_s": 7.162671669180078,
+     "speedup": 1.750407299981463,
+     "acceptance": 0.5151515151515151,
+     "tokens_per_round": 2.206896551724138,
+     "rounds": 29,
+     "identical_to_plain": true,
+     "first_diff": null,
+     "mode": "speculative"
+    },
+    {
+     "k": 8,
+     "tok_s": 6.7031962351942695,
+     "speedup": 1.6381211041375907,
+     "acceptance": 0.4,
+     "tokens_per_round": 2.206896551724138,
+     "rounds": 29,
+     "identical_to_plain": false,
+     "first_diff": 51,
+     "mode": "speculative"
+    }
+   ]
+  }
+ ]
+}

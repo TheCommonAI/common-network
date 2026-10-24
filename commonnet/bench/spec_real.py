@@ -13,12 +13,12 @@ import json
 import pathlib
 import time
 
-import mlx.core as mx
+import os
 import torch
 from transformers import AutoTokenizer
 
 from commonnet import speculative as spec
-from commonnet.backends.mlx_block import MlxBlockRange, OnWorkerThread
+from commonnet.net import factory
 from commonnet.bench.proxy import DelayProxy
 from commonnet.client import BlockEndpoint
 from commonnet.client4 import Client4
@@ -36,6 +36,7 @@ PROMPTS = {
 
 
 def main(argv=None):
+    os.environ.setdefault("COMMONNET_DTYPE", "bfloat16")   # as a real node does
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--draft", default="mlx-community/Qwen3-0.6B-4bit")
@@ -51,7 +52,7 @@ def main(argv=None):
     bounds = [(i * step, layers if i == a.stages - 1 else (i + 1) * step) for i in range(a.stages)]
     servers, proxies, eps = [], [], []
     for i, (s, e) in enumerate(bounds):
-        blk = OnWorkerThread(MlxBlockRange, a.checkpoint, s, e, dtype=mx.bfloat16)
+        blk = factory.build_block(s, e, backend="mlx", checkpoint=a.checkpoint)
         srv = BlockServer(blk, "127.0.0.1", 0).start()
         servers.append(srv)
         proxies.append(DelayProxy(srv.port, rtt_ms=0.0, seed=i))

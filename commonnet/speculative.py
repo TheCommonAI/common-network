@@ -106,7 +106,7 @@ class MlxDrafter:
 
 def _truncate_all(client, endpoints, session_id: str, length: int) -> None:
     for ep in endpoints:
-        client.transport.truncate(ep, session_id, length)
+        client.transport.truncate(ep, session_id, length, defer=True)
 
 
 def can_speculate(client, endpoints) -> tuple[bool, str]:

@@ -1,0 +1,323 @@
+{
+ "config": {
+  "stages": 3,
+  "layers": 36,
+  "layer_ms": 1.0,
+  "hidden": 256,
+  "new_tokens": 48,
+  "rtts": "0,25,50,100",
+  "ks": "4,8",
+  "accepts": "0.5,0.7,0.9",
+  "out": "bench-results/spec-synth.json"
+ },
+ "rows": [
+  {
+   "rtt_ms": 0.0,
+   "mode": "plain",
+   "tok_s": 20.09942375932215
+  },
+  {
+   "rtt_ms": 0.0,
+   "mode": "spec",
+   "k": 4,
+   "target_accept": 0.5,
+   "measured_accept": 0.329,
+   "tok_s": 41.117010719518746,
+   "speedup": 2.0456810708540143,
+   "tokens_per_round": 2.29,
+   "rounds": 21,
+   "identical": true
+  },
+  {
+   "rtt_ms": 0.0,
+   "mode": "spec",
+   "k": 4,
+   "target_accept": 0.7,
+   "measured_accept": 0.484,
+   "tok_s": 51.04226578708163,
+   "speedup": 2.5394890121368845,
+   "tokens_per_round": 2.82,
+   "rounds": 17,
+   "identical": true
+  },
+  {
+   "rtt_ms": 0.0,
+   "mode": "spec",
+   "k": 4,
+   "target_accept": 0.9,
+   "measured_accept": 0.783,
+   "tok_s": 69.45372654550366,
+   "speedup": 3.455508345769908,
+   "tokens_per_round": 4.0,
+   "rounds": 12,
+   "identical": true
+  },
+  {
+   "rtt_ms": 0.0,
+   "mode": "spec",
+   "k": 8,
+   "target_accept": 0.5,
+   "measured_accept": 0.197,
+   "tok_s": 43.28661272442342,
+   "speedup": 2.1536245637065594,
+   "tokens_per_round": 2.4,
+   "rounds": 20,
+   "identical": true
+  },
+  {
+   "rtt_ms": 0.0,
+   "mode": "spec",
+   "k": 8,
+   "target_accept": 0.7,
+   "measured_accept": 0.309,
+   "tok_s": 59.53288696020101,
+   "speedup": 2.9619200865193736,
+   "tokens_per_round": 3.43,
+   "rounds": 14,
+   "identical": true
+  },
+  {
+   "rtt_ms": 0.0,
+   "mode": "spec",
+   "k": 8,
+   "target_accept": 0.9,
+   "measured_accept": 0.69,
+   "tok_s": 99.02914467383532,
+   "speedup": 4.926964367717528,
+   "tokens_per_round": 6.0,
+   "rounds": 8,
+   "identical": true
+  },
+  {
+   "rtt_ms": 25.0,
+   "mode": "plain",
+   "tok_s": 7.709312604953622
+  },
+  {
+   "rtt_ms": 25.0,
+   "mode": "spec",
+   "k": 4,
+   "target_accept": 0.5,
+   "measured_accept": 0.329,
+   "tok_s": 15.50970901725501,
+   "speedup": 2.011814776753149,
+   "tokens_per_round": 2.29,
+   "rounds": 21,
+   "identical": true
+  },
+  {
+   "rtt_ms": 25.0,
+   "mode": "spec",
+   "k": 4,
+   "target_accept": 0.7,
+   "measured_accept": 0.484,
+   "tok_s": 18.64302714045143,
+   "speedup": 2.41824765653845,
+   "tokens_per_round": 2.82,
+   "rounds": 17,
+   "identical": true
+  },
+  {
+   "rtt_ms": 25.0,
+   "mode": "spec",
+   "k": 4,
+   "target_accept": 0.9,
+   "measured_accept": 0.783,
+   "tok_s": 24.48696096545963,
+   "speedup": 3.176283310878524,
+   "tokens_per_round": 4.0,
+   "rounds": 12,
+   "identical": true
+  },
+  {
+   "rtt_ms": 25.0,
+   "mode": "spec",
+   "k": 8,
+   "target_accept": 0.5,
+   "measured_accept": 0.197,
+   "tok_s": 16.199261489049505,
+   "speedup": 2.101258869518492,
+   "tokens_per_round": 2.4,
+   "rounds": 20,
+   "identical": true
+  },
+  {
+   "rtt_ms": 25.0,
+   "mode": "spec",
+   "k": 8,
+   "target_accept": 0.7,
+   "measured_accept": 0.309,
+   "tok_s": 21.685875797057307,
+   "speedup": 2.812945447707366,
+   "tokens_per_round": 3.43,
+   "rounds": 14,
+   "identical": true
+  },
+  {
+   "rtt_ms": 25.0,
+   "mode": "spec",
+   "k": 8,
+   "target_accept": 0.9,
+   "measured_accept": 0.69,
+   "tok_s": 33.24371573240593,
+   "speedup": 4.312150438814113,
+   "tokens_per_round": 6.0,
+   "rounds": 8,
+   "identical": true
+  },
+  {
+   "rtt_ms": 50.0,
+   "mode": "plain",
+   "tok_s": 4.708649550111375
+  },
+  {
+   "rtt_ms": 50.0,
+   "mode": "spec",
+   "k": 4,
+   "target_accept": 0.5,
+   "measured_accept": 0.329,
+   "tok_s": 9.392227261775902,
+   "speedup": 1.9946753653717435,
+   "tokens_per_round": 2.29,
+   "rounds": 21,
+   "identical": true
+  },
+  {
+   "rtt_ms": 50.0,
+   "mode": "spec",
+   "k": 4,
+   "target_accept": 0.7,
+   "measured_accept": 0.484,
+   "tok_s": 11.18916905442977,
+   "speedup": 2.3763010891658114,
+   "tokens_per_round": 2.82,
+   "rounds": 17,
+   "identical": true
+  },
+  {
+   "rtt_ms": 50.0,
+   "mode": "spec",
+   "k": 4,
+   "target_accept": 0.9,
+   "measured_accept": 0.783,
+   "tok_s": 14.689783897982803,
+   "speedup": 3.1197445767938583,
+   "tokens_per_round": 4.0,
+   "rounds": 12,
+   "identical": true
+  },
+  {
+   "rtt_ms": 50.0,
+   "mode": "spec",
+   "k": 8,
+   "target_accept": 0.5,
+   "measured_accept": 0.197,
+   "tok_s": 9.755050842040989,
+   "speedup": 2.071730065748947,
+   "tokens_per_round": 2.4,
+   "rounds": 20,
+   "identical": true
+  },
+  {
+   "rtt_ms": 50.0,
+   "mode": "spec",
+   "k": 8,
+   "target_accept": 0.7,
+   "measured_accept": 0.309,
+   "tok_s": 13.033180249313729,
+   "speedup": 2.7679231827744433,
+   "tokens_per_round": 3.43,
+   "rounds": 14,
+   "identical": true
+  },
+  {
+   "rtt_ms": 50.0,
+   "mode": "spec",
+   "k": 8,
+   "target_accept": 0.9,
+   "measured_accept": 0.69,
+   "tok_s": 19.49166878629052,
+   "speedup": 4.139545442669327,
+   "tokens_per_round": 6.0,
+   "rounds": 8,
+   "identical": true
+  },
+  {
+   "rtt_ms": 100.0,
+   "mode": "plain",
+   "tok_s": 2.5999784354319777
+  },
+  {
+   "rtt_ms": 100.0,
+   "mode": "spec",
+   "k": 4,
+   "target_accept": 0.5,
+   "measured_accept": 0.329,
+   "tok_s": 4.666922169703794,
+   "speedup": 1.7949849529918893,
+   "tokens_per_round": 2.29,
+   "rounds": 21,
+   "identical": true
+  },
+  {
+   "rtt_ms": 100.0,
+   "mode": "spec",
+   "k": 4,
+   "target_accept": 0.7,
+   "measured_accept": 0.484,
+   "tok_s": 5.381653304612052,
+   "speedup": 2.069883823370215,
+   "tokens_per_round": 2.82,
+   "rounds": 17,
+   "identical": true
+  },
+  {
+   "rtt_ms": 100.0,
+   "mode": "spec",
+   "k": 4,
+   "target_accept": 0.9,
+   "measured_accept": 0.783,
+   "tok_s": 6.7592019798996095,
+   "speedup": 2.599714631393314,
+   "tokens_per_round": 4.0,
+   "rounds": 12,
+   "identical": true
+  },
+  {
+   "rtt_ms": 100.0,
+   "mode": "spec",
+   "k": 8,
+   "target_accept": 0.5,
+   "measured_accept": 0.197,
+   "tok_s": 4.801982338501608,
+   "speedup": 1.8469316026091482,
+   "tokens_per_round": 2.4,
+   "rounds": 20,
+   "identical": true
+  },
+  {
+   "rtt_ms": 100.0,
+   "mode": "spec",
+   "k": 8,
+   "target_accept": 0.7,
+   "measured_accept": 0.309,
+   "tok_s": 6.095993353590961,
+   "speedup": 2.344632274835823,
+   "tokens_per_round": 3.43,
+   "rounds": 14,
+   "identical": true
+  },
+  {
+   "rtt_ms": 100.0,
+   "mode": "spec",
+   "k": 8,
+   "target_accept": 0.9,
+   "measured_accept": 0.69,
+   "tok_s": 8.43756107656635,
+   "speedup": 3.245242714932164,
+   "tokens_per_round": 6.0,
+   "rounds": 8,
+   "identical": true
+  }
+ ]
+}

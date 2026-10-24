@@ -220,14 +220,19 @@ class BlockServer:
             fn(session_id, length)
             session.last = None
 
-    def forward(self, session_id: str, hidden: Tensor, start_pos: int) -> Tensor:
+    def forward(self, session_id: str, hidden: Tensor, start_pos: int, truncate_to: int | None = None) -> Tensor:
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
                 raise UnknownSession(f"session {session_id!r} is not open")
-            key = _step_key(hidden, start_pos)
+            key = _step_key(hidden, start_pos) + (truncate_to,)
             if session.last is not None and session.last[0] == key:
                 return session.last[1]
+            if truncate_to is not None:
+                fn = getattr(self.block, "truncate", None)
+                if fn is None:
+                    raise NotImplementedError("this block cannot truncate a session")
+                fn(session_id, truncate_to)
             out = self.block.forward(session_id, hidden, start_pos)
             _check_output(out, hidden)
             session.last = (key, out)
@@ -378,9 +383,10 @@ class _Handler(BaseHTTPRequestHandler):
             session_id, length = protocol.decode_truncate_request(obj)
             self._block.truncate(session_id, length)
             return protocol.encode_ok()
-        session_id, start_pos, hidden = protocol.decode_forward_request(obj)
+        session_id, start_pos, hidden, truncate_to = protocol.decode_forward_request_full(obj)
         started = time.perf_counter()
-        out = self._block.forward(session_id, hidden, start_pos)
+        out = (self._block.forward(session_id, hidden, start_pos) if truncate_to is None
+               else self._block.forward(session_id, hidden, start_pos, truncate_to))
         self._compute_ms = (time.perf_counter() - started) * 1000
         return protocol.encode_forward_reply(out)
 

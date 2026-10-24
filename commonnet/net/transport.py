@@ -77,6 +77,7 @@ class HttpTransport:
         self._history: dict[tuple[str, str], list] = {}
         self._dead: dict[tuple[str, int], float] = {}
         self._truncate_ok: dict[str, bool] = {}
+        self._pending_cut: dict[tuple[str, str], int] = {}
         self.failovers: list[tuple[str, int, int]] = []  # (endpoint, from index, to index), for tests and logs
 
     def _candidates(self, name: str) -> list:
@@ -184,13 +185,15 @@ class HttpTransport:
             self._wait_sleep(self._wait_poll_s)
         raise Unreachable(f"no live server for {name} after waiting {self._wait_s:g}s; last error: {self._last_error}")
 
-    def _send(self, name: str, session_id: str, piece: Tensor, start_pos: int) -> Tensor:
+    def _send(self, name: str, session_id: str, piece: Tensor, start_pos: int, truncate_to=None) -> Tensor:
         key = (name, session_id)
         while True:
             index = self._active[key]
             client, url = self._target(name, index)
             try:
-                return client.forward(url, session_id, piece, start_pos)
+                if truncate_to is None:
+                    return client.forward(url, session_id, piece, start_pos)
+                return client.forward(url, session_id, piece, start_pos, truncate_to=truncate_to)
             except (Unreachable, RemoteError) as e:
                 if len(self._candidates(name)) < 2 and self._on_exhausted is None:
                     raise
@@ -236,7 +239,7 @@ class HttpTransport:
                 return False
         return True
 
-    def truncate(self, endpoint, session_id: str, length: int) -> None:
+    def truncate(self, endpoint, session_id: str, length: int, defer: bool = False) -> None:
         """Cut this endpoint's session back to `length` positions. Idempotent. The kept history is cut first, so a
         failover during or after this replays exactly the truncated session."""
         name, key = endpoint.name, (endpoint.name, session_id)
@@ -244,6 +247,12 @@ class HttpTransport:
             return
         if key in self._history:
             self._history[key] = self._cut_history(self._history[key], length)
+        if defer:
+            # ride on the next forward to this endpoint (no round trip of its own); the cut history is already what a
+            # replacement server would replay, so a failover before then is still exact
+            self._pending_cut[key] = length
+            return
+        self._pending_cut.pop(key, None)
         while True:
             index = self._active[key]
             client, url = self._target(name, index)
@@ -278,7 +287,8 @@ class HttpTransport:
         outs = []
         for i in range(0, seq, chunk):
             piece = to_wire(hidden[:, i:i + chunk])
-            out = self._send(name, session_id, piece, start_pos + i)
+            cut = self._pending_cut.pop(key, None) if i == 0 else None
+            out = self._send(name, session_id, piece, start_pos + i, cut)
             if keep:
                 self._history.setdefault(key, []).append((start_pos + i, piece))
             outs.append(from_wire(out))
@@ -291,6 +301,7 @@ class HttpTransport:
             return
         self._open.discard(key)
         self._history.pop(key, None)
+        self._pending_cut.pop(key, None)
         index = self._active.pop(key, 0)
         try:
             client, url = self._target(endpoint.name, index)

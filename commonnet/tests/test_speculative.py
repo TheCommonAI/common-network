@@ -122,6 +122,26 @@ class SpecTest(unittest.TestCase):
         b2 = tr2.forward(ep, "t", z, 5)
         self.assertTrue(torch.allclose(a2, b2, atol=1e-5))
 
+    def test_deferred_truncate_rides_on_the_next_forward_and_costs_no_request(self):
+        tr = self.rig.transport()
+        ep = EPS[0]
+        x = torch.randn(1, 6, HIDDEN, generator=torch.Generator().manual_seed(1))
+        y = torch.randn(1, 3, HIDDEN, generator=torch.Generator().manual_seed(2))
+        tr.forward(ep, "s", x, 0)
+        client = tr._clients[("a", 0)]
+        before = len(client.timings)
+        tr.truncate(ep, "s", 4, defer=True)
+        self.assertEqual(len(client.timings), before)           # nothing sent yet
+        a = tr.forward(ep, "s", y, 4)
+        self.assertEqual(len(client.timings), before + 1)       # one request carried both
+        tr2 = self.rig.transport()
+        tr2.forward(ep, "t", x[:, :4], 0)
+        self.assertTrue(torch.allclose(a, tr2.forward(ep, "t", y, 4), atol=1e-5))
+        # an identical retry (lost reply) is answered from the saved reply, without truncating again
+        from commonnet.net.transport import to_wire
+        again = tr._send("a", "s", to_wire(y), 4, 4)
+        self.assertEqual(again.data, to_wire(a).data)
+
     def test_plain_decoding_is_untouched_without_a_drafter_and_for_sampling(self):
         stats = spec.SpecStats()
         out = list(spec.generate_stream(make_client(self.rig.transport()), EPS, PROMPT, 12, stats=stats))
