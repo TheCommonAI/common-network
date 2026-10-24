@@ -92,6 +92,9 @@ class HttpTransport:
         self._tokens = tokens or {}
         self._default_token = token
         self._kw = client_kwargs
+        # Candidate identities remain public for peer forwarding and replica
+        # refresh. Only this client's own connections may use a local shortcut.
+        self._local_urls: dict[str, str] = {}
         self._now = now
         self._on_exhausted = on_exhausted
         self._wait_s = wait_s
@@ -136,7 +139,7 @@ class HttpTransport:
                 kw.setdefault("retries", 1)  # another server can take over, so do not wait out the full backoff
             self._clients[(name, index)] = BlockClient(
                 token=token, max_request_bytes=self.max_request_bytes, **kw)
-        return self._clients[(name, index)], url
+        return self._clients[(name, index)], self._local_urls.get(url, url)
 
     def _alive(self, name: str, index: int) -> bool:
         died = self._dead.get((name, index))
@@ -375,10 +378,11 @@ class HttpTransport:
             caps = info[2]
             if CAPABILITY not in caps:
                 raise ValueError("a route peer does not support chain forwarding")
-            parts = urlsplit(url)
+            wire_url = self._entry_url(self._candidates(ep.name)[index])
+            parts = urlsplit(wire_url)
             pin_key = f"{parts.hostname}:{parts.port or (443 if parts.scheme == 'https' else 80)}"
             pin = client._pin.get(pin_key) if isinstance(client._pin, dict) else client._pin
-            hop = {"name": ep.name, "index": index, "url": url, "token": client.token,
+            hop = {"name": ep.name, "index": index, "url": wire_url, "token": client.token,
                    "pin": pin, "layers": [ep.start, ep.end], "caps": caps}
             hops.append(hop)
         if "ids_in" not in hops[0]["caps"] or "head_out" not in hops[-1]["caps"]:

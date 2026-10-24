@@ -367,14 +367,16 @@ class LocalApi(StatusCase):
         a.url = "https://example.trycloudflare.com"  # what a tunnelled node publishes
 
         class T:
+            _local_urls = {}
             urls = {"hop0": "https://example.trycloudflare.com", "hop1": "https://other.example"}
             _replicas = {"hop0": [("https://other.example", "t")], "hop1": [("https://example.trycloudflare.com", "tok"),
                                                                            "https://example.trycloudflare.com"]}
 
         t = T()
         a.localize(t)
-        self.assertEqual(t.urls, {"hop0": a.server.url, "hop1": "https://other.example"})
-        self.assertEqual(t._replicas["hop1"], [(a.server.url, "tok"), a.server.url])
+        self.assertEqual(t.urls, {"hop0": a.url, "hop1": "https://other.example"})
+        self.assertEqual(t._local_urls, {a.url: a.server.url})
+        self.assertEqual(t._replicas["hop1"], [(a.url, "tok"), a.url])
         self.assertEqual(t._replicas["hop0"], [("https://other.example", "t")])
 
 

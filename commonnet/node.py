@@ -852,7 +852,7 @@ class Node:
     # -- the local chat API (--api): the OpenAI-compatible server, in this process --------------------
 
     def localize(self, transport) -> None:
-        """Send requests for this node's own window to its loopback block server, not out through the tunnel."""
+        """Use loopback for this client's own connections while preserving public peer-forwarding URLs."""
         with self._lock:
             own, local = self.url, (self.server.url if self.server is not None else None)
             if self.fp and self.server is not None:   # direct: our own server, over loopback, pinned to our own certificate
@@ -863,13 +863,7 @@ class Node:
         if not own or not local:
             return
 
-        def swap(entry):
-            if isinstance(entry, tuple):
-                return (local, entry[1]) if entry[0] == own else entry
-            return local if entry == own else entry
-
-        transport.urls = {name: swap(url) for name, url in transport.urls.items()}
-        transport._replicas = {name: [swap(e) for e in entries] for name, entries in transport._replicas.items()}
+        transport._local_urls[own] = local
 
     def _default_api_backend(self, network):
         import torch
