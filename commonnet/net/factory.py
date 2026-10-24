@@ -16,7 +16,7 @@ import torch
 from commonnet.net import protocol
 from commonnet.net.transport import from_wire, to_wire
 
-BACKENDS = ("torch", "mlx", "nf4", "cpu")
+BACKENDS = ("torch", "mlx", "nf4", "cpu", "synth")
 
 
 class ServedBlock:
@@ -50,6 +50,10 @@ def build_block(start: int, end: int, backend: str | None = None, checkpoint: st
     checkpoint = checkpoint or env.get("COMMONNET_CHECKPOINT")
     if backend not in BACKENDS:
         raise ValueError(f"unknown COMMONNET_BACKEND {backend!r}; choose one of {BACKENDS}")
+    if backend == "synth":  # synthetic test model (commonnet/bench): no checkpoint, weights from a seed
+        from commonnet.bench.synth import SynthBlock
+        return SynthBlock(start, end, layer_ms=float(env.get("COMMONNET_SYNTH_LAYER_MS", "0")),
+                          seed=int(env.get("COMMONNET_SYNTH_SEED", "1234")))
     if not checkpoint:
         raise ValueError("set COMMONNET_CHECKPOINT to the checkpoint directory")
     if backend == "torch":
