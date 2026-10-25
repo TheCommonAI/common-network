@@ -1,19 +1,21 @@
 # common — the COMMON. CLI
 
-To serve a slice of the decentralised layer network, run `common join --network`
-(see [docs/layer-network.md](../docs/layer-network.md)).
-
-The full network client: ask questions, contribute a node, watch demand,
-see who's on the commons. Installed by the same one-liner as everything
-else — see the [top-level README](../README.md#contributing-a-node-for-friends).
+The Common Network CLI (v0.4): join the distributed layer network as a peer, ask it
+questions, and inspect it. `common join` serves a slice of a model's layers
+(`--network NAME` picks bonsai-8b, bonsai-2-9b, bonsai-27b, bonsai-2-27b or
+qwen3-8b); `common ask` sends greedy (`temperature` 0) requests so Common Flash
+speculative decoding applies, and needs `common join` running for its local API.
+See [docs/layer-network.md](../docs/layer-network.md) and the
+[top-level README](../README.md). Commands that talk to a gateway (`demand`,
+`contrib`, `test`, `--region`) belong to the legacy v0.1 gateway network.
 
 ## Commands
 
 ```
 common                    interactive session (just type a question, or a /command)
 common ask "<prompt>"     route one question through the network
-common join               put this machine on the commons as a node
-common serve <model>      contribute a specific model
+common join               serve layers of the shared model (--network NAME, --local-front, --direct, --no-draft)
+common serve <model>      legacy: contribute a specific whole model to a gateway
 common leave              take this machine off the commons
 common status             this node: health, position, requests served
 common demand             live domain coverage gaps (real data, not a mockup)
