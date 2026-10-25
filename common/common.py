@@ -1471,6 +1471,27 @@ def _speculation_line(base: str, verbose: bool) -> str | None:
     return f"speculation: off ({last.get('reason') or spec.get('note') or 'unknown'})"
 
 
+def _transport_lines(base: str, verbose: bool) -> list[str]:
+    """With -v, one line per hop: direct (webrtc) or tunnel, and why a direct link is not up."""
+    if not verbose:
+        return []
+    try:
+        rows = _get_json(base + "/health", timeout=3).get("transport")
+    except (OSError, ValueError, AttributeError):
+        return []
+    lines = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        layers = row.get("layers")
+        where = f"layers {layers[0]}-{layers[1]}" if isinstance(layers, list) and len(layers) == 2 else str(row.get("hop", "hop"))
+        line = f"transport {where}: {row.get('transport', 'unknown')}"
+        if row.get("last_failure"):
+            line += f" (direct link: {str(row['last_failure'])[:160]})"
+        lines.append(line)
+    return lines
+
+
 def _ask_layers(question: str, model: str | None, as_json: bool, quiet: bool, verbose: bool,
                 region: str | None = None, compose: str | None = None, temperature: float | None = None) -> None:
     status, health = _read_layer_status()
@@ -1598,6 +1619,8 @@ def _ask_layers(question: str, model: str | None, as_json: bool, quiet: bool, ve
         line = _speculation_line(base, verbose)
         if line:
             print(dim(line), file=sys.stderr)
+        for tline in _transport_lines(base, verbose):
+            print(dim(tline), file=sys.stderr)
 
 
 def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,

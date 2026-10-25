@@ -95,6 +95,8 @@ class Network:
         self._windows: dict[str, tuple[int, int]] = {}
         self._backends: dict[str, str | None] = {}
         self._token_for = None
+        self._rtc_peers = None          # direct links shared by every transport this network builds
+        self._last_transport = None
         self._cached = self._read_cache()
 
     # --- construction -------------------------------------------------------
@@ -148,6 +150,9 @@ class Network:
         node, self._own_dht = getattr(self, "_own_dht", None), None
         if node is not None:
             node.stop()
+        peers, self._rtc_peers = getattr(self, "_rtc_peers", None), None
+        if peers is not None:
+            peers.close()
 
     def _add_seeds(self, urls) -> None:
         for url in urls:
@@ -334,6 +339,10 @@ class Network:
         self._token_for = token_for
         hops = self.route(prefer_backend)
         self._learn_pins(self.table.live())
+        if self._rtc_peers is None:
+            from commonnet.net.client import RtcPeers
+            self._rtc_peers = RtcPeers()
+        transport_kwargs.setdefault("rtc_peers", self._rtc_peers)
         transport_kwargs.setdefault("pin", self._pins)  # {} unless a direct peer is known: then nothing changes
         self._hops = hops
         self._windows = {f"hop{i}": h.window for i, h in enumerate(hops)}
@@ -345,6 +354,7 @@ class Network:
                                   wait_s=self.wait_s if wait_s is None else wait_s, **transport_kwargs)
         if self._front_active:
             transport.local_front = self.local_front
+        self._last_transport = transport
         return transport
 
     def endpoints(self) -> list[BlockEndpoint]:
@@ -364,4 +374,19 @@ class Network:
         manifest = self.manifest
         live = self.table.live()
         return {"network": manifest.id, "model": manifest.model.get("name"), "peers": len(live),
-                "stages": [{"layers": [a, b], "peers": c} for (a, b), c in zip(manifest.stages(), coverage(manifest, live))]}
+                "stages": [{"layers": [a, b], "peers": c} for (a, b), c in zip(manifest.stages(), coverage(manifest, live))],
+                "transport": self.transport_report()}
+
+    def transport_report(self) -> list[dict]:
+        """Per hop of the route last used: transport ("direct (webrtc)" / "tunnel" / "https") and why a
+        direct link is not up. Empty until the first request has built a route."""
+        transport = self._last_transport
+        if transport is None:
+            return []
+        rows = transport.transport_report()
+        for row in rows:
+            try:
+                row["layers"] = list(self._windows[row["hop"]])
+            except (KeyError, TypeError):
+                pass
+        return rows

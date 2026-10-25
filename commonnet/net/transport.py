@@ -690,6 +690,19 @@ class HttpTransport:
             }
         return out
 
+    def transport_report(self) -> list[dict]:
+        """Per hop: how this node is talking to the peer in use ("direct (webrtc)" / "tunnel" / "https")
+        and the last reason a direct link could not be made. Hop names only; no URLs or tokens."""
+        out = []
+        for name in self.urls:
+            try:
+                client, url = self._target(name, self._first_alive(name))
+                row = client.transport_report(url)
+            except Exception as e:
+                row = {"transport": "unknown", "last_failure": type(e).__name__}
+            out.append({"hop": name, **row})
+        return out
+
     def shutdown(self) -> None:
         from types import SimpleNamespace
         for session_id, state in list(self._chain_sessions.items()):
