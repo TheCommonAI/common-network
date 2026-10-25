@@ -41,6 +41,61 @@ RTC_RETRY_SECONDS = 60.0
 RTC_MAX_ENDPOINTS = 16
 _RTC_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="commonnet-rtc-upgrade")
 _RTC_SLOTS = threading.BoundedSemaphore(8)
+DIRECT = "direct (webrtc)"
+TUNNEL = "tunnel"
+
+
+class RtcPeers(dict):
+    """Per-endpoint WebRTC link state that outlives one BlockClient.
+
+    A request builds a fresh transport (and BlockClients) and shuts it down at the end, so state
+    kept per client was discarded before a 10-30 s ICE negotiation could pay off. A node passes one
+    RtcPeers to every client it builds; the links stay up between requests.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.lock = threading.RLock()
+
+    def close(self) -> None:
+        with self.lock:
+            states = list(self.values())
+            self.clear()
+        for state in states:
+            future = state.get("future")
+            if future is not None:
+                future.cancel()
+            peer = state.get("peer")
+            if peer is not None:
+                try:
+                    peer.close()
+                except Exception:
+                    pass
+
+
+def _short(exc: BaseException) -> str:
+    """A one-line, secret-free reason for a failed negotiation (never SDP, tokens or URLs)."""
+    from commonnet.net import rtc
+    if isinstance(exc, (rtc.RtcUnavailable, rtc.RtcProtocolError)):
+        text = str(exc)
+    elif isinstance(exc, RemoteError):
+        text = f"peer refused signaling (HTTP {exc.status})"
+    elif isinstance(exc, Unreachable):
+        text = "peer unreachable for signaling"
+    else:
+        text = type(exc).__name__
+    return " ".join(text.split())[:160]
+
+
+def _label(endpoint: str) -> str:
+    """host:port only: tunnel hostnames and IPs are already public, paths and credentials are not logged."""
+    parts = urllib.parse.urlsplit(endpoint)
+    return f"{parts.hostname}:{parts.port}" if parts.port else (parts.hostname or "peer")
+
+
+def _stderr_log(message: str) -> None:
+    import sys
+    print(f"[direct] {message}", file=sys.stderr, flush=True)
 
 
 class BlockError(Exception):
@@ -153,7 +208,8 @@ class BlockClient:
                  max_backoff: float = RETRY_MAX_BACKOFF_SECONDS,
                  max_request_bytes: int = MAX_REQUEST_BYTES, sleep=time.sleep,
                  pin=None, ssl_context=None, public_only: bool = False,
-                 rtc: bool | None = None, rtc_allow_private: bool = False, rtc_stun_urls=None):
+                 rtc: bool | None = None, rtc_allow_private: bool = False, rtc_stun_urls=None,
+                 rtc_peers: RtcPeers | None = None, rtc_log=None):
         """pin (default None) pins the certificate of https endpoints by sha256 fingerprint
         (commonnet/net/secure.py): a fingerprint string for every https endpoint, or a dict
         mapping "host:port" to one, which wins over the string form. An endpoint with a pin is
@@ -178,8 +234,11 @@ class BlockClient:
         self._rtc_enabled = (os.environ.get("COMMONNET_RTC", "1") != "0") if rtc is None else bool(rtc)
         self._rtc_allow_private = bool(rtc_allow_private)
         self._rtc_stun_urls = rtc_stun_urls
-        self._rtc_states: dict[str, dict] = {}
+        self._rtc_shared = rtc_peers is not None
+        self._rtc_states = rtc_peers if rtc_peers is not None else RtcPeers()
+        self._rtc_lock = self._rtc_states.lock
         self._rtc_epoch = 0
+        self._rtc_log = rtc_log if rtc_log is not None else _stderr_log
 
     def health(self, endpoint: str, timeout: float = CONTROL_TIMEOUT_SECONDS) -> tuple:
         """Returns (layers, device)."""
@@ -239,20 +298,47 @@ class BlockClient:
     def close_connections(self) -> None:
         with self._lock:
             idle, self._idle = list(self._idle.values()), {}
-            states, self._rtc_states = list(self._rtc_states.values()), {}
-            self._rtc_epoch += 1
         for conn in idle:
             conn.close()
-        for state in states:
-            future = state.get("future")
-            if future is not None:
-                future.cancel()
-            peer = state.get("peer")
-            if peer is not None:
-                try:
-                    peer.close()
-                except Exception:
-                    pass
+        if self._rtc_shared:
+            return   # the node owns these links; they stay up for the next request
+        with self._rtc_lock:
+            self._rtc_epoch += 1
+        self._rtc_states.close()
+
+    def transport_report(self, endpoint: str) -> dict:
+        """{"transport": "direct (webrtc)" | "tunnel" | "https", "last_failure": str | None} for one peer."""
+        parts = urllib.parse.urlsplit(endpoint)
+        host = parts.hostname or ""
+        try:
+            import ipaddress
+            ipaddress.ip_address(host)
+            plain = "https" if parts.scheme == "https" else "http"
+        except ValueError:
+            plain = TUNNEL
+        with self._rtc_lock:
+            state = self._rtc_states.get(endpoint)
+            peer = state.get("peer") if state else None
+            error = state.get("error") if state else None
+            running = bool(state and state.get("future") is not None and not state["future"].done())
+        if peer is not None and peer.ready:
+            return {"transport": DIRECT, "last_failure": None}
+        if error is None:
+            error = self._rtc_unavailable_reason(endpoint)
+        if error is None and running:
+            error = "negotiating"
+        return {"transport": plain, "last_failure": error}
+
+    def _rtc_unavailable_reason(self, endpoint: str) -> str | None:
+        if not self._rtc_enabled:
+            return "WebRTC disabled (--no-rtc / COMMONNET_RTC=0)"
+        if not self._rtc_endpoint_allowed(endpoint):
+            return "peer endpoint is not eligible for a direct link (needs https and a public host)"
+        try:
+            from commonnet.net import rtc
+        except ImportError as e:
+            return f"rtc module failed to import: {type(e).__name__}"
+        return rtc.describe_unavailable()
 
     def _rtc_endpoint_allowed(self, endpoint: str) -> bool:
         if not self._rtc_enabled:
@@ -287,7 +373,7 @@ class BlockClient:
             return None
         now = time.monotonic()
         retired = None
-        with self._lock:
+        with self._rtc_lock:
             state = self._rtc_states.get(endpoint)
             blocked = False
             if state is not None:
@@ -302,7 +388,7 @@ class BlockClient:
                 blocked = True
             if not blocked and _RTC_SLOTS.acquire(blocking=False):
                 state = {"peer": None, "future": None, "after": now + RTC_RETRY_SECONDS,
-                         "epoch": self._rtc_epoch}
+                         "epoch": self._rtc_epoch, "error": (state or {}).get("error")}
                 self._rtc_states[endpoint] = state
                 try:
                     state["future"] = _RTC_POOL.submit(self._connect_rtc, endpoint, state)
@@ -322,39 +408,52 @@ class BlockClient:
     def _connect_rtc(self, endpoint: str, state: dict) -> None:
         from commonnet.net import rtc
         peer = None
+        started = time.monotonic()
+        failure = None
         try:
             health = self._http_call("GET", endpoint, "/health?caps=1", None, 5.0, retries=0)
             caps = protocol.decode_health_caps(health)
             if rtc.CAPABILITY not in caps:
+                failure = "peer does not offer direct links (older version, or aiortc missing there)"
                 return
 
             def signal(offer):
-                return self._http_call("POST", endpoint, "/rtc/offer", offer, 15.0, retries=0)
+                return self._http_call("POST", endpoint, "/rtc/offer", offer, rtc.SIGNAL_TIMEOUT, retries=0)
 
             peer = rtc.RtcClient(signal, allow_private=self._rtc_allow_private,
                                  stun_urls=self._rtc_stun_urls)
-            peer.connect(timeout=20)
-            with self._lock:
+            peer.connect(timeout=rtc.CONNECT_TIMEOUT)
+            with self._rtc_lock:
                 if self._rtc_states.get(endpoint) is state and state["epoch"] == self._rtc_epoch:
                     state["peer"] = peer
+                    state["error"] = None
                     peer = None
-        except Exception:
-            # Old peers, blocked UDP and failed ICE are ordinary relay cases.
-            # Exception text can contain SDP or credentials, so do not log it.
-            pass
+            if peer is None:
+                self._rtc_log(f"{_label(endpoint)}: direct (webrtc) link up after "
+                              f"{time.monotonic() - started:.1f}s")
+        except Exception as e:
+            # Blocked UDP and failed ICE are ordinary relay cases, but say so: the reason is short and
+            # built from our own messages (never SDP, tokens or exception text from the network).
+            failure = _short(e)
         finally:
+            if failure is not None:
+                with self._rtc_lock:
+                    state["error"] = failure
+                self._rtc_log(f"{_label(endpoint)}: direct link failed, using tunnel/https: {failure}")
             try:
                 if peer is not None:
                     peer.close()
             finally:
                 _RTC_SLOTS.release()
 
-    def _drop_rtc(self, endpoint: str, peer) -> None:
-        with self._lock:
+    def _drop_rtc(self, endpoint: str, peer, reason: str = "direct link dropped mid-request") -> None:
+        with self._rtc_lock:
             state = self._rtc_states.get(endpoint)
             if state is not None and state.get("peer") is peer:
                 state["peer"] = None
+                state["error"] = reason
                 state["after"] = time.monotonic() + RTC_RETRY_SECONDS
+        self._rtc_log(f"{_label(endpoint)}: {reason}; falling back to tunnel/https")
         try:
             peer.close()
         except Exception:
@@ -441,10 +540,10 @@ class BlockClient:
                 server_ms = response.get("server_ms")
                 if (type(server_ms) not in (int, float) or not math.isfinite(server_ms) or server_ms < 0):
                     server_ms = None
-            except Exception:
+            except Exception as e:
                 # Repeating the unchanged RPC through HTTP is safe: block forward,
                 # chain, session, close and truncate already have retry semantics.
-                self._drop_rtc(endpoint, peer)
+                self._drop_rtc(endpoint, peer, f"direct link failed mid-request ({_short(e)})")
             else:
                 self.timings.append({"path": path, "status": status, "reused": True,
                                      "total_ms": (time.perf_counter() - started) * 1000,

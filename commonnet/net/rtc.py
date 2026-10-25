@@ -14,7 +14,9 @@ import ipaddress
 import json
 import math
 import re
+import os
 import secrets
+import socket
 import struct
 import threading
 import time
@@ -23,7 +25,13 @@ from commonnet.net.protocol import MAX_REQUEST_BYTES
 
 CAPABILITY = "rtc_v1"
 PRIVATE_CAPABILITY = "rtc_private_v1"
-DEFAULT_STUN_URLS = ("stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478")
+DEFAULT_STUN_URLS = ("stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478",
+                     "stun:stun1.l.google.com:19302", "stun:global.stun.twilio.com:3478")
+STUN_PROBE_SECONDS = 1.5
+STUN_CACHE_SECONDS = 300.0
+SIGNAL_TIMEOUT = 30.0
+OFFER_TIMEOUT = 30.0
+CONNECT_TIMEOUT = 30.0
 MAX_SDP_BYTES = 64 * 1024
 MAX_CANDIDATES = 32
 MAX_MESSAGE_BYTES = MAX_REQUEST_BYTES + 64 * 1024
@@ -97,16 +105,93 @@ def _description(value, expected_type, allow_private=False):
             kept += 1
         result.append(line)
     if not kept:
-        raise RtcUnavailable("no usable ICE candidates")
+        raise RtcUnavailable("no usable public ICE candidates (STUN unreachable over UDP, or only private "
+                             "addresses)")
     return {"type": expected_type, "sdp": "\r\n".join(result) + "\r\n"}
 
 
-def _config(stun_urls):
+_stun_cache: dict = {}
+_stun_lock = threading.Lock()
+
+
+def _stun_probe(url, timeout=STUN_PROBE_SECONDS):
+    """Does this STUN server answer a binding request from here? (aioice uses only ONE server.)"""
+    host, _, port = url[len("stun:"):].partition("?")[0].partition(":")
+    try:
+        infos = socket.getaddrinfo(host, int(port or 3478), 0, socket.SOCK_DGRAM)
+        family, _, _, _, addr = infos[0]
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout)
+            tid = os.urandom(12)
+            sock.sendto(struct.pack("!HHI", 1, 0, 0x2112A442) + tid, addr)
+            data = sock.recv(2048)
+        return len(data) >= 20 and data[8:20] == tid
+    except (OSError, ValueError, UnicodeError):
+        return False
+
+
+def order_stun(urls, probe=_stun_probe, now=time.monotonic):
+    """(urls reordered so a reachable server comes first, True if any server answered).
+
+    aiortc/aioice honour only the first STUN server in the configuration, so a blocked
+    first choice would otherwise mean no server-reflexive candidate and a silent failure.
+    """
+    urls = tuple(urls)
+    if not urls:
+        return urls, False
+    key = urls
+    with _stun_lock:
+        hit = _stun_cache.get(key)
+        if hit is not None and now() - hit[0] < STUN_CACHE_SECONDS:
+            return hit[1], hit[2]
+    results = {}
+    threads = [threading.Thread(target=lambda u=u: results.__setitem__(u, probe(u)), daemon=True) for u in urls]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(STUN_PROBE_SECONDS + 1)
+    good = [u for u in urls if results.get(u)]
+    ordered = tuple(good + [u for u in urls if u not in good])
+    with _stun_lock:
+        _stun_cache[key] = (now(), ordered, bool(good))
+    return ordered, bool(good)
+
+
+def _config(stun_urls, probe=True):
     from aiortc import RTCConfiguration, RTCIceServer
     urls = DEFAULT_STUN_URLS if stun_urls is None else tuple(stun_urls)
     if len(urls) > 4 or any(not isinstance(u, str) or len(u) > 256 or not u.startswith("stun:") for u in urls):
         raise RtcProtocolError("RTC STUN configuration is invalid")
+    if probe and stun_urls is None:
+        urls, _ = order_stun(urls)
     return RTCConfiguration(iceServers=[RTCIceServer(urls=u) for u in urls])
+
+
+def join_summary(enabled: bool = True) -> str:
+    """One log line for join time: can this machine make direct (webrtc) links, and with what STUN."""
+    if not enabled:
+        return "direct (webrtc): off (--no-rtc); peers are reached over tunnel/https"
+    reason = describe_unavailable()
+    if reason:
+        return f"direct (webrtc): UNAVAILABLE, peers are reached over tunnel/https only: {reason}"
+    import aiortc
+    ordered, reachable = order_stun(DEFAULT_STUN_URLS)
+    if not reachable:
+        return (f"direct (webrtc): aiortc {getattr(aiortc, '__version__', '?')} present but no STUN server "
+                "answered over UDP; direct links will likely fail (UDP blocked?) and fall back to tunnel/https")
+    return (f"direct (webrtc): ready (aiortc {getattr(aiortc, '__version__', '?')}, STUN {ordered[0][5:]}); "
+            "links are negotiated on first use, no TURN relay")
+
+
+def describe_unavailable() -> str | None:
+    """Why this machine cannot make direct links, or None when it can (short, no secrets)."""
+    if not available():
+        return "aiortc is not installed in this Python (update the runtime: pip install aiortc==1.15.0)"
+    try:
+        import aiortc  # noqa: F401
+    except Exception as e:  # a native dependency (av, cryptography, pylibsrtp) failed to load
+        return f"aiortc failed to import: {type(e).__name__}: {str(e)[:100]}"
+    return None
 
 
 def _encode(value):
@@ -311,7 +396,7 @@ class RtcServer:
         self._links = {}
         self._closed = False
 
-    def offer(self, offer, timeout=15):
+    def offer(self, offer, timeout=OFFER_TIMEOUT):
         checked = _description(offer, "offer", self.allow_private)
         if self._closed or not available():
             raise RtcUnavailable("RTC is unavailable")
@@ -319,14 +404,14 @@ class RtcServer:
             return _get_runtime().run(self._offer(checked), timeout)
         except (RtcUnavailable, RtcProtocolError):
             raise
-        except Exception:
-            raise RtcUnavailable("RTC offer failed") from None
+        except Exception as e:
+            raise RtcUnavailable(f"RTC offer failed: {type(e).__name__}") from None
 
     async def _offer(self, offer):
         from aiortc import RTCPeerConnection, RTCSessionDescription
         if self._closed or len(self._pcs) >= self.max_connections:
             raise RtcUnavailable("RTC connection limit reached")
-        pc = RTCPeerConnection(_config(self.stun_urls))
+        pc = RTCPeerConnection(await asyncio.to_thread(_config, self.stun_urls))
         self._pcs.add(pc)
 
         @pc.on("datachannel")
@@ -392,18 +477,19 @@ class RtcClient:
                 "ice_state": self._pc.iceConnectionState if self._pc is not None else "new",
                 "candidate_policy": "private-test" if self.allow_private else "public"}
 
-    def connect(self, timeout=20):
+    def connect(self, timeout=CONNECT_TIMEOUT):
         if self._closed or not available():
             raise RtcUnavailable("RTC is unavailable")
         with self._connect_lock:
             if self.ready:
                 return
             try:
-                _get_runtime().run(self._connect(timeout), timeout + 1)
+                # The budget is for the channel to open; ICE gathering and signaling come first.
+                _get_runtime().run(self._connect(timeout), timeout + SIGNAL_TIMEOUT + 15)
             except (RtcUnavailable, RtcProtocolError):
                 raise
-            except Exception:
-                raise RtcUnavailable("RTC connection failed") from None
+            except Exception as e:
+                raise RtcUnavailable(f"RTC connection failed: {type(e).__name__}") from None
 
     async def _connect(self, timeout):
         from aiortc import RTCPeerConnection, RTCSessionDescription
@@ -411,7 +497,7 @@ class RtcClient:
             raise RtcUnavailable("RTC client is closed")
         if self._pc is not None:
             await self._pc.close()
-        pc = self._pc = RTCPeerConnection(_config(self.stun_urls))
+        pc = self._pc = RTCPeerConnection(await asyncio.to_thread(_config, self.stun_urls))
         self._link = link = _Link(pc, pc.createDataChannel("commonnet-rpc-v1", ordered=True))
 
         @pc.on("connectionstatechange")
@@ -425,9 +511,14 @@ class RtcClient:
             answer = await asyncio.to_thread(self.signaler, offer)
             answer = _description(answer, "answer", self.allow_private)
             await pc.setRemoteDescription(RTCSessionDescription(**answer))
-            await asyncio.wait_for(link.opened.wait(), timeout)
+            try:
+                await asyncio.wait_for(link.opened.wait(), timeout)
+            except asyncio.TimeoutError:
+                raise RtcUnavailable(f"ICE/DTLS did not connect within {timeout:g}s (ice={pc.iceConnectionState}, "
+                                     f"conn={pc.connectionState}); UDP blocked or NAT too strict, no TURN") from None
             if self._closed or link.closed or not self.ready:
-                raise RtcUnavailable("RTC data channel did not open")
+                raise RtcUnavailable(f"RTC data channel did not open (ice={pc.iceConnectionState}, "
+                                     f"conn={pc.connectionState})")
         except BaseException:
             await pc.close()
             link.close()

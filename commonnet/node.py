@@ -498,6 +498,13 @@ class Node:
         self.table.merge(record)
         return record
 
+    def _log_direct_capability(self) -> None:
+        try:
+            from commonnet.net import rtc
+            self.log(rtc.join_summary(os.environ.get("COMMONNET_RTC", "1") != "0"))
+        except Exception as e:   # visibility only: never stop a node from joining
+            self.log(f"direct (webrtc): could not be checked ({type(e).__name__})")
+
     # -- life cycle ----------------------------------------------------------------------------
 
     def start(self) -> "Node":
@@ -529,6 +536,7 @@ class Node:
         self._push_to_peers()
         self.write_status()
         self.log(f"up at {self.url}")
+        self._log_direct_capability()
         self.log(f"you are part of the network. A friend can join through you with:  common join --network {self.url}")
         if self._api_port is not None:
             self._start_api()
