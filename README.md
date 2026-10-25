@@ -2,361 +2,141 @@
 
 ![Common.](assets/common-banner.png)
 
-**The Common Network Alpha — v0.1.13**
+**v0.4**
 
-The working tree also contains the **decentralised layer network**: one model split across
-everyone's machines, with no central server, joined with `common join --network`. See
-[docs/layer-network.md](docs/layer-network.md). (It replaced the operator-managed v0.2 RPC-group
-prototype, which has been removed.)
+Common Network is a distributed LLM inference network. It splits one large
+model's layers across volunteer machines, in the style of
+[Petals](https://github.com/bigscience-workshop/petals), so a model too big for
+one computer can run on many ordinary ones. There is no central inference
+server: peers find each other, build their own routes, and replace a peer that
+drops out mid-generation.
 
-A South Australian nonprofit building decentralised AI.
-Small models on participants' devices, routed and combined. No single company owns the gate.
+A South Australian nonprofit building decentralised AI. [commonai.com.au](https://commonai.com.au)
 
-[Learn more at commonai.com.au](https://commonai.com.au)
+## Install and join
 
-## Install and set up
-
-**1. Install Common.**
-
-macOS / Linux — paste into Terminal:
+macOS / Linux:
 
 ```bash
 curl -fsSL https://commonai.com.au/install.sh | sh
 ```
 
-Windows — paste into PowerShell:
+Windows (PowerShell):
 
 ```powershell
 irm https://commonai.com.au/install.ps1 | iex
 ```
 
-**2. Close your terminal and open a new one.** The old window can't see the new
-command yet.
-
-**3. Donate a machine.** This picks a model that fits your computer, downloads
-it, and puts you on the network:
+Open a new terminal, then:
 
 ```bash
-common join
-```
-
-The first `common join` fetches a small `llama-server` binary (12–20 MB) and
-then the model's weights, and remembers both. Later runs start straight from
-what is already on disk. There is nothing else to install first — no Ollama, no
-separate model store, no second product.
-
-Leave that window open — it's your machine being part of the network. (Or run
-`common join --permanent` to have it run quietly in the background and start
-itself at login.)
-
-**4. Ask the network something.** In a second window:
-
-```bash
+common join                      # serve a slice of the default model
 common ask "What's a good way to learn recursion?"
 ```
 
-Or run `common` on its own for a back-and-forth session.
+`common join` sets itself up on first run (private Python environment, model
+runtime, code), picks the layers the network needs most that fit your memory,
+downloads only those layers, and starts serving. Ctrl+C leaves cleanly. Add
+`--permanent` to keep serving after reboots.
 
-**Why join first?** The network answers its contributors — asking requires a
-machine that's donating. `common join` sets that up for you and stores the
-credential; you don't have to handle it yourself.
+Backends: Apple silicon (MLX), NVIDIA GPUs on Windows/Linux (NF4), and CPU-only
+machines (PyTorch, slower; routes prefer GPU peers). The NVIDIA path has not yet
+been verified on real hardware; see the status notes in
+[docs/layer-network.md](docs/layer-network.md).
 
-### Useful commands
+### Choosing a network
 
 ```bash
+common join --network bonsai-8b        # also: bonsai-2-9b, bonsai-27b, bonsai-2-27b, qwen3-8b
+common join --network URL              # a network a friend runs (any peer's URL)
+common join --network manifest.json
+```
+
+A network is defined by a manifest: the model and the fixed layer boundaries
+every peer's window is made of. See [docs/bonsai-networks.md](docs/bonsai-networks.md).
+
+### Useful `join` flags
+
+| Flag | Effect |
+|---|---|
+| `--local-front N\|auto\|on` | Hold the first layers on your machine and run them in your own chat client, so peers never see your prompt tokens (they get layer-N hidden states, which are not encrypted) and one network hop disappears. Costs memory (about 1 GB for 9 layers of Qwen3-8B 4-bit). Off by default. |
+| `--direct` | Experimental. Serve over TLS on your own public address and be found through a Kademlia DHT, with the Cloudflare tunnel only as fallback. A plain `common join` already tries this automatically; `--no-direct` forces tunnel only. |
+| `--no-draft` | Turn off speculative decoding in the local chat API. |
+| `--layers A-B` | Serve exactly this window instead of the one the network picks. |
+| `--no-api` / `--api PORT` | Skip or move the local OpenAI-compatible API (default `http://127.0.0.1:11440/v1`). |
+
+## How it works
+
+- **Token-ID chain.** The client sends token IDs to the first peer, peers pass
+  hidden states along the chain, and the last peer returns the next token ID.
+  Only small activations travel between peers. See
+  [docs/token-id-chain.md](docs/token-id-chain.md).
+- **Link compression.** Hidden states between peers are sent as int8 by default
+  (one scale per 64 values). `COMMONNET_ACTIVATION_CODEC=int4_group` selects int4
+  (smaller, with a quality cost); `float` disables compression. Older peers fall
+  back automatically.
+- **Common Flash speculative decoding.** On by default for greedy requests
+  (`temperature` 0; `common ask` sends 0). A small local drafter guesses several
+  tokens and the network verifies them in one pass, with output identical to
+  non-speculative greedy decoding. The drafter is MLX on Macs and PyTorch
+  elsewhere. Not available for networks whose model cannot roll back (Bonsai 2
+  9B/27B). Gains on a real wide-area network vary and are still being measured.
+  See [docs/flash-drafter.md](docs/flash-drafter.md).
+- **Resilience.** If another peer holds the same layers, the client switches to
+  it and replays what it sent; if a stage loses every peer, a spare peer moves
+  over.
+- **Discovery.** Peers gossip signed records. The production gateway also runs a
+  small directory (rendezvous) so `common join` needs no typed address; it never
+  has to be trusted, since readers verify signatures. Direct mode adds a DHT.
+
+Everything is documented in [docs/layer-network.md](docs/layer-network.md).
+
+### Honest limits
+
+- The network is open. Peers see activations, which reveal a lot about the text.
+  Do not send private prompts over a public network.
+- Nothing proves a peer computes honestly; treat it as cooperative, like early Petals.
+- Single-stream speed is bounded by the number of stages and the network. More
+  peers add capacity and resilience, not speed.
+- Direct mode and the NVIDIA and CPU paths are experimental or lightly tested.
+
+## Commands
+
+```bash
+common join           # put this machine on the network
+common ask "..."      # ask the network (or `common` for an interactive session)
+common ask --temperature 0.7 "..."   # sampled instead of greedy (no speculation)
 common peers          # who else is on the network right now
-common peers --all    # ...including machines that have since left
-common status         # your node: health, position, requests served
-common recommend      # what specialist the network is short of
-common report         # an answer you got was bad — say so, and send the evidence
-common reports        # what you've reported, and anything still waiting to send
+common status         # your node: health and requests served
+common report         # an answer was bad: send the evidence (only after you approve it)
 common privacy        # what the network keeps, and what it doesn't
 common leave          # take your machine off the network
 common help           # everything else
 ```
 
-**If an answer is wrong**, `common report "it said Sydney" --reason wrong` sends
-it back with the question and answer attached. Nothing leaves your machine until
-you've read exactly what would go and said yes — decline, and nothing is kept at
-all. The node that answered you could already read the question; a report also
-shows it to the gateway operator, which is the point, since that's who can look
-at why the answer was bad. `--reason` takes one of `made-up`, `wrong`,
-`off-topic`, `truncated`, `refused`, `format`, `slow`, `other`.
+Any OpenAI-compatible client can use the local API at `http://127.0.0.1:11440/v1`
+while `common join` is running.
 
-Using an OpenAI SDK instead? Point it at the gateway and pass your node token
-(printed by `common join`, stored in `~/.common-network/identity.json`) as the
-API key.
+## Gateway
 
----
-
-The AI intelligence layer is being enclosed by a handful of corporations — the
-same way English common land was enclosed and privatised. **Common** is the
-counter-enclosure: a permissionless network where anyone can contribute a
-model as a node, and requests are answered by the best available capability,
-not by a corporate gatekeeper.
-
-Common speaks the OpenAI API. Point any existing OpenAI SDK client at the
-gateway and pass your node token as the API key — every response tells you
-exactly which machines answered it, and why. The commons should be legible.
-
-**This is the Alpha: a model-donation platform.** Anyone can donate a machine
-and a model — a school lab, a spare laptop, a desktop with a spare GPU — and
-the network answers every request from the best available donation. One
-request, one machine, full visibility into which machine answered and why.
-And the network answers its **contributors**: a request must carry the node
-token of a registered node, so donated compute serves donors rather than
-anonymous bulk traffic.
-
-```
-$ common ask "I'm 8 weeks behind on $340/week rent in SA. What do I owe and
-              can my landlord evict me?"
-
-  answered by   cgla-legal-node
-  chosen from   3 nodes, margin 0.21
-```
-
-**Composition is built, but off by default.** v0.1.1 also contains the next
-step — sending a request that spans domains to **several specialists at once**,
-checking their arithmetic deterministically, and having a third model
-synthesise one answer. That is the mechanism a future version will need to be
-competitive with a frontier model, but it has not been proven yet, so Alpha
-ships with `COMPOSE_MODE=never` and does not claim it. It can be turned on
-per-request with `common ask --compose`, per-gateway with `COMPOSE_MODE=auto`,
-or tested end-to-end with `testing/compose-test/` — see
-["Does it actually answer better?"](#does-it-actually-answer-better) below.
-
-## Does it actually answer better?
-
-**Unknown, and this repository is careful not to claim otherwise.**
-
-The honest status: v0.1's experiments (`testing/seam-findings.md`) tested
-composition and found **no gain** — then diagnosed exactly why, and the
-diagnosis is what this version is built from. Three findings, three design
-decisions:
-
-| Finding (v0.1, measured) | What v0.1.1 does |
-|---|---|
-| Composing models where one dominates the other cannot help — you can only dilute the stronger one. Experiment 2 did this without checking. | Composition is **gated**. The gateway refuses to compose unless different nodes genuinely lead different domains. Every refusal is explained in `X-Common-Compose-Reason`. |
-| Chaining specialists *damages* output — routing a draft through a maths model dropped the prose win rate to 0.188. Parallel + aggregator was neutral (0.438). | **Parallel fan-out only.** Sequential chaining is out of scope for a measured reason. |
-| The one intervention that beat the noise floor (+0.203): recompute derivable values at the receiver. Four other plausible fixes were all noise. | The aggregator never sees raw specialist output alone — it gets a **deterministic verification report** alongside it. |
-
-What is still unproven is whether a *genuinely* non-dominated panel beats its
-own best member. v0.1 could not test it: the pre-flight searched all 411
-OpenRouter model IDs and found **no maths-tuned model hosted anywhere on it**.
-Common runs local weights, where `mathstral`, `phi4-mini-reasoning` and
-`sqlcoder` all resolve today. The blocker was one hosted catalogue's economics,
-not the world — narrow specialists are unprofitable to serve as an API and free
-to serve on donated hardware, which is the network's whole thesis.
-
-`testing/compose-test/` is the instrument. **It has not been run against live
-models.** Until it has, composition here is a well-founded hypothesis with a
-gate on it — not a result.
-
-## How it works
-
-1. An operator registers a node — an OpenAI-compatible endpoint plus a short
-   capability profile and domain tags.
-2. A client sends a standard `POST /v1/chat/completions`, carrying the token
-   of a node it registered. With `REQUIRE_CONTRIBUTION` on — the default — a
-   request without a registered node's token is refused with 401. OpenAI SDK
-   clients pass the token as the API key; `common` and the chat client pick
-   it up from `~/.common-network/identity.json`, which `common join` writes.
-3. The gateway embeds the request and scores every healthy node.
-4. **In Alpha, the best node answers.** Forward, fall back to the runner-up
-   once on failure. If the best specialist's match is weak, a confident
-   generalist answers instead.
-5. **If composition has been turned on** (`COMPOSE_MODE=auto`/`always`, or the
-   `X-Common-Compose` header), the gateway first decides whether a panel is
-   worth forming:
-   - Does the request span two or more declared domains?
-   - Is a *different* node best at each of them?
-   - If one node is best at all of them, it is not dominated by anything — route
-     to it alone. Composing could only dilute it.
-   A panel asks every member in parallel, verifies, and aggregates.
-6. Response headers say what happened: `X-Common-Topology`, `X-Common-Node`,
-   `X-Common-Panel`, `X-Common-Aggregator`, `X-Common-Checks-Failed`,
-   `X-Common-Compose-Reason` — including why a request was *not* composed.
-
-### Verification
-
-The panel's answers are checked by Python before a model ever sees them:
-
-- **Arithmetic is recomputed.** Any calculation a specialist showed its working
-  for is re-derived in `Decimal` and compared. Rounding is not an error; a
-  genuine mistake is. The aggregator is handed the *corrected* value.
-- **Cross-specialist disagreement is surfaced.** When two specialists state
-  different values for the same named quantity, the aggregator is told, and told
-  not to silently pick one.
-
-No model verifies another model — a model checking a model reproduces the exact
-failure this is meant to catch. It also **flags rather than rewrites**: the
-specialist's text is never silently edited, because a corrected answer nobody
-can audit is not legible.
-
-It only checks what is genuinely derivable from the text. Where hand-written
-derivation rules would be needed, it does nothing, because where those rules
-come from at scale is the honest open research question — not something to
-paper over.
-
-## Running your own gateway
-
-Everything above joins the shared network. This section is for running a
-gateway of your own — a school, a lab, a fork.
-
-Requirements: Python 3.11+, PostgreSQL with `pgvector`.
+The v0.1 gateway (node registry, request routing, specialist composition, the
+catalogue) has been retired. `gateway/` is now a small signpost service: `/health`,
+`/manifest`, `/seeds`, and the rendezvous directory (`POST /announce`,
+`GET /directory`, `POST /check`) that lets `common join` find peers without a
+typed address. Everything else returns 410 Gone. Details:
+[docs/layer-network.md](docs/layer-network.md#gateway-directory-rendezvous).
 
 ```bash
-cd gateway
-uv venv --python 3.11 .venv          # or: python3.11 -m venv .venv
-uv pip install -p .venv/bin/python -r requirements.txt
-
-createdb common_network
-psql -d common_network -c "create extension if not exists vector;"
-DATABASE_URL=postgresql://localhost/common_network python -m app.migrate
-
-cp .env.example .env                 # edit DATABASE_URL / OPENROUTER_API_KEY
-.venv/bin/uvicorn app.main:app --reload
+cd join && python test_join.py
+cd common && python test_common.py
+cd gateway && python -m unittest discover tests
 ```
-
-Upgrading from v0.1: run `python -m app.migrate` — it applies every migration
-in order and is idempotent. Existing decision rows read back as
-`topology: "single"`, which is what they were.
-
-```bash
-curl http://localhost:8000/v1/chat/completions -i \
-  -H "Content-Type: application/json" \
-  -d '{"model":"auto","messages":[{"role":"user","content":"Explain recursion"}]}'
-```
-
-The bare curl works locally because the demo `.env` sets
-`REQUIRE_CONTRIBUTION=false` (its seed nodes have no tokens). On a gateway
-running the shipped default, add `-H "X-Common-Node-Token: <what common join
-printed>"` — or pass the token as the API key from any OpenAI SDK client.
-
-Or open **`/dashboard`**.
-
-### Tests
-
-Three suites, all stdlib-only, all run from their own directory:
-
-```bash
-cd gateway && python tests/run_all.py    # the gateway: 14 suites
-cd join    && python test_join.py        # the worker and the runtime: 66 checks
-cd common  && python test_common.py      # the CLI: 128 checks
-```
-
-No pytest, no database, no network beyond localhost, no embedding model — the
-suites stub what they need, so there is no reason not to run them. There is no
-CI yet, which is exactly why they are listed here: a test nobody runs is
-decoration.
-
-All three are safe to run on a working machine. `test_common.py` points the CLI
-at a temporary install directory and a gateway that does not exist; it never
-reads or writes `~/.common-network`.
-
-## Contributing a node: the other options
-
-[Install and set up](#install-and-set-up) covers the normal path. `common join`
-also takes flags for labs and long-running machines:
-
-```bash
-common join                 # over a Cloudflare tunnel (the default)
-common join --lan           # over the local network — no tunnel, nothing exposed
-common join --permanent     # run in the background, start at login
-```
-
-`--lan` is for computer labs and anywhere the gateway is on the same network.
-It skips `cloudflared` entirely, and there is nothing to configure on the node:
-the Common worker already listens on every interface, and the model runtime
-behind it is held to localhost. If the worker turns out not to be reachable from
-the rest of the network, `common join --lan` says so and stops — otherwise you
-get a node that health-checks green from its own machine and is invisible to
-every other one.
-
-On a managed network, LAN mode needs outbound HTTPS to `registry.ollama.ai`
-(one-time, for the model weights), `github.com` with
-`release-assets.githubusercontent.com` (one-time, for the model runtime, and to
-check for updates), and `raw.githubusercontent.com` (the self-update); plus
-intra-LAN TCP on `11435` (the worker) and `8000` (the gateway). Client/AP
-isolation is the usual thing that blocks it.
-
-### What should I install?
-
-```bash
-common recommend                   # what the network is short of
-common recommend --machines 20     # plan a whole lab at once
-```
-
-The lab planner matters more than it looks. Twenty machines each installing the
-best model they can fit produces twenty copies of one generalist — a network
-that cannot beat its own best node however large it grows. `--machines` spreads
-them across lanes and allocates one aggregator, because a panel needs members
-who are each best at *something*, not members who are each pretty good at
-everything.
-
-## Endpoints
-
-| Endpoint | What it gives you |
-|---|---|
-| `POST /v1/chat/completions` | OpenAI-compatible. `X-Common-Compose: never\|auto\|always` overrides composition per request. Contribution-gated by default: send a registered node's token (`X-Common-Node-Token`, or the `Authorization: Bearer` API-key slot). |
-| `GET /nodes`, `POST /nodes`, `DELETE /nodes/{id}` | The registry. Registration is permissionless. |
-| `GET /dashboard` | Public status: nodes, coverage, catalogue, routing, recent decisions. |
-| `GET /admin?token=…` | Operators view: failing nodes, error rates, limiter state. 404s unless `ADMIN_TOKEN` is set. |
-| `GET /source` | The repository this instance was built from (AGPL §13). |
-| `GET /decisions/recent?topology=panel` | The routing log, filterable by topology. |
-| `GET /decisions/composition` | How often each topology runs, and what the verifier caught. |
-| `GET /demand/gaps` | Under-served domains, and demand nothing in the catalogue covers. |
-| `GET /demand/plan?machines=20&ram_gb=8` | An install plan for a set of machines. |
-| `GET /catalogue`, `POST /assign` | The specialist catalogue, and what a given machine should run. |
-| `WS /nodes/{id}/connect` | Authenticated outbound-only Android/iOS worker channel; see [the protocol](gateway/MOBILE-NODES.md). |
-
-## The catalogue
-
-`catalogue/catalogue.seed.yaml` is the source of truth for what the network will
-auto-install. The live catalogue currently contains Bonsai 2 2B/4B/9B and the
-distinct first-generation Bonsai 8B. Bonsai 2 uses ternary `Q2_0` GGUF; the 8B
-entry uses the upstream-compatible `Q2_0_g64` GGUF. Stock upstream llama.cpp
-needs build b11555 or later for Bonsai 2's Hadamard-activation runtime and does
-not support the smaller `PQ2_0`/`PTQ1_0` packings. The non-`g64` Bonsai 8B
-layout is fork-only. Catalogue requirements and format caveats are exposed by
-`GET /catalogue` and `POST /assign`; do not substitute standard Ollama models.
-Mobile contribution eligibility and its protocol are documented in
-[gateway/MOBILE-NODES.md](gateway/MOBILE-NODES.md).
 
 ## Security
 
-Registration is permissionless — that is the thesis — which makes the security
-model worth stating rather than assuming. Using the network is gated on
-contributing to it (`REQUIRE_CONTRIBUTION`, on by default), requests are
-rate-limited per client, node registration requires the node's private token,
-and endpoint URLs are re-validated against cloud-metadata ranges on every
-health pass. What a stranger can and cannot do, what an operator of a public
-gateway should set, and the known limits (`common test` executes model code;
-a node is trusted for identity, not behaviour): see
-[SECURITY.md](SECURITY.md).
-
-## Scope (Alpha)
-
-**What Alpha ships as:** a model-donation platform. Permissionless node
-contribution, contribution-gated access (the network answers its donors),
-per-client rate limiting, legible routing to the best donated machine, health
-checking, demand-gap and unserved-cluster analysis, fleet install planning,
-LAN joining, graph-overlay catalogue entries.
-
-**Built but off by default:** parallel multi-specialist composition, gated on
-non-domination, with deterministic arithmetic re-derivation and cross-specialist
-disagreement detection. It runs only where deliberately enabled
-(`COMPOSE_MODE`, or `X-Common-Compose` per request) until compose-test has
-proven a non-dominated panel beats its own best member against live models.
-
-**Still explicitly out of scope:** no DHT/peer-to-peer/consensus, no token or
-incentive mechanism, no weight merging or Soup of Experts, no sequential
-specialist chaining (measured harmful), no learned router, no vector-native
-model-to-model communication, no production-grade auth.
-
-`/demand/gaps` reports demand clusters the catalogue cannot serve — the signal
-Soup of Experts would need. It does not merge weights, and says so where the
-theory would claim otherwise.
+The network is open and cooperative: peers see activations and nothing proves a
+peer computes honestly. What a stranger can and cannot do, and the known limits,
+are in [SECURITY.md](SECURITY.md).
 
 ## Licence
 
