@@ -1499,6 +1499,8 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
             argv += [f"--api={args.api}"]
         if getattr(args, "layers", None):
             argv += [f"--layers={args.layers}"]
+        if getattr(args, "local_front", None):
+            argv += [f"--local-front={args.local_front}"]
         argv += _direct_flags(args)   # [] unless --direct, so existing services are unchanged
         return argv + ([f"--network={args.network}"] if args.network else ["--network"])
     argv = [
@@ -1759,6 +1761,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--network", nargs="?", const="", default=None, metavar="MODEL|URL|FILE", help="Join the decentralised layer network: serve a slice of the shared model as a peer. Choose qwen3-8b, bonsai-8b, bonsai-27b, bonsai-2-9b, or bonsai-2-27b, or give a seed peer URL or manifest file (default: COMMONNET_NETWORK or the built-in seeds). No gateway registration")
     parser.add_argument("--layers", metavar="A-B", help="With the layer network: serve exactly this window of layers (for example 27-36) instead of the one the network picks for you. It must start and end on a stage boundary and fit in memory")
+    parser.add_argument("--local-front", metavar="N|auto|on", default=None, help="With the layer network: also hold the first layers (N = a stage boundary, on = the first stage, auto = only if this machine is fast and has the memory) and run them in the chat client, so your prompts never leave this machine and the first network hop disappears. Costs memory (about 1 GB for 9 layers of Qwen3-8B 4-bit) and helps only this machine's own chat. Default off (or set COMMONNET_LOCAL_FRONT)")
     parser.add_argument("--no-api", action="store_true", help="With the layer network: do not serve the local chat API (on by default, so `common ask` and chat apps work). Saves the ~1 GB client part of the model")
     parser.add_argument("--api", nargs="?", const=11440, default=None, type=int, metavar="PORT", help="With --network: also serve an OpenAI-compatible chat API on 127.0.0.1:PORT (default 11440) from the same process, so a desktop app or any OpenAI-style client can chat with the network. The client part of the model (about 1 GB for Qwen3-8B) loads in the background")
     parser.add_argument("--no-direct", action="store_true", help="With the layer network: tunnel only, never try a direct connection (peers are still found through the gateway directory)")
@@ -1820,6 +1823,8 @@ def main() -> None:
         parser.error("--bootstrap, --public-ip, --external-port, --direct-port, --dht-port and --no-tunnel-fallback need --direct")
     if args.layers and mode != "network":
         parser.error("--layers is only used with the layer network (--network, or a plain join on a machine that can serve it)")
+    if args.local_front and mode != "network":
+        parser.error("--local-front is only used with the layer network (--network, or a plain join on a machine that can serve it)")
     if mode == "network" and args.api is None and not args.no_api and not args.remove_permanent:
         args.api = 11440  # on by default: `common ask`, `common chat` and chat apps need this peer's local API
 
@@ -1850,6 +1855,8 @@ def main() -> None:
         node_args = [] if args.api is None else ["--api", str(args.api)]
         if args.layers:
             node_args += ["--layers", args.layers]
+        if args.local_front:
+            node_args += ["--local-front", args.local_front]
         node_args += _direct_flags(args)
         # Direct mode with no network named: the built-in manifest and the DHT, no seed URL (name one with --network URL)
         run_network_member(args.network or ("dht" if args.direct else None), node_args)

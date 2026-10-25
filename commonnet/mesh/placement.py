@@ -128,16 +128,18 @@ def _penalty(record: dict, now: float, previous_backend: str | None, prefer_back
     return penalty
 
 
-def best_route(manifest: Manifest, live, prefer_backend: str | None = None, now: float | None = None) -> list[Hop]:
-    """The chain of peers with the fewest hops, then the lowest penalty; each hop lists its identical-window replicas."""
+def best_route(manifest: Manifest, live, prefer_backend: str | None = None, now: float | None = None,
+               start: int = 0) -> list[Hop]:
+    """The chain of peers with the fewest hops, then the lowest penalty; each hop lists its identical-window replicas.
+    start > 0 (a local front holds layers [0, start)): the chain covers [start, end) and its first window starts there."""
     now = time.time() if now is None else now
     groups: dict[tuple[int, int], list[dict]] = {}
     for r in _serving(manifest, live):
         groups.setdefault(_window(r), []).append(r)
     end = manifest.num_layers
     # state: (boundary, backend of the previous hop) -> (hops, penalty, [(window, record), ...])
-    best: dict[tuple[int, str | None], tuple[int, float, list]] = {(0, None): (0, 0.0, [])}
-    reached = {0}
+    best: dict[tuple[int, str | None], tuple[int, float, list]] = {(start, None): (0, 0.0, [])}
+    reached = {start}
     for boundary in manifest.boundaries:
         for (b, prev), (hops, pen, path) in list(best.items()):
             if b != boundary:

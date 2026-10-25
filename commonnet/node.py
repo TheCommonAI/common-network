@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from commonnet import localfront
 from commonnet.mesh import placement
 from commonnet.mesh import directory as mesh_directory
 from commonnet.mesh import gossip as mesh_gossip
@@ -347,10 +348,15 @@ class Node:
                  status: StatusFile | None = None, status_s: float = STATUS_SECONDS,
                  api_port: int | None = None, api_backend=None,
                  fixed_window: tuple[int, int] | None = None,
-                 direct=None, state_dir=None, decider=None, gateway=None):
+                 direct=None, state_dir=None, decider=None, gateway=None, local_front=None):
         # direct (a commonnet.direct.DirectConfig) turns on direct mode: DHT discovery, a TLS block server on a
         # public address, no tunnel unless the node proves unreachable. None (the default) changes nothing.
         self.direct, self.state_dir, self._decider = direct, state_dir, decider
+        # local_front (None | "auto" | "on" | a layer count): also hold layers [0, F) here and run them in the chat client's
+        # process (commonnet/localfront.py). None, the default, changes nothing.
+        self.local_front_setting = local_front
+        self.local_front = None
+        self._free_gib, self._bench_front = localfront.free_gib, localfront.benchmark_ms
         # gateway (a URL, or None): the rendezvous directory. Peers found there become seeds and DHT contacts, and this
         # node's record is announced there. Absent or failing, nothing changes.
         self.gateway = gateway.rstrip("/") if gateway else None
@@ -623,12 +629,14 @@ class Node:
             raise NodeError(f"{e}. This network needs at least "
                             f"{self.manifest.window_gib(*self.manifest.stages()[0], self.hw.backend):.1f} GiB free.") from None
 
-    def _make_block(self, window):
+    def _make_block(self, window, quiet: bool = False):
+        # quiet: loading the local front must not move the node's own status phase
+        set_phase = (lambda _: None) if quiet else self.set_phase
         if self._build_block is not None:
-            self.set_phase("loading")
+            set_phase("loading")
             return self._build_block(window, self.manifest, self.hw)
         if self.stub:
-            self.set_phase("loading")
+            set_phase("loading")
             return StubBlock(*window)
         repo = self.manifest.repo(self.hw.backend)
         if not repo:
@@ -644,17 +652,18 @@ class Node:
             nl = self.manifest.num_layers
             # the first stage also fetches the embedding and the last the final norm + lm_head, so they can take and
             # return token ids (commonnet/net/endio.py); a middle stage downloads exactly what it did before
-            fetch = lambda r, w: hub.Hub(r, log=self._hub_log).fetch(  # noqa: E731
+            fetch = lambda r, w: hub.Hub(r, log=(self.log if quiet else self._hub_log)).fetch(  # noqa: E731
                 layers=tuple(w), ranged=ranged, embed=w[0] == 0 and os.environ.get("COMMONNET_IDS", "1") != "0",
                 head=w[1] == nl and os.environ.get("COMMONNET_IDS", "1") != "0")
         self.log(f"downloading layers {window[0]}-{window[1]} of {repo} (only these)...")
-        self.progress.reset()
-        self.set_phase("downloading")
+        if not quiet:
+            self.progress.reset()
+        set_phase("downloading")
         try:
             checkpoint = fetch(repo, window)
         except Exception as e:
             raise NodeError(f"the download failed ({e}); join again to resume") from None
-        self.set_phase("loading")
+        set_phase("loading")
         # Qwen activations pass float16's range on some prompts (NaN logits), so the MLX block computes in
         # bfloat16 and the hidden state between peers is float32. An explicit COMMONNET_DTYPE wins, then the
         # manifest's per-backend dtype. COMMONNET_MLX_CACHE_MB is left to the environment untouched.
@@ -898,6 +907,60 @@ class Node:
                                            "Hadamard packed); this machine can still serve layers, start it with --no-api")
         return NetworkBackend(network, checkpoint, fmt=fmt, hidden_dtype=torch.float32)
 
+    def _init_local_front(self, network) -> None:
+        """--local-front: hold layers [0, F) here for the chat client. Never fatal: without it the route is the whole model."""
+        setting = self.local_front_setting
+        if setting is None:
+            return
+        try:
+            front, why = self._build_front(setting)
+        except Exception as e:
+            front, why = None, f"{type(e).__name__}: {e}"
+        if front is None:
+            self.log(friendly(f"local front off: {why}"))
+            return
+        self.local_front = front
+        network.local_front = front
+        self.log(f"local front on: layers 0-{front.end} run in this process ({why})")
+
+    def _build_front(self, setting):
+        manifest = self.manifest
+        nl = manifest.num_layers
+        F = localfront.front_layers(setting, manifest)
+        with self._lock:
+            block, window = self._block, self.window
+        if block is not None and window and window[0] == 0:
+            if window[1] >= nl:
+                return None, "this node already serves the whole model"
+            # this node already serves layers from 0: use that block, loaded once, up to its own end
+            front = localfront.LocalFront(block, window[1], owned=False)
+            if not front.has_ids:
+                return None, "the block it serves holds no embedding"
+            return self._front_decision(setting, front, 0.0, reused=True)
+        if self.stub and self._build_block is None:
+            return None, "a stub node has no weights"
+        if setting == "auto":
+            need = manifest.window_gib(0, F, self.hw.backend)
+            free = self._free_gib()
+            decision = localfront.decide_auto(0.0, free, need)   # memory first: do not load what will not fit
+            if not decision.enabled and "free" in decision.reason:
+                return None, decision.reason
+        built = self._make_block((0, F), quiet=True)
+        front = localfront.LocalFront(built, F)
+        if not front.has_ids:
+            front.shutdown()
+            return None, "the first layers were loaded without an embedding"
+        return self._front_decision(setting, front, manifest.window_gib(0, F, self.hw.backend), reused=False)
+
+    def _front_decision(self, setting, front, weight_gib, reused):
+        if setting != "auto":
+            return front, ("reusing this node's own block" if reused else "loaded separately")
+        decision = localfront.decide_auto(self._bench_front(front), self._free_gib() if not reused else 1e9, weight_gib)
+        if decision.enabled:
+            return front, decision.reason
+        front.shutdown()
+        return None, decision.reason
+
     def _start_api(self) -> None:
         from commonnet import serve
         from commonnet.netclient import Network
@@ -929,6 +992,7 @@ class Node:
         self.write_status()
 
     def _load_api_backend(self, lazy, network) -> None:
+        self._init_local_front(network)
         try:
             backend = (self._api_backend or self._default_api_backend)(network)
         except (Exception, SystemExit) as e:  # NetworkBackend exits (not raises) when the manifest names no client repo
@@ -1103,6 +1167,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--backend", choices=["mlx", "nf4", "cpu"], help="override the detected backend")
     p.add_argument("--stage-gib", type=float, help="memory to offer, in GiB (default: detected)")
     p.add_argument("--layers", metavar="A-B", help="serve exactly this window of layers (for example 27-36) instead of the one the network picks; it must start and end on a stage boundary")
+    p.add_argument("--local-front", metavar="N|auto|on", default=None,
+                   help=f"also hold the first N layers (a stage boundary; on = the first stage) and run them in the chat client, so the "
+                        f"prompt never leaves this machine and the first network hop is gone; auto = only if this machine is fast "
+                        f"and has the memory. Default off (or set {localfront.ENV})")
     p.add_argument("--identity-dir", type=Path, help="where this peer's key lives (default: ~/.common-network/net/<network>)")
     p.add_argument("--stub", action="store_true", help="serve an identity block with no weights (tests)")
     p.add_argument("--no-tunnel", action="store_true", help="do not open a tunnel; publish --advertise or the loopback URL")
@@ -1183,9 +1251,10 @@ def main(argv=None) -> int:
             if not m:
                 raise NodeError(f"--layers wants a window like 27-36, got {args.layers!r}")
             fixed_window = (int(m.group(1)), int(m.group(2)))
+        local_front = localfront.setting_from(args.local_front)
         directory = args.identity_dir or HOME / "net" / re.sub(r"[^A-Za-z0-9._-]", "_", manifest.id)
         identity = Identity.load_or_create(Path(directory) / "identity.key")
-    except (NodeError, RecordError, ManifestError) as e:
+    except (NodeError, RecordError, ManifestError, localfront.FrontConfigError) as e:
         print(f"error: {e}", file=sys.stderr)
         status.write(blank_status("error", error=friendly(e)))
         return 2
@@ -1193,7 +1262,7 @@ def main(argv=None) -> int:
     gateway = mesh_directory.gateway_url(default=None if args.stub else mesh_directory.DEFAULT_GATEWAY)
     node = Node(manifest, seeds, identity, hardware, port=args.port, stub=args.stub, tunnel=not args.no_tunnel,
                 advertise=args.advertise, status=status, api_port=args.api, fixed_window=fixed_window,
-                direct=direct, state_dir=directory, gateway=gateway)
+                direct=direct, state_dir=directory, gateway=gateway, local_front=local_front)
 
     def leave(signum, frame):
         node.request_leave()

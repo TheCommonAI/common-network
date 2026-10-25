@@ -23,6 +23,12 @@ from commonnet.net.protocol import DTYPE_WIDTH, MAX_REQUEST_BYTES, Tensor
 _NP = {"float16": np.float16, "float32": np.float32}
 _TORCH = {"float16": torch.float16, "float32": torch.float32}
 OVERHEAD_BYTES = 4096
+FRONT_NAME = "local-front"   # the endpoint name of the local front (layers 0..F run in this process)
+
+
+def _cut_wire(t: Tensor, keep: int) -> Tensor:
+    arr = np.frombuffer(t.data, dtype=_NP[t.dtype]).reshape(t.shape)[:, :keep]
+    return Tensor(tuple(arr.shape), t.dtype, np.ascontiguousarray(arr).tobytes())
 
 
 def to_wire(t: torch.Tensor) -> Tensor:
@@ -82,6 +88,8 @@ class HttpTransport:
     seconds, before raising Unreachable. A newcomer gets the session replayed exactly as the dead
     one held it. Because the replay needs the history, it is kept whenever on_exhausted is set.
     """
+
+    local_front = None   # a commonnet.localfront.LocalFront: layers [0, F) run in this process (endpoint FRONT_NAME)
 
     def __init__(self, urls: dict[str, str], *, token=None, tokens: dict[str, str] | None = None,
                  replicas: dict[str, list] | None = None, max_request_bytes: int = MAX_REQUEST_BYTES,
@@ -275,6 +283,10 @@ class HttpTransport:
         Asks about a throwaway session: a new server says that session is not open (404), an old one has no such path."""
         import uuid
         for ep in endpoints:
+            if ep.name == FRONT_NAME:
+                if not self._front_for(ep).can_truncate:
+                    return False
+                continue
             cached = self._truncate_ok.get(ep.name)
             if cached is None:
                 client, url = self._target(ep.name, self._first_alive(ep.name))
@@ -293,6 +305,9 @@ class HttpTransport:
     def truncate(self, endpoint, session_id: str, length: int, defer: bool = False) -> None:
         """Cut this endpoint's session back to `length` positions. Idempotent. The kept history is cut first, so a
         failover during or after this replays exactly the truncated session."""
+        if endpoint.name == FRONT_NAME:
+            self._front_for(endpoint).truncate(session_id, length)   # the local KV is cut at once, never deferred
+            return
         chain = self._chain_sessions.get(session_id)
         if chain is not None:
             from commonnet.net.protocol import check_start_pos
@@ -305,6 +320,8 @@ class HttpTransport:
                 if entry["start_pos"] < length:
                     kept = dict(entry)
                     kept["ids"] = entry["ids"][:length - entry["start_pos"]]
+                    if entry.get("hidden") is not None:
+                        kept["hidden"] = _cut_wire(entry["hidden"], len(kept["ids"]))
                     history.append(kept)
             chain["history"] = history
             chain["pending_cut"] = length
@@ -341,6 +358,8 @@ class HttpTransport:
     def capabilities(self, endpoint) -> tuple:
         """What the server for this endpoint advertises in /health (ids_in, head_out). Empty for an old server or on
         any failure, so the caller falls back to the original protocol. Cached per endpoint name."""
+        if endpoint.name == FRONT_NAME:
+            return ("ids_in",) if self._front_for(endpoint).has_ids else ()
         cached = self._caps.get(endpoint.name)
         if cached is None:
             client, url = self._target(endpoint.name, self._first_alive(endpoint.name))
@@ -351,20 +370,37 @@ class HttpTransport:
             self._caps[endpoint.name] = cached
         return cached
 
+    def _front_for(self, endpoint):
+        front = self.local_front
+        if front is None or endpoint.name != FRONT_NAME or (endpoint.start, endpoint.end) != (0, front.end):
+            raise ValueError("this route names a local front this transport does not have")
+        return front
+
+    def _split_front(self, endpoints):
+        """(front, remote endpoints): the local front endpoint, if the route starts with one, and the rest."""
+        endpoints = list(endpoints)
+        if endpoints and endpoints[0].name == FRONT_NAME:
+            front = self._front_for(endpoints[0])
+            if len(endpoints) < 2 or endpoints[1].start != front.end:
+                raise ValueError("a local front needs a remote route that starts at its last layer")
+            return front, endpoints[1:]
+        return None, endpoints
+
     def ids_route(self, endpoints) -> bool:
         """True if the first server takes token ids and the last returns them (a single server needs both)."""
         if not endpoints:
             return False
         return "ids_in" in self.capabilities(endpoints[0]) and "head_out" in self.capabilities(endpoints[-1])
 
-    def _chain_hops(self, endpoints) -> list:
-        """Check the actual selected servers, not endpoint-name capability caches."""
+    def _chain_hops(self, endpoints, entry: bool = False) -> list:
+        """Check the actual selected servers, not endpoint-name capability caches.
+        entry=True: the route starts at the local front's last layer and takes hidden states, not ids."""
         from urllib.parse import urlsplit
         from commonnet.net.chain import CAPABILITY, MAX_HOPS, check_hop
         endpoints = list(endpoints)
         if not endpoints or len(endpoints) > MAX_HOPS:
             raise ValueError("chain needs a bounded, nonempty route")
-        previous, hops = 0, []
+        previous, hops = (endpoints[0].start if entry else 0), []
         for ep in endpoints:
             if ep.start != previous or ep.end <= ep.start:
                 raise ValueError("chain route must start at zero and cover contiguous layers")
@@ -388,7 +424,7 @@ class HttpTransport:
             hop = {"name": ep.name, "index": index, "url": wire_url, "token": client.token,
                    "pin": pin, "layers": [ep.start, ep.end], "caps": caps}
             hops.append(hop)
-        if "ids_in" not in hops[0]["caps"] or "head_out" not in hops[-1]["caps"]:
+        if ("ids_in" not in hops[0]["caps"] and not entry) or "head_out" not in hops[-1]["caps"]:
             raise ValueError("chain end peers must hold the embedding and output head")
         for current, following in zip(hops, hops[1:]):
             check_hop({k: following[k] for k in ("url", "token", "pin", "layers")},
@@ -398,17 +434,23 @@ class HttpTransport:
     def chain_route(self, endpoints) -> bool:
         """Capability negotiation before generation; old or unreachable peers fall back."""
         try:
-            self._chain_hops(endpoints)
+            front, remote = self._split_front(endpoints)
+            self._chain_hops(remote, entry=front is not None)
             return True
         except (BlockError, ValueError, KeyError):
             return False
 
     @staticmethod
-    def _chain_body(state, ids, start_pos, which, sampling=None, drafts=None, truncate_to=None):
+    def _chain_body(state, ids, start_pos, which, sampling=None, drafts=None, truncate_to=None, hidden=None):
         hops = state["hops"]
         wire_hops = [{k: h[k] for k in ("url", "token", "pin", "layers")} for h in hops[1:]]
-        body = {"id": state["wire_id"], "ids": list(ids), "start_pos": start_pos,
+        body = {"id": state["wire_id"], "start_pos": start_pos,
                 "layers": hops[0]["layers"], "route": wire_hops, "which": which}
+        if hidden is None:
+            body["ids"] = list(ids)
+        else:   # a local front computed layers [0, F): the first remote hop gets the hidden state, never the ids
+            from commonnet.net.activation_codec import encode_activation
+            body["hidden"] = encode_activation(state.get("codec", "float"), hidden)
         if sampling is not None:
             body["sampling"] = sampling
         if drafts is not None:
@@ -440,7 +482,7 @@ class HttpTransport:
                     self._dead[(hop["name"], hop["index"])] = self._now()
         for ep in endpoints:
             self.refresh_replicas(ep.name)
-        fresh = self._chain_hops(endpoints)  # rejects a failover peer without the new capabilities
+        fresh = self._chain_hops(endpoints, entry=bool(state.get("front")))  # rejects a failover peer without the new capabilities
         needed = CODEC_CAPABILITY.get(state.get("codec"))
         if needed and not all(needed in h["caps"] for h in fresh):
             raise ValueError("replacement chain peer does not support this session's activation codec")
@@ -453,7 +495,7 @@ class HttpTransport:
         state["hops"], state["wire_id"] = fresh, "chain-" + uuid.uuid4().hex
         state["pending_cut"] = None
         for entry in state["history"]:
-            body = self._chain_body(state, entry["ids"], entry["start_pos"], "last")
+            body = self._chain_body(state, entry["ids"], entry["start_pos"], "last", hidden=entry.get("hidden"))
             self._chain_send(state, body)
         for hop in fresh:
             self._active[(hop["name"], state["caller_id"])] = hop["index"]
@@ -479,6 +521,7 @@ class HttpTransport:
         from commonnet.net import protocol
         from commonnet.net.chain import ids as check_chain_ids
         endpoints, token_ids = list(endpoints), check_chain_ids(list(ids))
+        front, remote = self._split_front(endpoints)
         protocol.check_session_id(session_id)
         protocol.check_start_pos(start_pos)
         if which not in ("last", "all"):
@@ -489,14 +532,15 @@ class HttpTransport:
         if state is None:
             if start_pos != 0 or any((ep.name, session_id) in self._open for ep in endpoints):
                 raise ValueError("a new chain session must start at zero")
-            state = {"hops": self._chain_hops(endpoints), "history": [], "pending_cut": None,
-                     "wire_id": "chain-" + uuid.uuid4().hex, "caller_id": session_id, "closed": set()}
+            state = {"hops": self._chain_hops(remote, entry=front is not None), "history": [], "pending_cut": None,
+                     "wire_id": "chain-" + uuid.uuid4().hex, "caller_id": session_id, "closed": set(),
+                     "front": front is not None}
             state["codec"] = self._session_codec(state["hops"])
             self._chain_sessions[session_id] = state
             for hop in state["hops"]:
                 self._open.add((hop["name"], session_id))
                 self._active[(hop["name"], session_id)] = hop["index"]
-        elif [(ep.name, ep.start, ep.end) for ep in endpoints] != [
+        elif [(ep.name, ep.start, ep.end) for ep in remote] != [
                 (h["name"], *h["layers"]) for h in state["hops"]]:
             raise ValueError("a chain session cannot change its route windows")
         committed_end = (state["history"][-1]["start_pos"] + len(state["history"][-1]["ids"])) if state["history"] else 0
@@ -519,14 +563,15 @@ class HttpTransport:
         for offset in range(0, len(token_ids), chunk):
             piece = token_ids[offset:offset + chunk]
             cut = state["pending_cut"] if offset == 0 else None
-            body = self._chain_body(state, piece, start_pos + offset, which, sampling, drafts, cut)
+            wire = to_wire(front.forward(session_id, piece, start_pos + offset)) if front is not None else None
+            body = self._chain_body(state, piece, start_pos + offset, which, sampling, drafts, cut, wire)
             try:
                 reply = self._chain_send(state, body)
             except (Unreachable, RemoteError) as error:
                 if isinstance(error, RemoteError) and error.status not in (404, 409):
                     raise
-                self._chain_restart(state, endpoints, error)
-                body = self._chain_body(state, piece, start_pos + offset, which, sampling, drafts)
+                self._chain_restart(state, remote, error)
+                body = self._chain_body(state, piece, start_pos + offset, which, sampling, drafts, None, wire)
                 reply = self._chain_send(state, body)
             if drafts is not None:
                 accepted = reply.get("accepted")
@@ -534,7 +579,10 @@ class HttpTransport:
                         or reply["ids"][:-1] != list(drafts)[:accepted]):
                     raise protocol.ProtocolError("invalid speculative chain reply")
             state["pending_cut"] = None
-            state["history"].append({"ids": list(piece), "start_pos": start_pos + offset})
+            entry = {"ids": list(piece), "start_pos": start_pos + offset}
+            if wire is not None:
+                entry["hidden"] = wire   # replay for a failed remote peer resends exactly these layer-F states
+            state["history"].append(entry)
             replies.append(reply)
         if drafts is not None or which == "last":
             return replies[-1]
@@ -544,6 +592,13 @@ class HttpTransport:
                 output: str | None = None, which: str = "last", sampling=None):
         """Hidden states in and out (the original call). With ids (hidden None) the server embeds them; with
         output="ids" it returns a list of token ids, for the last position or (which="all") every position."""
+        if endpoint.name == FRONT_NAME:   # the local front: nothing goes over HTTP
+            front = self._front_for(endpoint)
+            if output is not None:
+                raise ValueError("the local front does not return token ids")
+            if ids is not None:
+                return front.forward(session_id, list(ids), start_pos)
+            return front.forward_hidden(session_id, hidden, start_pos)
         name, key = endpoint.name, (endpoint.name, session_id)
         if key not in self._open:
             self.refresh_replicas(name)
@@ -583,6 +638,12 @@ class HttpTransport:
         return out.to(hidden.dtype) if hidden is not None else out
 
     def close(self, endpoint, session_id: str) -> None:
+        if endpoint.name == FRONT_NAME:
+            try:
+                self._front_for(endpoint).close(session_id)   # frees the local KV
+            except Exception:
+                pass
+            return
         chain = self._chain_sessions.get(session_id)
         if chain is not None:
             hop = next((h for h in chain["hops"] if h["name"] == endpoint.name), None)

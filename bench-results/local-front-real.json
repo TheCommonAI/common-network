@@ -1,0 +1,195 @@
+{
+ "config": {
+  "checkpoint": "/Users/mileshedrick/.common-network/commonnet/models/mlx-community/Qwen3-8B-4bit/main",
+  "draft": "mlx-community/Qwen3-0.6B-4bit",
+  "front": 9,
+  "rtt_ms": 30.0,
+  "new_tokens": 48,
+  "repeats": 2,
+  "k": 4,
+  "out": "/private/tmp/claude-501/lf-real.json"
+ },
+ "front_gib": 0.9098096042871475,
+ "front_decode_ms": 13.144333504897077,
+ "identical_output": true,
+ "summary": {
+  "plain_off": {
+   "ms_per_token": 185.9494882812669,
+   "tok_s": 5.378363196415092
+  },
+  "plain_on": {
+   "ms_per_token": 150.58472048447888,
+   "tok_s": 6.64092399245093
+  },
+  "spec_off": {
+   "ms_per_token": 108.67601540621763,
+   "tok_s": 9.885224455222836
+  },
+  "spec_on": {
+   "ms_per_token": 87.66170009372823,
+   "tok_s": 12.07901761895718
+  }
+ },
+ "rows": [
+  {
+   "spec": false,
+   "prompt": 0,
+   "mode": "off",
+   "rep": 0,
+   "tokens": 48,
+   "s": 8.774720374989556,
+   "ms_per_token": 182.80667447894908,
+   "tok_s": 5.470259785920201
+  },
+  {
+   "spec": false,
+   "prompt": 0,
+   "mode": "on",
+   "rep": 0,
+   "tokens": 48,
+   "s": 7.246956000002683,
+   "ms_per_token": 150.9782500000559,
+   "tok_s": 6.623470599239491
+  },
+  {
+   "spec": false,
+   "prompt": 0,
+   "mode": "off",
+   "rep": 1,
+   "tokens": 48,
+   "s": 9.015477542008739,
+   "ms_per_token": 187.82244879184873,
+   "tok_s": 5.324177202631589
+  },
+  {
+   "spec": false,
+   "prompt": 0,
+   "mode": "on",
+   "rep": 1,
+   "tokens": 48,
+   "s": 7.268481250008335,
+   "ms_per_token": 151.42669270850698,
+   "tok_s": 6.603855516576445
+  },
+  {
+   "spec": false,
+   "prompt": 1,
+   "mode": "off",
+   "rep": 0,
+   "tokens": 48,
+   "s": 8.94885608300683,
+   "ms_per_token": 186.43450172930898,
+   "tok_s": 5.363814051177804
+  },
+  {
+   "spec": false,
+   "prompt": 1,
+   "mode": "on",
+   "rep": 0,
+   "tokens": 48,
+   "s": 7.218110165995313,
+   "ms_per_token": 150.37729512490236,
+   "tok_s": 6.649940066879158
+  },
+  {
+   "spec": false,
+   "prompt": 1,
+   "mode": "off",
+   "rep": 1,
+   "tokens": 48,
+   "s": 8.963247749998118,
+   "ms_per_token": 186.7343281249608,
+   "tok_s": 5.355201745930774
+  },
+  {
+   "spec": false,
+   "prompt": 1,
+   "mode": "on",
+   "rep": 1,
+   "tokens": 48,
+   "s": 7.178718917013612,
+   "ms_per_token": 149.55664410445024,
+   "tok_s": 6.686429787108628
+  },
+  {
+   "spec": true,
+   "prompt": 0,
+   "mode": "off",
+   "rep": 0,
+   "tokens": 48,
+   "s": 6.673895374988206,
+   "ms_per_token": 139.03948697892096,
+   "tok_s": 7.192201451028115
+  },
+  {
+   "spec": true,
+   "prompt": 0,
+   "mode": "on",
+   "rep": 0,
+   "tokens": 48,
+   "s": 5.29864783299854,
+   "ms_per_token": 110.38849652080292,
+   "tok_s": 9.058914936952222
+  },
+  {
+   "spec": true,
+   "prompt": 0,
+   "mode": "off",
+   "rep": 1,
+   "tokens": 48,
+   "s": 6.501265458005946,
+   "ms_per_token": 135.44303037512387,
+   "tok_s": 7.3831779843554415
+  },
+  {
+   "spec": true,
+   "prompt": 0,
+   "mode": "on",
+   "rep": 1,
+   "tokens": 48,
+   "s": 5.098376958994777,
+   "ms_per_token": 106.21618664572452,
+   "tok_s": 9.414760890780412
+  },
+  {
+   "spec": true,
+   "prompt": 1,
+   "mode": "off",
+   "rep": 0,
+   "tokens": 48,
+   "s": 3.838146499998402,
+   "ms_per_token": 79.96138541663338,
+   "tok_s": 12.506036442334858
+  },
+  {
+   "spec": true,
+   "prompt": 1,
+   "mode": "on",
+   "rep": 0,
+   "tokens": 48,
+   "s": 3.2358897920057643,
+   "ms_per_token": 67.41437066678675,
+   "tok_s": 14.833632504599988
+  },
+  {
+   "spec": true,
+   "prompt": 1,
+   "mode": "off",
+   "rep": 1,
+   "tokens": 48,
+   "s": 3.852487625001231,
+   "ms_per_token": 80.26015885419231,
+   "tok_s": 12.459481943172928
+  },
+  {
+   "spec": true,
+   "prompt": 1,
+   "mode": "on",
+   "rep": 1,
+   "tokens": 48,
+   "s": 3.19813183399674,
+   "ms_per_token": 66.62774654159875,
+   "tok_s": 15.008762143496092
+  }
+ ]
+}
