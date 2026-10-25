@@ -100,16 +100,13 @@ def decode_request(obj, *, allow_private: bool = False) -> dict:
         previous = hop["layers"][1]
         seen.add(hop["url"])
     codec = obj.get("activation_codec", "float")
-    if codec not in ("float", "int8_group_v1"):
+    if codec not in ("float", "int8_group_v1", "int4_group_v1"):
         raise protocol.ProtocolError("unsupported chain activation codec")
     token_ids = ids(obj["ids"]) if "ids" in obj else None
     hidden = None
     if "hidden" in obj:
-        if codec == "int8_group_v1":
-            from commonnet.net.activation_codec import decode_int8_group
-            hidden = decode_int8_group(obj["hidden"])
-        else:
-            hidden = protocol.decode_tensor(obj["hidden"])
+        from commonnet.net.activation_codec import decode_activation
+        hidden = decode_activation(codec, obj["hidden"])
     if token_ids is not None and layers[0] != 0:
         raise protocol.ProtocolError("token IDs enter only the first layer window")
     if hidden is not None and (hidden.shape[0] != 1 or hidden.shape[1] > MAX_CHAIN_TOKENS):
@@ -204,11 +201,8 @@ def run(server, obj) -> dict:
                 reply = {"ids": drafts[:accepted] + [nxt], "accepted": accepted, "next": nxt}
         else:
             hop = req["route"][0]
-            if req["activation_codec"] == "int8_group_v1":
-                from commonnet.net.activation_codec import encode_int8_group
-                payload = encode_int8_group(out)
-            else:
-                payload = protocol.encode_tensor(out)
+            from commonnet.net.activation_codec import encode_activation
+            payload = encode_activation(req["activation_codec"], out)
             onward = {"id": req["id"], "start_pos": req["start_pos"], "layers": hop["layers"],
                       "route": req["route"][1:], "which": req["which"], "hidden": payload}
             if req["activation_codec"] != "float":

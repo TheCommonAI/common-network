@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from commonnet.net.activation_codec import CODEC_CAPABILITY
 from commonnet.net.client import BlockClient, BlockError, RemoteError, Unreachable
 from commonnet.net.protocol import DTYPE_WIDTH, MAX_REQUEST_BYTES, Tensor
 
@@ -118,8 +119,10 @@ class HttpTransport:
             self._activation_codec = "float"
         elif selected in ("int8_group", "int8_group_v1"):
             self._activation_codec = "int8_group_v1"
+        elif selected in ("int4_group", "int4_group_v1"):
+            self._activation_codec = "int4_group_v1"
         else:
-            raise ValueError("COMMONNET_ACTIVATION_CODEC must be int8_group or float")
+            raise ValueError("COMMONNET_ACTIVATION_CODEC must be int4_group, int8_group or float")
         self.failovers: list[tuple[str, int, int]] = []  # (endpoint, from index, to index), for tests and logs
 
     def _candidates(self, name: str) -> list:
@@ -438,8 +441,8 @@ class HttpTransport:
         for ep in endpoints:
             self.refresh_replicas(ep.name)
         fresh = self._chain_hops(endpoints)  # rejects a failover peer without the new capabilities
-        if state.get("codec") == "int8_group_v1" and not all(
-                "activation_int8_group_v1" in h["caps"] for h in fresh):
+        needed = CODEC_CAPABILITY.get(state.get("codec"))
+        if needed and not all(needed in h["caps"] for h in fresh):
             raise ValueError("replacement chain peer does not support this session's activation codec")
         for hop in old_hops:
             try:
@@ -454,6 +457,16 @@ class HttpTransport:
             self._chain_send(state, body)
         for hop in fresh:
             self._active[(hop["name"], state["caller_id"])] = hop["index"]
+
+    def _session_codec(self, hops) -> str:
+        """The most compressed codec at or below the preferred one that every hop supports, else float."""
+        order = ["int4_group_v1", "int8_group_v1"]
+        if self._activation_codec == "float":
+            return "float"
+        for codec in order[order.index(self._activation_codec):]:
+            if all(CODEC_CAPABILITY[codec] in h["caps"] for h in hops):
+                return codec
+        return "float"
 
     def chain_step(self, endpoints, session_id: str, ids, start_pos: int, *, which: str = "last",
                    sampling=None, drafts=None, truncate_to=None) -> dict:
@@ -478,8 +491,7 @@ class HttpTransport:
                 raise ValueError("a new chain session must start at zero")
             state = {"hops": self._chain_hops(endpoints), "history": [], "pending_cut": None,
                      "wire_id": "chain-" + uuid.uuid4().hex, "caller_id": session_id, "closed": set()}
-            state["codec"] = (self._activation_codec if all("activation_int8_group_v1" in h["caps"]
-                             for h in state["hops"]) else "float")
+            state["codec"] = self._session_codec(state["hops"])
             self._chain_sessions[session_id] = state
             for hop in state["hops"]:
                 self._open.add((hop["name"], session_id))

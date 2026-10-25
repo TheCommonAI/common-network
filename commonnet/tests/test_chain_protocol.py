@@ -239,6 +239,27 @@ class ChainHttp(unittest.TestCase):
         self.step([3, 4])
         self.assertEqual(self.tr._chain_sessions["s"]["codec"], "float")
 
+    def test_int4_between_peers_runs_the_chain_and_is_encoded_per_hop(self):
+        from commonnet.net.activation_codec import encode_int4_group
+        self.tr._activation_codec = "int4_group_v1"
+        with mock.patch("commonnet.net.activation_codec.encode_int4_group", wraps=encode_int4_group) as encode:
+            reply = self.step([3, 4])
+        self.assertEqual(self.tr._chain_sessions["s"]["codec"], "int4_group_v1")
+        self.assertEqual(encode.call_count, 2)
+        self.assertEqual(set(reply), {"ids"})
+        self.assertTrue(all(type(t) is int for t in reply["ids"]))
+
+    def test_a_peer_without_int4_falls_back_to_int8_before_generation(self):
+        class Int8OnlyServer(BlockServer):
+            @property
+            def caps(self):
+                return tuple(c for c in super().caps if c != "activation_int4_group_v1")
+        self.servers[1].__class__ = Int8OnlyServer
+        self.tr._activation_codec = "int4_group_v1"
+        self.assertTrue(self.tr.chain_route(self.endpoints))
+        self.step([3, 4])
+        self.assertEqual(self.tr._chain_sessions["s"]["codec"], "int8_group_v1")
+
 
 class ChainValidation(unittest.TestCase):
     def test_bad_origins_credentials_and_pins_are_rejected_without_echoing_credentials(self):

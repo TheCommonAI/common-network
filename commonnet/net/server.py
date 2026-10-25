@@ -249,7 +249,7 @@ class BlockServer:
     @property
     def caps(self) -> tuple:
         extra = ("chain_v1", "chain_private_v1") if self.allow_chain_private else ("chain_v1",)
-        return tuple(getattr(self.block, "caps", ()) or ()) + extra + ("activation_int8_group_v1",)
+        return tuple(getattr(self.block, "caps", ()) or ()) + extra + ("activation_int8_group_v1", "activation_int4_group_v1")
 
     def forward(self, session_id: str, hidden: Tensor | None, start_pos: int, truncate_to: int | None = None, *,
                 ids=None, output: str | None = None, which: str = "last", sampling=None):
