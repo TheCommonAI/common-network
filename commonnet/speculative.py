@@ -106,6 +106,58 @@ class MlxDrafter:
         return out
 
 
+class TorchDrafter:
+    """A small transformers model (CUDA bf16 if available, else CPU float32), greedy, KV cache that follows accepted text."""
+
+    def __init__(self, repo_or_path: str, *, target_tokenizer=None, device: str | None = None, model=None, tokenizer=None):
+        import os
+        self.name = repo_or_path
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        if model is None:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            kw = {}
+            if os.environ.get("COMMONNET_CACHE"):   # the same cache root as the model hub
+                kw["cache_dir"] = os.path.join(os.environ["COMMONNET_CACHE"], "hf")
+            dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+            tokenizer = AutoTokenizer.from_pretrained(repo_or_path, **kw)
+            model = AutoModelForCausalLM.from_pretrained(repo_or_path, torch_dtype=dtype, **kw)
+        self.tokenizer = tokenizer
+        self.model = model.to(self.device).eval()
+        if target_tokenizer is not None:
+            check_tokenizers_match(target_tokenizer, self.tokenizer)
+        self._cache = None
+        self._toks: list[int] = []
+
+    def reset(self) -> None:
+        from transformers import DynamicCache
+        self._cache = DynamicCache()
+        self._toks = []
+
+    @torch.inference_mode()
+    def propose(self, context: list[int], k: int) -> list[int]:
+        if self._cache is None:
+            self.reset()
+        common = 0
+        for a, b in zip(self._toks, context):
+            if a != b:
+                break
+            common += 1
+        common = min(common, len(context) - 1)
+        if common < len(self._toks):
+            self._cache.crop(common)
+            del self._toks[common:]
+        feed = list(context[common:])
+        out: list[int] = []
+        for _ in range(k):
+            ids = torch.tensor([feed], device=self.device)
+            logits = self.model(input_ids=ids, past_key_values=self._cache, use_cache=True).logits
+            nxt = int(logits[0, -1].argmax().item())
+            self._toks.extend(feed)
+            out.append(nxt)
+            feed = [nxt]
+        return out
+
+
 def _truncate_all(client, endpoints, session_id: str, length: int) -> None:
     for ep in endpoints:
         client.transport.truncate(ep, session_id, length, defer=True)

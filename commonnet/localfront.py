@@ -153,3 +153,26 @@ class LocalFront:
             stop = getattr(self.block, "shutdown", None)
             if stop:
                 stop()
+
+
+VRAM_HEADROOM_GIB = 0.5   # CUDA context, activations and KV for the front, on top of its weights
+
+
+def free_vram_gib(pending_gib: float = 0.0):
+    """(free GiB on the CUDA device after reserving `pending_gib` the node's own served window has yet to load, total GiB),
+    or None when there is no CUDA device. torch.cuda.mem_get_info already counts what is loaded in any process."""
+    try:
+        if not torch.cuda.is_available():
+            return None
+        free, total = torch.cuda.mem_get_info()
+    except Exception:
+        return None
+    return max(0.0, free / 2 ** 30 - pending_gib), total / 2 ** 30
+
+
+def vram_fit(setting, free_gib: float, weight_gib: float) -> tuple[bool, str]:
+    """auto wants 1.5x the weights free, an explicit setting weights + headroom; either way refuse rather than OOM."""
+    need = AUTO_MEMORY_FACTOR * weight_gib if setting == "auto" else weight_gib + VRAM_HEADROOM_GIB
+    if free_gib < need:
+        return False, f"only {free_gib:.1f} GiB of GPU memory free, the front needs {need:.1f} GiB ({weight_gib:.1f} GiB of weights)"
+    return True, ""

@@ -238,3 +238,52 @@ class Routing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Nf4FrontBudget(unittest.TestCase):
+    def node(self, setting, vram):
+        from commonnet import node
+        from commonnet.mesh.records import Identity
+        mf = Manifest.from_dict({"id": "t", "model": {"name": "T", "num_layers": 6, "repos": {"nf4": "a/b"}},
+                                 "boundaries": [0, 2, 4, 6], "gib_per_layer": {"nf4": 0.5}, "fixed_gib": 0.0})
+        n = node.Node(mf, [], Identity.generate(), node.Hardware("nf4", 8.0, "RTX 4060"), tunnel=False,
+                      block_builder=lambda w, m, hw: synth(*w), local_front=setting, log=lambda *_: None)
+        n.window = (2, 6)                                   # own window, not resident yet: 2 GiB pending
+        n._free_vram = lambda pending: None if vram is None else (max(0.0, vram - pending), 8.0)
+        n._bench_front = lambda front: 5.0
+        return n
+
+    def test_vram_budget_accounts_for_own_window_and_refuses_when_it_does_not_fit(self):
+        for setting, vram, enabled in (("auto", 5.0, True), ("auto", 3.0, False),   # 1 GiB front: 1.5x of 3.0 free
+                                       ("on", 3.6, True), ("on", 3.2, False), ("on", None, False)):
+            with self.subTest(setting=setting, vram=vram):
+                n = self.node(setting, vram)
+                n._init_local_front(mock.Mock())
+                self.assertEqual(n.local_front is not None, enabled)
+
+    def test_front_hidden_state_is_float32_cpu_and_route_starts_at_f(self):
+        front = LocalFront(synth(0, F), F)
+        h = front.forward("s", PROMPT, 0)
+        self.assertEqual((h.dtype, tuple(h.shape), h.device.type), (torch.float32, (1, len(PROMPT), HIDDEN), "cpu"))
+        self.assertEqual((front.endpoint().start, front.endpoint().end), (0, F))
+
+
+class TorchDrafterTests(unittest.TestCase):
+    def test_greedy_matches_full_forward_and_rolls_back(self):
+        from transformers import Qwen3Config, Qwen3ForCausalLM
+        torch.manual_seed(0)
+        cfg = Qwen3Config(vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+                          num_attention_heads=4, num_key_value_heads=2, head_dim=8)
+        m = Qwen3ForCausalLM(cfg)
+        d = spec.TorchDrafter("tiny", model=m, tokenizer=mock.Mock(), device="cpu")
+        ctx = [1, 2, 3, 4]
+        out = d.propose(ctx, 4)
+        ids = list(ctx)
+        for _ in range(4):
+            ids.append(int(m(torch.tensor([ids])).logits[0, -1].argmax()))
+        self.assertEqual(out, ids[4:])
+        again = d.propose(ctx[:2] + [9, 8], 3)          # diverges from the cached text: the cache rolls back
+        ids = ctx[:2] + [9, 8]
+        for _ in range(3):
+            ids.append(int(m(torch.tensor([ids])).logits[0, -1].argmax()))
+        self.assertEqual(again, ids[4:])
