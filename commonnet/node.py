@@ -346,7 +346,7 @@ class Node:
                  resign_s: float = RESIGN_SECONDS, rebalance_s: float = REBALANCE_SECONDS,
                  cooldown_s: float = MOVE_COOLDOWN_SECONDS, gossip_s: float | None = None, clock=time.time,
                  status: StatusFile | None = None, status_s: float = STATUS_SECONDS,
-                 api_port: int | None = None, api_backend=None,
+                 api_port: int | None = None, api_backend=None, no_draft: bool = False,
                  fixed_window: tuple[int, int] | None = None,
                  direct=None, state_dir=None, decider=None, gateway=None, local_front=None):
         # direct (a commonnet.direct.DirectConfig) turns on direct mode: DHT discovery, a TLS block server on a
@@ -391,6 +391,7 @@ class Node:
         self._status, self.status_s = status, status_s
         self._status_window: tuple[int, int] | None = None
         self._api_port, self._api_backend = api_port, api_backend
+        self.no_draft = no_draft
         self._api: dict | None = None  # {"port": int, "ready": bool} once --api is on
         self._api_server = None
         self._api_error: str | None = None
@@ -905,7 +906,7 @@ class Node:
                     if json.load(f).get("model_type") == "prism_hadamard_qwen35":
                         raise RuntimeError("the chat API for this model needs Apple silicon (its embedding and head are 2-bit "
                                            "Hadamard packed); this machine can still serve layers, start it with --no-api")
-        return NetworkBackend(network, checkpoint, fmt=fmt, hidden_dtype=torch.float32)
+        return NetworkBackend(network, checkpoint, fmt=fmt, hidden_dtype=torch.float32, auto_draft=not self.no_draft)
 
     def _init_local_front(self, network) -> None:
         """--local-front: hold layers [0, F) here for the chat client. Never fatal: without it the route is the whole model."""
@@ -1178,6 +1179,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status-file", type=Path, metavar="PATH",
                    help=f"where to write the status JSON the desktop app reads every 2 s (or set {STATUS_ENV}; "
                         "default: ~/.common-network/net/status.json)")
+    p.add_argument("--no-draft", action="store_true", help="Turn off speculative decoding in the local chat API (on by default for greedy requests on models that support it; same as COMMONNET_DRAFT=0)")
     p.add_argument("--api", nargs="?", const=DEFAULT_API_PORT, default=None, type=int, metavar="PORT",
                    help=f"also serve the OpenAI-compatible chat API on 127.0.0.1:PORT (default {DEFAULT_API_PORT}) "
                         "from this process. The client part of the model (about 1 GB for Qwen3-8B) loads in the background")
@@ -1261,7 +1263,7 @@ def main(argv=None) -> int:
     # The rendezvous directory: COMMONNET_GATEWAY, else the production gateway. Stub (test) nodes use none unless named.
     gateway = mesh_directory.gateway_url(default=None if args.stub else mesh_directory.DEFAULT_GATEWAY)
     node = Node(manifest, seeds, identity, hardware, port=args.port, stub=args.stub, tunnel=not args.no_tunnel,
-                advertise=args.advertise, status=status, api_port=args.api, fixed_window=fixed_window,
+                advertise=args.advertise, status=status, api_port=args.api, no_draft=args.no_draft, fixed_window=fixed_window,
                 direct=direct, state_dir=directory, gateway=gateway, local_front=local_front)
 
     def leave(signum, frame):

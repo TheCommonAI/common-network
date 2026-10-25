@@ -52,11 +52,19 @@ python -m commonnet.serve --network URL     # OpenAI-compatible API on http://12
 
 Any OpenAI-compatible app can point at it. Each request builds a fresh route from the live peers.
 
-### Faster decoding with a drafter (opt in)
+### Faster decoding with a drafter (on by default for greedy requests)
 
 ```bash
 python -m commonnet.serve --network URL --draft          # Qwen3-0.6B drafter on your machine, 8 tokens per round
 ```
+
+Common Flash is on by default in the node chat API (`/v1/chat/completions`). A request uses the drafter only when it is
+greedy (`temperature` 0; a request with no `temperature` gets the API default 0.7 and is sampled, so it does not), the
+network's model allows it (Qwen3-8B and Bonsai 8B yes; Bonsai 2 9B/27B no: hybrid linear attention cannot roll back),
+every hop on the route advertises `chain_v1`, and the Qwen3-0.6B-4bit drafter loads (mlx_lm, memory). Anything else
+falls back to normal decoding silently; output is identical to non-speculative greedy, k=4. The drafter loads on the
+first eligible request and is then cached. `common ask` now sends `temperature: 0` (override: `common ask --temperature 0.7 "..."`).
+Opt out with `common join --no-draft` (or `commonnet.node --no-draft`) or `COMMONNET_DRAFT=0`. Not yet tested on a real WAN.
 
 A small local model guesses 8 tokens, the network verifies them in one pass and rolls back the rest, so per-hop latency is
 shared across several tokens: about 1.7x on chat and 2.3 to 3.1x on code and quoted text at 50 ms hops, with identical greedy

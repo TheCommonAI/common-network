@@ -1471,7 +1471,7 @@ def _say_no_local_peer(health: str, status: dict | None) -> None:
 
 
 def _ask_layers(question: str, model: str | None, as_json: bool, quiet: bool, verbose: bool,
-                region: str | None = None, compose: str | None = None) -> None:
+                region: str | None = None, compose: str | None = None, temperature: float | None = None) -> None:
     status, health = _read_layer_status()
     base = _layer_api_base(status)
     if (region or compose) and not quiet and not as_json:
@@ -1488,7 +1488,10 @@ def _ask_layers(question: str, model: str | None, as_json: bool, quiet: bool, ve
             print(comment("refusing rather than silently answering with a different model."), file=sys.stderr)
             sys.exit(1)
 
-    body = {"model": model or "auto", "messages": [{"role": "user", "content": question}], "stream": True}
+    body = {"model": model or "auto", "messages": [{"role": "user", "content": question}], "stream": True,
+            # Greedy by default: same answer every time, and it lets the node use speculative decoding (greedy only).
+            # --temperature N (N > 0) samples instead.
+            "temperature": 0 if temperature is None else temperature}
     req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -1590,13 +1593,13 @@ def _ask_layers(question: str, model: str | None, as_json: bool, quiet: bool, ve
 
 def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
             local: bool, as_json: bool, quiet: bool, verbose: bool,
-            compose: str | None = None) -> None:
+            compose: str | None = None, temperature: float | None = None) -> None:
     if local:
         _ask_local(question, model, as_json, quiet)
     elif _use_gateway():
         _cmd_ask_gateway(gateway, question, region, model, local, as_json, quiet, verbose, compose=compose)
     else:
-        _ask_layers(question, model, as_json, quiet, verbose, region=region, compose=compose)
+        _ask_layers(question, model, as_json, quiet, verbose, region=region, compose=compose, temperature=temperature)
 
 
 def _stage_bar(count: int, width: int = 10) -> str:
@@ -4459,7 +4462,7 @@ def interactive_session(gateway: str, args: argparse.Namespace) -> None:
         if line.startswith("/"):
             print(dim(f"unknown command: {line}"))
             continue
-        cmd_ask(gateway, line, args.region, session_model, session_local, False, False, args.verbose)
+        cmd_ask(gateway, line, args.region, session_model, session_local, False, False, args.verbose, temperature=getattr(args, "temperature", None))
         print()
 
 
@@ -4473,6 +4476,7 @@ def main() -> None:
     parser.add_argument("rest", nargs=argparse.REMAINDER)
     parser.add_argument("--gateway", default=os.environ.get("COMMON_GATEWAY_URL", DEFAULT_GATEWAY))
     parser.add_argument("--region", default=None)
+    parser.add_argument("--temperature", type=float, default=None, help="ask (layer network): sampling temperature. Default 0 (greedy, enables speculative decoding); above 0 samples normally")
     parser.add_argument("--model", default=None)
     parser.add_argument("--auto", action="store_true")
     parser.add_argument("--local", action="store_true")
@@ -4560,7 +4564,7 @@ def main() -> None:
             sys.exit(1)
         compose_mode = "never" if args.no_compose else ("always" if args.compose else None)
         cmd_ask(gateway, question, args.region, args.model, args.local, args.json,
-                args.quiet, args.verbose, compose=compose_mode)
+                args.quiet, args.verbose, compose=compose_mode, temperature=args.temperature)
     elif args.verb == "recommend":
         cmd_recommend(gateway, args.json, args.machines, args.ram)
     elif args.verb == "peers":

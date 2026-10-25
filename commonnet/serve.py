@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import os
 import queue
 import sys
 import threading
@@ -30,7 +31,14 @@ DEFAULT_PORT = 11440
 MAX_BODY_BYTES = 1 << 20
 DEFAULT_MAX_TOKENS = 256
 HARD_MAX_TOKENS = 4096
-DEFAULT_TEMPERATURE = 0.7
+DEFAULT_TEMPERATURE = 0.7   # a request with no "temperature" is sampled, so it never speculates; `common ask` sends 0
+DEFAULT_DRAFT = "mlx-community/Qwen3-0.6B-4bit"
+CHAIN_CAPABILITY = "chain_v1"   # a hop that can verify drafts (chain_step with drafts)
+
+
+def draft_enabled() -> bool:
+    """COMMONNET_DRAFT=0 (or false/off/no) turns the default-on drafter off."""
+    return os.environ.get("COMMONNET_DRAFT", "1").strip().lower() not in ("0", "false", "off", "no")
 DEFAULT_MAX_CONTEXT = 8192
 STOP_TOKENS = ("<|im_end|>", "<|endoftext|>")
 
@@ -118,7 +126,7 @@ class NetworkBackend:
     """The real backend: a Client4 on one worker thread, a fresh route per request."""
 
     def __init__(self, network, checkpoint: str | None = None, *, fmt: str = "mlx4", hidden_dtype=None,
-                 draft: str | None = None, draft_k: int = 8):
+                 draft: str | None = None, draft_k: int = 4, auto_draft: bool = False):
         import torch
         from transformers import AutoTokenizer
         self.network = network
@@ -150,6 +158,12 @@ class NetworkBackend:
         self.client = self._worker.submit(load).result()
         self.draft_k, self.drafter, self.draft_note = draft_k, None, "off"
         no_spec = manifest.model.get("no_speculation")
+        # Default-on speculation: the drafter loads on the first eligible request, not at startup.
+        self.auto_draft = bool(auto_draft) and not draft and not no_spec and draft_enabled()
+        self._auto_failed = False
+        self._drafter_factory = None   # tests replace it; default builds an MlxDrafter on the worker thread
+        if self.auto_draft:
+            self.draft_note = f"on, loads on first greedy request ({DEFAULT_DRAFT}, k={draft_k})"
         if draft and no_spec:   # the network itself says speculation cannot work on this model
             self.draft_note = f"off: {no_spec}"[:300]
             print(f"speculative decoding is off: {self.draft_note}", file=sys.stderr, flush=True)
@@ -183,16 +197,42 @@ class NetworkBackend:
     def _generate(self, prompt_ids, max_tokens, temperature, top_p, seed):
         endpoints, transport = self.network.plan()
         self.client.transport = transport
-        if self.drafter is None:
+        drafter = self.drafter if self.drafter is not None else self._lazy_drafter(endpoints, transport, temperature)
+        if drafter is None:
             yield from self.client.generate_stream(endpoints, prompt_ids, max_tokens, temperature=temperature,
                                                    top_p=top_p, seed=seed, stop_ids=self.stop_ids)
             return
         from commonnet import speculative
         stats = speculative.SpecStats()
-        yield from speculative.generate_stream(self.client, endpoints, prompt_ids, max_tokens, drafter=self.drafter,
+        yield from speculative.generate_stream(self.client, endpoints, prompt_ids, max_tokens, drafter=drafter,
                                                k=self.draft_k, temperature=temperature, top_p=top_p, seed=seed,
                                                stop_ids=self.stop_ids, stats=stats)
         self.last_spec = stats
+
+    def _lazy_drafter(self, endpoints, transport, temperature):
+        """The default-on drafter, or None for plain decoding. Never raises: any doubt means plain decoding.
+
+        Eligible only when the request is greedy, every hop advertises the chain (draft-verify) capability, and the
+        drafter loads (cached; a failed load is not retried). Runs on the worker thread."""
+        if not self.auto_draft or self._auto_failed or (temperature and temperature > 0):
+            return None
+        try:
+            if not all(CHAIN_CAPABILITY in transport.capabilities(ep) for ep in endpoints):
+                return None
+        except Exception:
+            return None
+        try:
+            def build():
+                from commonnet.speculative import MlxDrafter
+                return MlxDrafter(DEFAULT_DRAFT, target_tokenizer=self.tokenizer)
+            self.drafter = (self._drafter_factory or build)()
+            self.draft_note = f"on ({DEFAULT_DRAFT}, k={self.draft_k})"
+            return self.drafter
+        except Exception as e:   # mlx_lm missing, out of memory, tokenizer mismatch, no network...
+            self._auto_failed = True
+            self.draft_note = f"off: {type(e).__name__}: {e}"[:300]
+            print(f"speculative decoding is off: {self.draft_note}", file=sys.stderr, flush=True)
+            return None
 
     def health(self) -> dict:
         return self.network.status()
@@ -480,7 +520,8 @@ def main(argv=None) -> int:
     p.add_argument("--draft", nargs="?", const="mlx-community/Qwen3-0.6B-4bit", default=None, metavar="MODEL",
                    help="speculative decoding with a small local drafter (default model mlx-community/Qwen3-0.6B-4bit); "
                         "greedy requests only, off by default")
-    p.add_argument("--draft-k", type=int, default=8, help="tokens drafted per round (default 8; shrinks when acceptance is low)")
+    p.add_argument("--no-draft", action="store_true", help="turn off the default-on speculative decoding (same as COMMONNET_DRAFT=0)")
+    p.add_argument("--draft-k", type=int, default=4, help="tokens drafted per round (default 4; shrinks when acceptance is low)")
     p.add_argument("--max-context", type=int, default=DEFAULT_MAX_CONTEXT)
     p.add_argument("--cache-dir", help="where to remember peer addresses between runs")
     args = p.parse_args(argv)
@@ -490,12 +531,12 @@ def main(argv=None) -> int:
         network = Network.open(args.network, args.bootstrap, cache_dir=args.cache_dir)
         network.manifest  # fail now, not on the first request
         backend = NetworkBackend(network, args.checkpoint, fmt=args.client_format, hidden_dtype=torch.float32,
-                                 draft=args.draft, draft_k=args.draft_k)
+                                 draft=args.draft, draft_k=args.draft_k, auto_draft=not args.no_draft)
     except NetworkUnreachable as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     server = make_server(backend, args.port, max_context=args.max_context)
-    if args.draft:
+    if args.draft or backend.auto_draft:
         print(f"speculative decoding: {backend.draft_note}", flush=True)
     print(f"serving {backend.model_name} from the network on http://127.0.0.1:{args.port}/v1", flush=True)
     try:
