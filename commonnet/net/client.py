@@ -18,8 +18,11 @@ that as the member being down for now.
 from __future__ import annotations
 
 import collections
+import concurrent.futures
 import http.client
 import json
+import math
+import os
 import socket
 import threading
 import time
@@ -34,6 +37,10 @@ DEFAULT_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 0.5
 RETRY_MAX_BACKOFF_SECONDS = 4.0
 RETRY_STATUSES = frozenset((502, 503, 504))
+RTC_RETRY_SECONDS = 60.0
+RTC_MAX_ENDPOINTS = 16
+_RTC_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="commonnet-rtc-upgrade")
+_RTC_SLOTS = threading.BoundedSemaphore(8)
 
 
 class BlockError(Exception):
@@ -145,7 +152,8 @@ class BlockClient:
                  backoff: float = RETRY_BACKOFF_SECONDS,
                  max_backoff: float = RETRY_MAX_BACKOFF_SECONDS,
                  max_request_bytes: int = MAX_REQUEST_BYTES, sleep=time.sleep,
-                 pin=None, ssl_context=None, public_only: bool = False):
+                 pin=None, ssl_context=None, public_only: bool = False,
+                 rtc: bool | None = None, rtc_allow_private: bool = False, rtc_stun_urls=None):
         """pin (default None) pins the certificate of https endpoints by sha256 fingerprint
         (commonnet/net/secure.py): a fingerprint string for every https endpoint, or a dict
         mapping "host:port" to one, which wins over the string form. An endpoint with a pin is
@@ -167,6 +175,11 @@ class BlockClient:
         self._idle: dict[tuple, http.client.HTTPConnection] = {}
         self._lock = threading.Lock()
         self.timings: collections.deque = collections.deque(maxlen=4096)
+        self._rtc_enabled = (os.environ.get("COMMONNET_RTC", "1") != "0") if rtc is None else bool(rtc)
+        self._rtc_allow_private = bool(rtc_allow_private)
+        self._rtc_stun_urls = rtc_stun_urls
+        self._rtc_states: dict[str, dict] = {}
+        self._rtc_epoch = 0
 
     def health(self, endpoint: str, timeout: float = CONTROL_TIMEOUT_SECONDS) -> tuple:
         """Returns (layers, device)."""
@@ -226,8 +239,126 @@ class BlockClient:
     def close_connections(self) -> None:
         with self._lock:
             idle, self._idle = list(self._idle.values()), {}
+            states, self._rtc_states = list(self._rtc_states.values()), {}
+            self._rtc_epoch += 1
         for conn in idle:
             conn.close()
+        for state in states:
+            future = state.get("future")
+            if future is not None:
+                future.cancel()
+            peer = state.get("peer")
+            if peer is not None:
+                try:
+                    peer.close()
+                except Exception:
+                    pass
+
+    def _rtc_endpoint_allowed(self, endpoint: str) -> bool:
+        if not self._rtc_enabled:
+            return False
+        parts = urllib.parse.urlsplit(endpoint)
+        if parts.scheme != "https" and not (self._rtc_allow_private and parts.scheme == "http"):
+            return False
+        if not parts.hostname or parts.username is not None or parts.password is not None:
+            return False
+        if not self._rtc_allow_private:
+            import ipaddress
+            try:
+                addr = ipaddress.ip_address(parts.hostname)
+            except ValueError:
+                return parts.hostname.lower() != "localhost"
+            return addr.is_global and not addr.is_multicast
+        return True
+
+    def _rtc_peer(self, endpoint: str):
+        """Start a bounded background upgrade; initial calls keep using HTTP.
+
+        No SDP or candidate information is logged. The signaling callback uses the
+        original authenticated HTTP path, including certificate pins.
+        """
+        if not self._rtc_endpoint_allowed(endpoint):
+            return None
+        try:
+            from commonnet.net import rtc
+        except ImportError:
+            return None
+        if not rtc.available():
+            return None
+        now = time.monotonic()
+        retired = None
+        with self._lock:
+            state = self._rtc_states.get(endpoint)
+            blocked = False
+            if state is not None:
+                peer = state.get("peer")
+                if peer is not None and peer.ready:
+                    return peer
+                if peer is not None:
+                    retired, state["peer"] = peer, None
+                future = state.get("future")
+                blocked = (future is not None and not future.done()) or now < state["after"]
+            elif len(self._rtc_states) >= RTC_MAX_ENDPOINTS:
+                blocked = True
+            if not blocked and _RTC_SLOTS.acquire(blocking=False):
+                state = {"peer": None, "future": None, "after": now + RTC_RETRY_SECONDS,
+                         "epoch": self._rtc_epoch}
+                self._rtc_states[endpoint] = state
+                try:
+                    state["future"] = _RTC_POOL.submit(self._connect_rtc, endpoint, state)
+                    state["future"].add_done_callback(
+                        lambda future: _RTC_SLOTS.release() if future.cancelled() else None)
+                except RuntimeError:
+                    _RTC_SLOTS.release()
+        # A remote channel can close without another RPC being attempted. Retire
+        # its ICE sockets before forgetting the old state, outside the HTTP lock.
+        if retired is not None:
+            try:
+                retired.close()
+            except Exception:
+                pass
+        return None
+
+    def _connect_rtc(self, endpoint: str, state: dict) -> None:
+        from commonnet.net import rtc
+        peer = None
+        try:
+            health = self._http_call("GET", endpoint, "/health?caps=1", None, 5.0, retries=0)
+            caps = protocol.decode_health_caps(health)
+            if rtc.CAPABILITY not in caps:
+                return
+
+            def signal(offer):
+                return self._http_call("POST", endpoint, "/rtc/offer", offer, 15.0, retries=0)
+
+            peer = rtc.RtcClient(signal, allow_private=self._rtc_allow_private,
+                                 stun_urls=self._rtc_stun_urls)
+            peer.connect(timeout=20)
+            with self._lock:
+                if self._rtc_states.get(endpoint) is state and state["epoch"] == self._rtc_epoch:
+                    state["peer"] = peer
+                    peer = None
+        except Exception:
+            # Old peers, blocked UDP and failed ICE are ordinary relay cases.
+            # Exception text can contain SDP or credentials, so do not log it.
+            pass
+        finally:
+            try:
+                if peer is not None:
+                    peer.close()
+            finally:
+                _RTC_SLOTS.release()
+
+    def _drop_rtc(self, endpoint: str, peer) -> None:
+        with self._lock:
+            state = self._rtc_states.get(endpoint)
+            if state is not None and state.get("peer") is peer:
+                state["peer"] = None
+                state["after"] = time.monotonic() + RTC_RETRY_SECONDS
+        try:
+            peer.close()
+        except Exception:
+            pass
 
     def _context_for(self, host: str, port: int):
         pin = self._pin.get(f"{host}:{port}") if isinstance(self._pin, dict) else self._pin
@@ -290,6 +421,43 @@ class BlockClient:
         raise AssertionError("unreachable")
 
     def _call(self, method: str, endpoint: str, path: str, body: dict | None, timeout: float) -> dict:
+        data = None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
+        if data is not None and len(data) > self.max_request_bytes:
+            raise ValueError(f"request is {len(data)} bytes; the limit is {self.max_request_bytes}. "
+                             "Send the prefill in smaller pieces.")
+        # Signaling is always HTTPS/HTTP. Only an already established data channel
+        # carries RPCs, so negotiation never delays the initial request.
+        peer = None if path == "/rtc/offer" else self._rtc_peer(endpoint)
+        if peer is not None:
+            started = time.perf_counter()
+            try:
+                response = peer.request(method, path, body, timeout=timeout)
+                status, reply = response["status"], response["body"]
+                if type(status) is not int or not 100 <= status <= 599 or not isinstance(reply, dict):
+                    raise ValueError("invalid direct response")
+                raw = json.dumps(reply, separators=(",", ":")).encode("utf-8")
+                if len(raw) > self.max_request_bytes:
+                    raise ValueError("direct response exceeds the payload limit")
+                server_ms = response.get("server_ms")
+                if (type(server_ms) not in (int, float) or not math.isfinite(server_ms) or server_ms < 0):
+                    server_ms = None
+            except Exception:
+                # Repeating the unchanged RPC through HTTP is safe: block forward,
+                # chain, session, close and truncate already have retry semantics.
+                self._drop_rtc(endpoint, peer)
+            else:
+                self.timings.append({"path": path, "status": status, "reused": True,
+                                     "total_ms": (time.perf_counter() - started) * 1000,
+                                     "server_ms": server_ms, "bytes_out": len(data or b""),
+                                     "bytes_in": len(raw), "transport": "webrtc"})
+                if status < 400:
+                    return reply
+                if status not in RETRY_STATUSES:
+                    raise RemoteError(status, str(reply.get("error", "direct request failed")))
+        return self._http_call(method, endpoint, path, body, timeout)
+
+    def _http_call(self, method: str, endpoint: str, path: str, body: dict | None, timeout: float,
+                   *, retries: int | None = None) -> dict:
         url = _join_url(endpoint, path)
         parts = urllib.parse.urlsplit(url)
         data = None
@@ -302,7 +470,7 @@ class BlockClient:
                     "Send the prefill in smaller pieces."
                 )
             headers["Content-Type"] = "application/json"
-        attempts = self.retries + 1
+        attempts = (self.retries if retries is None else retries) + 1
         reason = ""
         for attempt in range(attempts):
             started = time.perf_counter()
@@ -317,7 +485,7 @@ class BlockClient:
                 self.timings.append({
                     "path": path, "status": status, "reused": reused,
                     "total_ms": (time.perf_counter() - started) * 1000, "server_ms": server_ms,
-                    "bytes_out": len(data or b""), "bytes_in": len(raw)})
+                    "bytes_out": len(data or b""), "bytes_in": len(raw), "transport": "http"})
                 if status >= 400:
                     message = _error_text(raw, status_reason)
                     if status not in RETRY_STATUSES:

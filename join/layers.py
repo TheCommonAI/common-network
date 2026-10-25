@@ -39,7 +39,7 @@ SOURCE_DIR = HOME_DIR / "commonnet-src"
 DEFAULT_REF = "main"
 TARBALL_URL = "https://github.com/" + REPO + "/archive/{ref}.tar.gz"
 DEFAULT_NETWORK_ENV = "COMMONNET_NETWORK"
-IMPORT_CHECK = "import commonnet, cryptography, torch, numpy, safetensors, transformers"
+IMPORT_CHECK = "import commonnet, cryptography, torch, numpy, safetensors, transformers, aiortc"
 # The backend's own modules too: a Python with torch but no mlx (or no bitsandbytes) cannot serve a block.
 BACKEND_IMPORTS = {"mac-arm64": "import mlx.core, mlx_lm", "nvidia": "import bitsandbytes", "cpu": ""}
 
@@ -47,14 +47,14 @@ BACKEND_IMPORTS = {"mac-arm64": "import mlx.core, mlx_lm", "nvidia": "import bit
 # the tests ran with (see commonnet/tests).
 MAC_REQUIREMENTS = (
     "mlx==0.32.4", "mlx-lm==0.32.2", "numpy>=2.0", "torch==2.11.0", "transformers==5.8.0",
-    "safetensors>=0.7.0", "tokenizers>=0.22", "cryptography>=46.0",
+    "safetensors>=0.7.0", "tokenizers>=0.22", "cryptography>=46.0", "aiortc==1.15.0",
 )
 NVIDIA_REQUIREMENTS = (  # UNTESTED: no Windows/CUDA machine was available
     "numpy>=2.0", "transformers==5.8.0", "safetensors>=0.7.0", "tokenizers>=0.22",
-    "cryptography>=46.0", "bitsandbytes>=0.45", "accelerate>=1.0",
+    "cryptography>=46.0", "bitsandbytes>=0.45", "accelerate>=1.0", "aiortc==1.15.0",
 )
 CPU_REQUIREMENTS = (  # no mlx, no bitsandbytes; torch comes from the CPU wheel index (small, no CUDA libraries)
-    "numpy>=2.0", "transformers==5.8.0", "safetensors>=0.7.0", "tokenizers>=0.22", "cryptography>=46.0",
+    "numpy>=2.0", "transformers==5.8.0", "safetensors>=0.7.0", "tokenizers>=0.22", "cryptography>=46.0", "aiortc==1.15.0",
 )
 CPU_TORCH_REQUIREMENT = "torch==2.11.0"
 CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"  # Windows and Linux; macOS wheels come from PyPI

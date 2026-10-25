@@ -27,8 +27,9 @@ What the coordinator can rely on:
 - A body over max_request_bytes is refused with 413 before it is read. A chunked
   body is refused with 411.
 
-The server binds 127.0.0.1 only. It is reached from outside through a tunnel, and
-it has no authentication of its own. See commonnet/net/tunnel.py.
+HTTP binds loopback by default and can be reached through a tunnel or pinned TLS.
+An authenticated HTTP offer can negotiate an encrypted WebRTC data channel, so
+existing block RPCs then travel directly between peers without inbound port setup.
 """
 from __future__ import annotations
 
@@ -36,6 +37,7 @@ import argparse
 import hashlib
 import importlib
 import json
+import os
 import socketserver
 import sys
 import threading
@@ -50,7 +52,7 @@ from commonnet.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
 LOOPBACK = "127.0.0.1"
 HANDLER_TIMEOUT_SECONDS = 60.0
 TLS_HANDSHAKE_TIMEOUT_SECONDS = 10.0
-POST_PATHS = frozenset(("/session", "/forward", "/close", "/truncate", "/chain"))
+POST_PATHS = frozenset(("/session", "/forward", "/close", "/truncate", "/chain", "/rtc/offer"))
 
 
 class UnknownSession(LookupError):
@@ -142,7 +144,7 @@ def _check_output(out, hidden: Tensor) -> None:
 
 
 class BlockServer:
-    """Serves one block over HTTP on 127.0.0.1.
+    """Serves one block over HTTP and optional authenticated WebRTC channels.
 
     The session table and every call into the block share one lock. /health reads
     only the immutable layers and device, so it never waits behind a forward.
@@ -150,7 +152,8 @@ class BlockServer:
 
     def __init__(self, block, host: str = LOOPBACK, port: int = 0, *,
                  max_request_bytes: int = MAX_REQUEST_BYTES, token: str | None = None,
-                 extra_handlers: dict | None = None, ssl_context=None, allow_chain_private: bool = False):
+                 extra_handlers: dict | None = None, ssl_context=None, allow_chain_private: bool = False,
+                 rtc_enabled: bool | None = None, allow_rtc_private: bool | None = None, rtc_stun_urls=None):
         """token=None serves without authentication. Only tests and --stub do that;
         the command line refuses to start a real block without a token.
 
@@ -177,6 +180,13 @@ class BlockServer:
         # loopback or cloud metadata services on the authenticated caller's behalf.
         self.allow_chain_private = bool(allow_chain_private)
         self._chain_clients = {}
+        self._rtc_enabled = (os.environ.get("COMMONNET_RTC", "1").lower() not in ("0", "false", "off")
+                             if rtc_enabled is None else bool(rtc_enabled))
+        self._allow_rtc_private = self.allow_chain_private if allow_rtc_private is None else bool(allow_rtc_private)
+        self._rtc_stun_urls = rtc_stun_urls
+        self._rtc_lock = threading.Lock()
+        self._rtc_server = None
+        self._stopped = False
         self._lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
         self._httpd = _Httpd((host, port), _Handler)
@@ -210,6 +220,11 @@ class BlockServer:
             self._thread.join(timeout=5)
             self._thread = None
         self._httpd.server_close()
+        with self._rtc_lock:
+            self._stopped = True
+            rtc_server, self._rtc_server = self._rtc_server, None
+        if rtc_server is not None:
+            rtc_server.close()
         for client in self._chain_clients.values():
             client.close_connections()
         self._chain_clients.clear()
@@ -249,7 +264,109 @@ class BlockServer:
     @property
     def caps(self) -> tuple:
         extra = ("chain_v1", "chain_private_v1") if self.allow_chain_private else ("chain_v1",)
-        return tuple(getattr(self.block, "caps", ()) or ()) + extra + ("activation_int8_group_v1", "activation_int4_group_v1")
+        rtc_caps = ()
+        if self._rtc_available():
+            from commonnet.net.rtc import CAPABILITY, PRIVATE_CAPABILITY
+            rtc_caps = (CAPABILITY, PRIVATE_CAPABILITY) if self._allow_rtc_private else (CAPABILITY,)
+        return tuple(getattr(self.block, "caps", ()) or ()) + extra + ("activation_int8_group_v1", "activation_int4_group_v1") + rtc_caps
+
+    def _rtc_available(self) -> bool:
+        if not self._rtc_enabled or self._stopped or "/rtc/offer" not in POST_PATHS:
+            return False
+        try:
+            from commonnet.net import rtc
+            return rtc.available()
+        except ImportError:
+            return False
+
+    def _rtc_offer(self, body) -> dict:
+        if not self._rtc_available():
+            raise NotImplementedError("automatic direct transport is unavailable")
+        from commonnet.net import rtc
+        with self._rtc_lock:
+            if self._stopped:
+                raise rtc.RtcUnavailable("block server is stopped")
+            if self._rtc_server is None:
+                self._rtc_server = rtc.RtcServer(self.rpc, allow_private=self._allow_rtc_private,
+                                                stun_urls=self._rtc_stun_urls, max_connections=16)
+            server = self._rtc_server
+        return server.offer(body, timeout=15)
+
+    def rpc(self, method: str, path: str, body=None, *, allow_offer: bool = False) -> dict:
+        """Shared HTTP/data-channel RPC dispatcher.
+
+        An RTC channel has already been authenticated by its HTTP offer. It may
+        call only the block protocol, never negotiate another channel or invoke
+        public extension handlers. Error/status and retry semantics match HTTP.
+        """
+        bare, _, query = path.partition("?")
+        if method == "GET":
+            if bare == "/health":
+                caps = self.caps if "caps=1" in query.split("&") else None
+                return {"status": 200, "body": protocol.encode_health(self.layers, self.device, caps), "server_ms": None}
+            status = 405 if bare in POST_PATHS else 404
+            message = f"{bare} takes POST" if status == 405 else f"no endpoint {bare}"
+            return {"status": status, "body": _error(message), "server_ms": None}
+        if method != "POST":
+            return {"status": 405, "body": _error("method is not supported"), "server_ms": None}
+        if bare == "/health":
+            return {"status": 405, "body": _error("/health takes GET"), "server_ms": None}
+        if bare not in POST_PATHS or (bare == "/rtc/offer" and not allow_offer):
+            return {"status": 404, "body": _error(f"no endpoint {bare}"), "server_ms": None}
+        try:
+            size = len(json.dumps(body, separators=(",", ":")).encode("utf-8"))
+            if size > self.max_request_bytes:
+                return {"status": 413, "body": _error("request exceeds the size limit"), "server_ms": None}
+            if bare == "/rtc/offer":
+                reply, compute_ms = self._rtc_offer(body), None
+            else:
+                reply, compute_ms = self._dispatch(bare, body)
+        except ChainUnavailable as exc:
+            return {"status": 409 if exc.lost else 502, "body": _error(str(exc)), "server_ms": None}
+        except ProtocolError as exc:
+            return {"status": 400, "body": _error(str(exc)), "server_ms": None}
+        except UnknownSession as exc:
+            return {"status": 404, "body": _error(str(exc)), "server_ms": None}
+        except NotImplementedError as exc:
+            return {"status": 501, "body": _error(str(exc)), "server_ms": None}
+        except Exception as exc:
+            # SDP contains ICE credentials. Never include it, or an exception
+            # from its parser, in logs or a public error response.
+            if bare == "/rtc/offer":
+                from commonnet.net import rtc
+                status = 400 if isinstance(exc, (rtc.RtcProtocolError, ValueError, TypeError)) else 503
+                return {"status": status, "body": _error("invalid WebRTC offer" if status == 400 else
+                                                         "automatic direct transport is unavailable"), "server_ms": None}
+            traceback.print_exc(file=sys.stderr)
+            return {"status": 500, "body": _error(f"block failed: {type(exc).__name__}: {exc}"[:300]), "server_ms": None}
+        return {"status": 200, "body": reply, "server_ms": compute_ms}
+
+    def _dispatch(self, path: str, obj) -> tuple:
+        if path == "/chain":
+            from commonnet.net.chain import run
+            started = time.perf_counter()
+            reply = run(self, obj)
+            return reply, (time.perf_counter() - started) * 1000
+        if path == "/session":
+            self.open(protocol.decode_session_request(obj))
+            return protocol.encode_ok(), None
+        if path == "/close":
+            self.close(protocol.decode_session_request(obj))
+            return protocol.encode_ok(), None
+        if path == "/truncate":
+            session_id, length = protocol.decode_truncate_request(obj)
+            self.truncate(session_id, length)
+            return protocol.encode_ok(), None
+        req = protocol.decode_forward_request_ex(obj)
+        started = time.perf_counter()
+        if req.ids is None and req.output is None:
+            out = (self.forward(req.session_id, req.hidden, req.start_pos) if req.truncate_to is None
+                   else self.forward(req.session_id, req.hidden, req.start_pos, req.truncate_to))
+            return protocol.encode_forward_reply(out), (time.perf_counter() - started) * 1000
+        out = self.forward(req.session_id, req.hidden, req.start_pos, req.truncate_to, ids=req.ids,
+                           output=req.output, which=req.which, sampling=req.sampling)
+        reply = protocol.encode_ids_reply(out) if req.output else protocol.encode_forward_reply(out)
+        return reply, (time.perf_counter() - started) * 1000
 
     def forward(self, session_id: str, hidden: Tensor | None, start_pos: int, truncate_to: int | None = None, *,
                 ids=None, output: str | None = None, which: str = "last", sampling=None):
@@ -388,7 +505,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._unread, self._compute_ms = True, None  # a body follows until _read_body has it
         path = self._path()
-        handler = self._extra("POST", path)
+        # Signaling is always an authenticated block operation. A public node
+        # extension must not accidentally override its authentication boundary.
+        handler = None if path == "/rtc/offer" else self._extra("POST", path)
         if handler is not None:
             body = self._read_body()
             if body is None:
@@ -418,50 +537,9 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             self._send(400, _error("body is not JSON"))
             return
-        try:
-            reply = self._dispatch(path, obj)
-        except ChainUnavailable as e:
-            self._send(409 if e.lost else 502, _error(str(e)))
-        except ProtocolError as e:
-            self._send(400, _error(str(e)))
-        except UnknownSession as e:
-            self._send(404, _error(str(e)))
-        except NotImplementedError as e:
-            self._send(501, _error(str(e)))
-        except Exception as e:  # the block failed, or returned something invalid
-            traceback.print_exc(file=sys.stderr)
-            self._send(500, _error(f"block failed: {type(e).__name__}: {e}"[:300]))
-        else:
-            self._send(200, reply)
-
-    def _dispatch(self, path: str, obj) -> dict:
-        if path == "/chain":
-            from commonnet.net.chain import run
-            started = time.perf_counter()
-            reply = run(self._block, obj)
-            self._compute_ms = (time.perf_counter() - started) * 1000
-            return reply
-        if path == "/session":
-            self._block.open(protocol.decode_session_request(obj))
-            return protocol.encode_ok()
-        if path == "/close":
-            self._block.close(protocol.decode_session_request(obj))
-            return protocol.encode_ok()
-        if path == "/truncate":
-            session_id, length = protocol.decode_truncate_request(obj)
-            self._block.truncate(session_id, length)
-            return protocol.encode_ok()
-        req = protocol.decode_forward_request_ex(obj)
-        started = time.perf_counter()
-        if req.ids is None and req.output is None:  # the original request shape: call the block as before
-            out = (self._block.forward(req.session_id, req.hidden, req.start_pos) if req.truncate_to is None
-                   else self._block.forward(req.session_id, req.hidden, req.start_pos, req.truncate_to))
-            self._compute_ms = (time.perf_counter() - started) * 1000
-            return protocol.encode_forward_reply(out)
-        out = self._block.forward(req.session_id, req.hidden, req.start_pos, req.truncate_to, ids=req.ids,
-                                  output=req.output, which=req.which, sampling=req.sampling)
-        self._compute_ms = (time.perf_counter() - started) * 1000
-        return protocol.encode_ids_reply(out) if req.output else protocol.encode_forward_reply(out)
+        reply = self._block.rpc("POST", path, obj, allow_offer=True)
+        self._compute_ms = reply["server_ms"]
+        self._send(reply["status"], reply["body"])
 
     def _read_body(self) -> bytes | None:
         if self.headers.get("Transfer-Encoding"):

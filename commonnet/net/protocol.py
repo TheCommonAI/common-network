@@ -194,7 +194,7 @@ def decode_forward_request_full(obj) -> tuple:
 MAX_IDS = 1 << 20
 OUTPUTS = ("ids",)
 WHICH = ("last", "all")
-CAPS = ("ids_in", "head_out", "chain_v1", "chain_private_v1", "activation_int8_group_v1", "activation_int4_group_v1")
+CAPS = ("ids_in", "head_out", "chain_v1", "chain_private_v1", "activation_int8_group_v1", "activation_int4_group_v1", "rtc_v1", "rtc_private_v1")
 
 
 def check_ids(value) -> list:
