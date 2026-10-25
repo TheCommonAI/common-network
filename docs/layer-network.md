@@ -149,6 +149,19 @@ python -m commonnet.bench --live --bootstrap BOOT.HOST:7480                     
 
 How to test it on real machines: `docs/direct-test.md`. Design and security notes: `commonnet/net/DIRECT.md`.
 
+## Link compression (hidden states between peers)
+
+Token IDs go to the first peer and come back from the last; the hidden state between two peers is the only large
+payload. By default it is sent as **int8, one scale per 64 values** (about 4.3 KB per token instead of 16 KB as float32).
+`COMMONNET_ACTIVATION_CODEC=int4_group` on the client switches to **int4, one float16 scale per 32 values** (about
+2.3 KB per token); `float` turns compression off. The sender never uses a codec some peer on the route lacks: it steps
+down from the one asked for (int4, then int8, then float), so older peers keep working.
+
+Quality (Bonsai 8B at the layer-27 boundary, greedy 40-token outputs on 12 prompts): int8 matched the uncompressed text on
+11 and the top token 99.7% of the time; int4 matched on 7 and 96.6%. Neither changes per-token decode time (the payload is
+a few KB); the saving is on long-prompt prefill. int8 is the default for that reason; int4 is for people who want the
+smaller payload and accept the quality cost. See `docs/24-oct-p&m-testing.md` sections 12, 17, 19 and 20.
+
 ## What survives a dropout
 
 - **A peer dies while others hold the same layers** — the client switches to a replica and replays what it

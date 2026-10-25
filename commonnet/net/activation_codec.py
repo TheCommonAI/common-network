@@ -14,6 +14,11 @@ from commonnet.net import protocol
 CODEC = "int8_group_v1"
 CAPABILITY = "activation_int8_group_v1"
 GROUP_SIZE = 64
+CODEC4 = "int4_group_v1"
+CAPABILITY4 = "activation_int4_group_v1"
+GROUP_SIZE4 = 32
+CODEC_CAPABILITY = {CODEC: CAPABILITY, CODEC4: CAPABILITY4}
+CODEC_PREFERENCE = (CODEC4, CODEC)   # most compressed first; "float" is the last resort
 MAX_DECODED_BYTES = 4 * protocol.MAX_REQUEST_BYTES
 _DTYPES = {"float16": np.dtype("<f2"), "float32": np.dtype("<f4")}
 _FIELDS = ("codec", "shape", "dtype", "group_size", "data", "scales")
@@ -98,3 +103,87 @@ def decode_int8_group(obj) -> protocol.Tensor:
         restored = codes[:, a:a + GROUP_SIZE].astype(np.float64) * scales[:, g, None]
         values[:, a:a + GROUP_SIZE] = np.clip(restored, -limit, limit)
     return protocol.Tensor(shape, dtype, values.tobytes())
+
+
+# ---- int4, group 32, float16 scales: two codes per byte. About 2.3 KB for a 4,096-wide position (float32: 16 KB,
+# int8 above: 4.3 KB). Lossy: on Bonsai 8B at the layer-27 boundary it matched the unquantised greedy text on 7 of
+# 12 prompts (int8: 11 of 12) and the top token 96.6% of the time (docs/24-oct-p&m-testing.md, sections 19-20).
+_FIELDS4 = _FIELDS
+_F16_MIN = np.float32(6.103515625e-05)   # smallest normal float16: a smaller scale would lose its precision
+_F16_MAX = np.float32(65504.0)
+
+
+def _layout4(shape, dtype):
+    shape = protocol.check_shape(shape)
+    dtype = protocol.check_dtype(dtype)
+    count = protocol.numel(shape)
+    if count * protocol.DTYPE_WIDTH[dtype] > MAX_DECODED_BYTES:
+        raise protocol.ProtocolError("activation exceeds the decoded size limit")
+    rows, width = shape[0] * shape[1], shape[2]
+    groups = (width + GROUP_SIZE4 - 1) // GROUP_SIZE4
+    padded = groups * GROUP_SIZE4          # the last group is zero-padded, so any hidden width works
+    sizes = (rows * padded // 2, rows * groups * 2)
+    if sum(4 * ((n + 2) // 3) for n in sizes) > protocol.MAX_REQUEST_BYTES:
+        raise protocol.ProtocolError("compressed activation exceeds the payload size limit")
+    return shape, dtype, rows, width, groups, padded, sizes
+
+
+def encode_int4_group(tensor: protocol.Tensor) -> dict:
+    """Symmetric int4 (-7..7), one float16 scale per 32 values of each position, two codes per byte."""
+    if not isinstance(tensor, protocol.Tensor):
+        raise TypeError("encode_int4_group takes a protocol.Tensor")
+    shape, dtype, rows, width, groups, padded, _ = _layout4(tensor.shape, tensor.dtype)
+    values = np.zeros((rows, padded), dtype=np.float32)
+    values[:, :width] = np.frombuffer(tensor.data, dtype=_DTYPES[dtype]).reshape(rows, width)
+    if not np.isfinite(values).all():
+        raise protocol.ProtocolError("cannot compress non-finite activations")
+    values = values.reshape(rows, groups, GROUP_SIZE4)
+    peak = np.max(np.abs(values), axis=2)
+    scale16 = np.clip(peak / np.float32(7), _F16_MIN, _F16_MAX).astype("<f2")
+    codes = np.clip(np.rint(values / scale16.astype(np.float32)[:, :, None]), -7, 7).astype(np.int8).reshape(rows, padded)
+    nib = (codes & 0x0F).astype(np.uint8)
+    packed = nib[:, 0::2] | (nib[:, 1::2] << 4)
+    return {"codec": CODEC4, "shape": list(shape), "dtype": dtype, "group_size": GROUP_SIZE4,
+            "data": _b64(packed.tobytes()), "scales": _b64(scale16.tobytes())}
+
+
+def decode_int4_group(obj) -> protocol.Tensor:
+    """Strictly validate and restore a bounded int4 payload to its original dtype."""
+    protocol._fields(obj, "compressed activation", _FIELDS4)
+    if obj["codec"] != CODEC4 or type(obj["group_size"]) is not int or obj["group_size"] != GROUP_SIZE4:
+        raise protocol.ProtocolError("unsupported activation codec or group size")
+    if not isinstance(obj["shape"], list):
+        raise protocol.ProtocolError("activation shape must be a JSON array")
+    shape, dtype, rows, width, groups, padded, sizes = _layout4(obj["shape"], obj["dtype"])
+    raw_codes = _unb64(obj["data"], sizes[0], "data")
+    raw_scales = _unb64(obj["scales"], sizes[1], "scales")
+    packed = np.frombuffer(raw_codes, dtype=np.uint8).reshape(rows, padded // 2)
+    codes = np.empty((rows, padded), dtype=np.int8)
+    codes[:, 0::2], codes[:, 1::2] = (packed & 0x0F).astype(np.int8), (packed >> 4).astype(np.int8)
+    codes = np.where(codes > 7, codes - 16, codes)
+    if np.any(codes == -8):
+        raise protocol.ProtocolError("activation codes must be between -7 and 7")
+    scales = np.frombuffer(raw_scales, dtype="<f2").astype(np.float32).reshape(rows, groups)
+    if not np.isfinite(scales).all() or np.any(scales <= 0):
+        raise protocol.ProtocolError("activation scales must be finite and positive")
+    restored = codes.reshape(rows, groups, GROUP_SIZE4).astype(np.float64) * scales[:, :, None]
+    limit = np.finfo(_DTYPES[dtype]).max
+    values = np.clip(restored, -limit, limit).astype(_DTYPES[dtype]).reshape(rows, padded)[:, :width]
+    return protocol.Tensor(shape, dtype, np.ascontiguousarray(values).tobytes())
+
+
+def encode_activation(codec: str, tensor: protocol.Tensor):
+    """The wire form of a hidden state for `codec`: a compressed dict, or the plain tensor encoding for float."""
+    if codec == CODEC4:
+        return encode_int4_group(tensor)
+    if codec == CODEC:
+        return encode_int8_group(tensor)
+    return protocol.encode_tensor(tensor)
+
+
+def decode_activation(codec: str, obj) -> protocol.Tensor:
+    if codec == CODEC4:
+        return decode_int4_group(obj)
+    if codec == CODEC:
+        return decode_int8_group(obj)
+    return protocol.decode_tensor(obj)
