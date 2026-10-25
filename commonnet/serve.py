@@ -137,6 +137,11 @@ def parse_request(body: dict) -> dict:
 class NetworkBackend:
     """The real backend: a Client4 on one worker thread, a fresh route per request."""
 
+    last_spec = None      # SpecStats of the last speculative request
+    last_reason = None    # why the last request did not speculate (None when it did)
+    last_k = 0
+    _auto_failed = False
+
     def __init__(self, network, checkpoint: str | None = None, *, fmt: str = "mlx4", hidden_dtype=None,
                  draft: str | None = None, draft_k: int = 4, auto_draft: bool = False):
         import torch
@@ -209,18 +214,21 @@ class NetworkBackend:
     def _generate(self, prompt_ids, max_tokens, temperature, top_p, seed):
         endpoints, transport = self.network.plan()
         self.client.transport = transport
+        self.last_spec, self.last_reason, self.last_k = None, None, 0
         try:
             drafter = self.drafter if self.drafter is not None else self._lazy_drafter(endpoints, transport, temperature)
             if drafter is None:
+                if self.last_reason is None:
+                    self.last_reason = self.draft_note
                 yield from self.client.generate_stream(endpoints, prompt_ids, max_tokens, temperature=temperature,
                                                        top_p=top_p, seed=seed, stop_ids=self.stop_ids)
                 return
             from commonnet import speculative
             stats = speculative.SpecStats()
+            self.last_spec, self.last_k = stats, self.draft_k
             yield from speculative.generate_stream(self.client, endpoints, prompt_ids, max_tokens, drafter=drafter,
                                                    k=self.draft_k, temperature=temperature, top_p=top_p, seed=seed,
                                                    stop_ids=self.stop_ids, stats=stats)
-            self.last_spec = stats
         finally:
             transport.shutdown()
 
@@ -229,12 +237,23 @@ class NetworkBackend:
 
         Eligible only when the request is greedy, every hop advertises the chain (draft-verify) capability, and the
         drafter loads (cached; a failed load is not retried). Runs on the worker thread."""
-        if not self.auto_draft or self._auto_failed or (temperature and temperature > 0):
+        if not self.auto_draft:
+            self.last_reason = self.draft_note
+            return None
+        if self._auto_failed:
+            self.last_reason = self.draft_note
+            return None
+        if temperature and temperature > 0:
+            self.last_reason = "not greedy (temperature > 0): sampled requests do not speculate"
             return None
         try:
-            if not all(CHAIN_CAPABILITY in transport.capabilities(ep) for ep in endpoints):
-                return None
-        except Exception:
+            for i, ep in enumerate(endpoints):
+                if CHAIN_CAPABILITY not in transport.capabilities(ep):
+                    name = ep.get("url") or ep.get("peer") if isinstance(ep, dict) else None
+                    self.last_reason = f"hop {i}{' (' + str(name) + ')' if name else ''} lacks {CHAIN_CAPABILITY}"
+                    return None
+        except Exception as e:
+            self.last_reason = f"could not read hop capabilities: {type(e).__name__}: {e}"[:300]
             return None
         try:
             repo = [DEFAULT_DRAFT]
@@ -251,8 +270,21 @@ class NetworkBackend:
             print(f"speculative decoding is off: {self.draft_note}", file=sys.stderr, flush=True)
             return None
 
+    def speculation(self) -> dict:
+        d = self.drafter
+        kind = "none" if d is None else ("mlx" if "Mlx" in type(d).__name__ else "torch" if "Torch" in type(d).__name__
+                                           else type(d).__name__)
+        st = self.last_spec
+        last = {"k": self.last_k, "proposed": st.drafted if st else 0, "accepted": st.accepted if st else 0}
+        if self.last_reason:
+            last["reason"] = self.last_reason
+        return {"enabled": bool(self.auto_draft or d is not None), "note": self.draft_note, "drafter": kind,
+                "last_request": last}
+
     def health(self) -> dict:
-        return self.network.status()
+        status = dict(self.network.status())
+        status["speculation"] = self.speculation()
+        return status
 
 
 class LazyBackend:
@@ -305,6 +337,8 @@ class LazyBackend:
         status["ready"] = self.ready
         if self.error:
             status["error"] = self.error
+        if self._backend is not None and hasattr(self._backend, "speculation"):
+            status["speculation"] = self._backend.speculation()
         return status
 
 

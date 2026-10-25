@@ -1456,6 +1456,21 @@ def _say_no_local_peer(health: str, status: dict | None) -> None:
         print(dim("  → or ask the model on this machine:        common ask \"...\" --local"), file=sys.stderr)
 
 
+def _speculation_line(base: str, verbose: bool) -> str | None:
+    """One line on whether the node speculated: always when it did not, only with -v when it did."""
+    try:
+        spec = _get_json(base + "/health", timeout=3).get("speculation")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(spec, dict):
+        return None
+    last = spec.get("last_request") or {}
+    proposed, accepted = last.get("proposed") or 0, last.get("accepted") or 0
+    if proposed:
+        return f"speculation: on, accepted {accepted}/{proposed} drafted" if verbose else None
+    return f"speculation: off ({last.get('reason') or spec.get('note') or 'unknown'})"
+
+
 def _ask_layers(question: str, model: str | None, as_json: bool, quiet: bool, verbose: bool,
                 region: str | None = None, compose: str | None = None, temperature: float | None = None) -> None:
     status, health = _read_layer_status()
@@ -1580,6 +1595,9 @@ def _ask_layers(question: str, model: str | None, as_json: bool, quiet: bool, ve
             parts.append(f"~{tok_s:g} tok/s")
         parts.append(f"latency {total_ms}ms")
         print(dim("   ·   ".join(parts)))
+        line = _speculation_line(base, verbose)
+        if line:
+            print(dim(line), file=sys.stderr)
 
 
 def cmd_ask(gateway: str, question: str, region: str | None, model: str | None,
