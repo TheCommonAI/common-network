@@ -1,0 +1,15 @@
+{
+  "scope": "Two peers on one Mac through the same home NAT using public ICE candidates only; not a two-location WAN test",
+  "aiortc_version": "1.15.0",
+  "router_or_firewall_changes": false,
+  "signaling": "In-process offer/answer callback; HTTP signaling and authentication are covered separately by integration tests",
+  "candidate_policy": "public",
+  "connection_state": "connected",
+  "ice_state": "completed",
+  "connect_seconds": 10.17,
+  "payload_checks": [
+    {"request_bytes": 200000, "verified_received_length": 200000, "transfer_seconds": 0.013},
+    {"request_bytes": 2000000, "verified_received_length": 2000000, "transfer_seconds": 0.372}
+  ],
+  "limits": "No model speed-up, model-quality comparison, Windows run, or separate-router connectivity is established by these measurements"
+}

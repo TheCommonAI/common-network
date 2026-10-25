@@ -140,7 +140,8 @@ class Decision(unittest.TestCase):
         n, served = self.run_case({"reachable": False, "ip": PUBLIC})
         self.assertFalse(served)
         self.assertIsNone(n.url)
-        self.assertTrue(any(m.startswith("mode: tunnel") and "not reachable from outside" in m for m in n.logs))
+        self.assertTrue(any("automatic direct connections" in m for m in n.logs))
+        self.assertFalse(any("forward TCP" in m for m in n.logs))
 
     def test_old_gateway_means_no_answer_and_the_tunnel(self):
         n, served = self.run_case(None)
@@ -149,7 +150,7 @@ class Decision(unittest.TestCase):
     def test_gateway_seeing_another_address_is_not_trusted(self):
         n, served = self.run_case({"reachable": True, "ip": "8.8.4.4"})
         self.assertFalse(served)
-        self.assertTrue(any("not trusting its check" in m for m in n.logs))
+        self.assertFalse(any("not trusting its check" in m for m in n.logs))
 
     def test_never_publishes_a_private_address(self):
         d = direct.decide(direct.DirectConfig(auto=True), 7471, lambda ip, p: True,
@@ -176,7 +177,7 @@ class Cli(unittest.TestCase):
         import join
         ns = types.SimpleNamespace
         self.assertEqual(join._direct_flags(ns(direct=False, no_direct=False)), ["--auto-direct"])
-        self.assertEqual(join._direct_flags(ns(direct=False, no_direct=True)), [])
+        self.assertEqual(join._direct_flags(ns(direct=False, no_direct=True)), ["--no-rtc"])
         self.assertEqual(join._direct_flags(ns(direct=True, no_direct=False))[0], "--direct")
 
 

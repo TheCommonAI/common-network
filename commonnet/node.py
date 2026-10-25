@@ -773,10 +773,11 @@ class Node:
         if self.decision is None:   # decided once; a move to another window keeps the same address
             decide = self._decider or direct_mod.decide
             dial = self._dial_back(fp)
-            self.decision = decide(cfg, server.port, dial, log=self.log)
-            self.log(f"direct address decision: {self.decision.kind}"
-                     + (f" {self.decision.ip}:{self.decision.port}" if self.decision.direct else "")
-                     + (f" ({self.decision.detail})" if self.decision.detail else ""))
+            self.decision = decide(cfg, server.port, dial, log=(lambda _: None) if cfg.auto else self.log)
+            if not cfg.auto:
+                self.log(f"direct address decision: {self.decision.kind}"
+                         + (f" {self.decision.ip}:{self.decision.port}" if self.decision.direct else "")
+                         + (f" ({self.decision.detail})" if self.decision.detail else ""))
         d = self.decision
         if d.direct:
             with self._lock:
@@ -795,8 +796,9 @@ class Node:
                             + direct_mod.forward_hint(port, cfg.dht_port or None)
                             + ", or drop --no-tunnel-fallback to use a Cloudflare tunnel instead.")
         if cfg.auto:
-            self.log(f"mode: tunnel ({d.detail}; port {port} is not reachable from outside). To serve directly, "
-                     + direct_mod.forward_hint(port, cfg.dht_port or None))
+            self.log("peer links: automatic direct connections; tunnel fallback available"
+                     if os.environ.get("COMMONNET_RTC", "1") != "0" else
+                     "peer links: HTTP/tunnel only (automatic peer links disabled)")
         else:
             self.log(f"not reachable directly ({d.detail}); using a Cloudflare tunnel instead. To serve directly, "
                      + direct_mod.forward_hint(port, cfg.dht_port or None))
@@ -817,7 +819,8 @@ class Node:
                     self._gw_check = mesh_directory.check(self.gateway, port, fp) or {}
                 g = self._gw_check
                 if g.get("ip") and g["ip"] != ip:
-                    self.log(f"the gateway sees this machine as {g['ip']}, not {ip}; not trusting its check")
+                    if not self.direct.auto:
+                        self.log(f"the gateway sees this machine as {g['ip']}, not {ip}; not trusting its check")
                     answers.append(None)
                 else:
                     answers.append(g.get("reachable"))
@@ -1187,6 +1190,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--identity-dir", type=Path, help="where this peer's key lives (default: ~/.common-network/net/<network>)")
     p.add_argument("--stub", action="store_true", help="serve an identity block with no weights (tests)")
     p.add_argument("--no-tunnel", action="store_true", help="do not open a tunnel; publish --advertise or the loopback URL")
+    p.add_argument("--no-rtc", action="store_true", help="disable automatic WebRTC peer links; use HTTP/tunnels only")
     p.add_argument("--advertise", metavar="URL", help="with --no-tunnel: the URL to publish")
     p.add_argument("--status-file", type=Path, metavar="PATH",
                    help=f"where to write the status JSON the desktop app reads every 2 s (or set {STATUS_ENV}; "
@@ -1241,6 +1245,20 @@ def direct_config(args):
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    previous = os.environ.get("COMMONNET_RTC")
+    if args.no_rtc:
+        os.environ["COMMONNET_RTC"] = "0"
+    try:
+        return _main(args)
+    finally:
+        if args.no_rtc:
+            if previous is None:
+                os.environ.pop("COMMONNET_RTC", None)
+            else:
+                os.environ["COMMONNET_RTC"] = previous
+
+
+def _main(args) -> int:
     if args.advertise and not args.no_tunnel:
         print("error: --advertise is only for --no-tunnel", file=sys.stderr)
         return 2

@@ -204,7 +204,7 @@ class ApiClientPart(NodeCase):
                 fetched.append((self.repo, client))
                 return "/client-ckpt"
 
-        def fake_backend(network, checkpoint, fmt=None, hidden_dtype=None):
+        def fake_backend(network, checkpoint, fmt=None, hidden_dtype=None, auto_draft=False):
             built.update(checkpoint=checkpoint, fmt=fmt)
             return object()
 

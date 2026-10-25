@@ -209,17 +209,20 @@ class NetworkBackend:
     def _generate(self, prompt_ids, max_tokens, temperature, top_p, seed):
         endpoints, transport = self.network.plan()
         self.client.transport = transport
-        drafter = self.drafter if self.drafter is not None else self._lazy_drafter(endpoints, transport, temperature)
-        if drafter is None:
-            yield from self.client.generate_stream(endpoints, prompt_ids, max_tokens, temperature=temperature,
-                                                   top_p=top_p, seed=seed, stop_ids=self.stop_ids)
-            return
-        from commonnet import speculative
-        stats = speculative.SpecStats()
-        yield from speculative.generate_stream(self.client, endpoints, prompt_ids, max_tokens, drafter=drafter,
-                                               k=self.draft_k, temperature=temperature, top_p=top_p, seed=seed,
-                                               stop_ids=self.stop_ids, stats=stats)
-        self.last_spec = stats
+        try:
+            drafter = self.drafter if self.drafter is not None else self._lazy_drafter(endpoints, transport, temperature)
+            if drafter is None:
+                yield from self.client.generate_stream(endpoints, prompt_ids, max_tokens, temperature=temperature,
+                                                       top_p=top_p, seed=seed, stop_ids=self.stop_ids)
+                return
+            from commonnet import speculative
+            stats = speculative.SpecStats()
+            yield from speculative.generate_stream(self.client, endpoints, prompt_ids, max_tokens, drafter=drafter,
+                                                   k=self.draft_k, temperature=temperature, top_p=top_p, seed=seed,
+                                                   stop_ids=self.stop_ids, stats=stats)
+            self.last_spec = stats
+        finally:
+            transport.shutdown()
 
     def _lazy_drafter(self, endpoints, transport, temperature):
         """The default-on drafter, or None for plain decoding. Never raises: any doubt means plain decoding.
