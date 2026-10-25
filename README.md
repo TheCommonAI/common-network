@@ -117,110 +117,26 @@ common help           # everything else
 Any OpenAI-compatible client can use the local API at `http://127.0.0.1:11440/v1`
 while `common join` is running.
 
-## Running your own gateway
+## Gateway
 
-This section is for running a gateway of your own — a school, a lab, a fork.
-
-Requirements: Python 3.11+, PostgreSQL with `pgvector`.
-
-```bash
-cd gateway
-uv venv --python 3.11 .venv          # or: python3.11 -m venv .venv
-uv pip install -p .venv/bin/python -r requirements.txt
-
-createdb common_network
-psql -d common_network -c "create extension if not exists vector;"
-DATABASE_URL=postgresql://localhost/common_network python -m app.migrate
-
-cp .env.example .env                 # edit DATABASE_URL / OPENROUTER_API_KEY
-.venv/bin/uvicorn app.main:app --reload
-```
-
-Upgrading from v0.1: run `python -m app.migrate` — it applies every migration
-in order and is idempotent. Existing decision rows read back as
-`topology: "single"`, which is what they were.
+The v0.1 gateway (node registry, request routing, specialist composition, the
+catalogue) has been retired. `gateway/` is now a small signpost service: `/health`,
+`/manifest`, `/seeds`, and the rendezvous directory (`POST /announce`,
+`GET /directory`, `POST /check`) that lets `common join` find peers without a
+typed address. Everything else returns 410 Gone. Details:
+[docs/layer-network.md](docs/layer-network.md#gateway-directory-rendezvous).
 
 ```bash
-curl http://localhost:8000/v1/chat/completions -i \
-  -H "Content-Type: application/json" \
-  -d '{"model":"auto","messages":[{"role":"user","content":"Explain recursion"}]}'
+cd join && python test_join.py
+cd common && python test_common.py
+cd gateway && python -m unittest discover tests
 ```
-
-The bare curl works locally because the demo `.env` sets
-`REQUIRE_CONTRIBUTION=false` (its seed nodes have no tokens). On a gateway
-running the shipped default, add `-H "X-Common-Node-Token: <what common join
-printed>"` — or pass the token as the API key from any OpenAI SDK client.
-
-Or open **`/dashboard`**.
-
-### Tests
-
-Three suites, all stdlib-only, all run from their own directory:
-
-```bash
-cd gateway && python tests/run_all.py    # the gateway: 14 suites
-cd join    && python test_join.py        # the worker and the runtime: 66 checks
-cd common  && python test_common.py      # the CLI: 128 checks
-```
-
-No pytest, no database, no network beyond localhost, no embedding model — the
-suites stub what they need, so there is no reason not to run them. There is no
-CI yet, which is exactly why they are listed here: a test nobody runs is
-decoration.
-
-All three are safe to run on a working machine. `test_common.py` points the CLI
-at a temporary install directory and a gateway that does not exist; it never
-reads or writes `~/.common-network`.
-
-## Endpoints
-
-| Endpoint | What it gives you |
-|---|---|
-| `POST /v1/chat/completions` | OpenAI-compatible. `X-Common-Compose: never\|auto\|always` overrides composition per request. Contribution-gated by default: send a registered node's token (`X-Common-Node-Token`, or the `Authorization: Bearer` API-key slot). |
-| `GET /nodes`, `POST /nodes`, `DELETE /nodes/{id}` | The registry. Registration is permissionless. |
-| `GET /dashboard` | Public status: nodes, coverage, catalogue, routing, recent decisions. |
-| `GET /admin?token=…` | Operators view: failing nodes, error rates, limiter state. 404s unless `ADMIN_TOKEN` is set. |
-| `GET /source` | The repository this instance was built from (AGPL §13). |
-| `GET /decisions/recent?topology=panel` | The routing log, filterable by topology. |
-| `GET /decisions/composition` | How often each topology runs, and what the verifier caught. |
-| `GET /demand/gaps` | Under-served domains, and demand nothing in the catalogue covers. |
-| `GET /demand/plan?machines=20&ram_gb=8` | An install plan for a set of machines. |
-| `GET /catalogue`, `POST /assign` | The specialist catalogue, and what a given machine should run. |
-| `WS /nodes/{id}/connect` | Authenticated outbound-only Android/iOS worker channel; see [the protocol](gateway/MOBILE-NODES.md). |
-
-## The catalogue
-
-`catalogue/catalogue.seed.yaml` is the source of truth for what the network will
-auto-install. The live catalogue currently contains Bonsai 2 2B/4B/9B and the
-distinct first-generation Bonsai 8B. Bonsai 2 uses ternary `Q2_0` GGUF; the 8B
-entry uses the upstream-compatible `Q2_0_g64` GGUF. Stock upstream llama.cpp
-needs build b11555 or later for Bonsai 2's Hadamard-activation runtime and does
-not support the smaller `PQ2_0`/`PTQ1_0` packings. The non-`g64` Bonsai 8B
-layout is fork-only. Catalogue requirements and format caveats are exposed by
-`GET /catalogue` and `POST /assign`; do not substitute standard Ollama models.
-Mobile contribution eligibility and its protocol are documented in
-[gateway/MOBILE-NODES.md](gateway/MOBILE-NODES.md).
 
 ## Security
 
-Registration is permissionless — that is the thesis — which makes the security
-model worth stating rather than assuming. Using the network is gated on
-contributing to it (`REQUIRE_CONTRIBUTION`, on by default), requests are
-rate-limited per client, node registration requires the node's private token,
-and endpoint URLs are re-validated against cloud-metadata ranges on every
-health pass. What a stranger can and cannot do, what an operator of a public
-gateway should set, and the known limits (`common test` executes model code;
-a node is trusted for identity, not behaviour): see
-[SECURITY.md](SECURITY.md).
-
-## Legacy gateway network (v0.1)
-
-The original network routed each request to one whole-model node chosen by a
-gateway (`common join --legacy`, `--lan`, `--model`, the catalogue, and the
-optional multi-specialist composition mode, which is off by default and has not
-been shown to answer better than a single node). It is kept for compatibility
-and for operators who run their own gateway. The layer network above is the
-current design; the earlier operator-managed RPC-group prototype has been removed.
+The network is open and cooperative: peers see activations and nothing proves a
+peer computes honestly. What a stranger can and cannot do, and the known limits,
+are in [SECURITY.md](SECURITY.md).
 
 ## Licence
 
