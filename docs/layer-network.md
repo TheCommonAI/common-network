@@ -62,6 +62,24 @@ A small local model guesses 8 tokens, the network verifies them in one pass and 
 shared across several tokens: about 1.7x on chat and 2.3 to 3.1x on code and quoted text at 50 ms hops, with identical greedy
 output. Greedy only (`temperature: 0`); it switches itself off against older peers. See [flash-drafter.md](flash-drafter.md).
 
+## Local front (opt in)
+
+`common join --network --local-front on` (or `N`, a stage boundary, or `auto`; env `COMMONNET_LOCAL_FRONT`) makes a node that also
+runs the chat client hold the first layers of the model locally, in the client's process and not served over HTTP, next to its
+own assigned window. The client embeds and runs layers 0..F itself, then sends the layer-F hidden state straight to the peer
+that holds layer F onward. Replies are token IDs as before; drafts, speculative verify, rollback and replica failover work
+unchanged (a failed remote peer is replayed from the retained layer-F hidden states).
+
+- **Saves** the client-to-first-peer hop (about one round trip per token) and means no peer ever sees your prompt tokens: peers
+  only receive layer-F hidden states (still activations, not encrypted, so this is less exposure, not privacy).
+- **Costs** memory: about 1 GB for 9 layers of Qwen3-8B 4-bit, about 0.5 GB for Bonsai 8B, about 1.5 GiB NF4. It helps only the
+  machine that asks; other clients still use the network as before. A node that already serves from layer 0 reuses that block
+  (loaded once) and the route starts at its window end.
+- `auto` benchmarks the first stage once at startup and turns the front on only if one decode token through it takes under
+  25 ms (median) and at least 1.5x its weight size is free; otherwise it stays off and says why.
+- Needs a peer whose window starts at F. If none does, the route silently uses the whole model on peers (the front is idle).
+- Default is off: without the flag nothing changes.
+
 ## Status file (for apps that show what a peer is doing)
 
 `commonnet.node` (so `common join --network`) writes a JSON status document every 2 s and on every change,

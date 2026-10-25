@@ -66,10 +66,14 @@ def _default_fetch_manifest(url: str, timeout: float):
 class Network:
     def __init__(self, seeds=(), manifest=None, *, cache_dir=None, timeout: float = 5.0,
                  refresh_interval: float = 2.0, wait_s: float = 30.0, now=time.time, clock=time.monotonic,
-                 exchange=None, table=None, fetch_manifest=None, dht=None, gateway=None):
+                 exchange=None, table=None, fetch_manifest=None, dht=None, gateway=None, local_front=None):
         # `dht` (optional): an object with find_peers() -> [signed record], normally a started commonnet.dht.DhtNode.
         # With it, refresh() also asks the DHT, so no seed URL is needed. Without it nothing changes.
         self.dht = dht
+        # local_front (a commonnet.localfront.LocalFront or None): this machine runs layers [0, F) itself, so the
+        # route covers [F, end). A route that cannot start at F falls back to the whole model on peers.
+        self.local_front = local_front
+        self._front_active = False
         self.gateway = gateway   # optional rendezvous directory URL: one more peer source in refresh(); fails soft
         self._pins: dict[str, str] = {}      # "ip:port" -> certificate fingerprint of each direct peer (shared with the BlockClients)
         self.seeds = [s.rstrip("/") for s in seeds]
@@ -265,14 +269,27 @@ class Network:
         manifest = self.manifest
         self.refresh()
         try:
-            return best_route(manifest, self.table.live(), prefer_backend, self._now())
+            return self._best(prefer_backend)
         except NoRoute:
             pass
         self.refresh(force=True)
         try:
-            return best_route(manifest, self.table.live(), prefer_backend, self._now())
+            return self._best(prefer_backend)
         except NoRoute as e:
             raise self._explain(e) from None
+
+    def _best(self, prefer_backend):
+        live, now = self.table.live(), self._now()
+        front = self.local_front
+        if front is not None:
+            try:
+                route = best_route(self.manifest, live, prefer_backend, now, start=front.end)
+                self._front_active = True
+                return route
+            except NoRoute:
+                pass   # nobody serves [F, end) from a window starting at F: use the whole model on peers
+        self._front_active = False
+        return best_route(self.manifest, live, prefer_backend, now)
 
     def _explain(self, error: NoRoute) -> NoLayersServed:
         manifest, live = self.manifest, self.table.live()
@@ -324,14 +341,18 @@ class Network:
         urls = {f"hop{i}": h.primary["url"] for i, h in enumerate(hops)}
         tokens = {f"hop{i}": self._tokens(h.primary) for i, h in enumerate(hops)}
         replicas = {f"hop{i}": [(r["url"], self._tokens(r)) for r in h.alternates] for i, h in enumerate(hops)}
-        return HttpTransport(urls, tokens=tokens, replicas=replicas, on_exhausted=self._fresh_for,
-                             wait_s=self.wait_s if wait_s is None else wait_s, **transport_kwargs)
+        transport = HttpTransport(urls, tokens=tokens, replicas=replicas, on_exhausted=self._fresh_for,
+                                  wait_s=self.wait_s if wait_s is None else wait_s, **transport_kwargs)
+        if self._front_active:
+            transport.local_front = self.local_front
+        return transport
 
     def endpoints(self) -> list[BlockEndpoint]:
         """The BlockEndpoints of the route transport() last built (it builds one if there is none)."""
         if not self._hops:
             self.transport()
-        return [BlockEndpoint(f"hop{i}", h.window[0], h.window[1]) for i, h in enumerate(self._hops)]
+        eps = [BlockEndpoint(f"hop{i}", h.window[0], h.window[1]) for i, h in enumerate(self._hops)]
+        return [self.local_front.endpoint()] + eps if self._front_active else eps
 
     def plan(self, **kw):
         """(endpoints, transport) from one route, so the two always agree."""

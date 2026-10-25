@@ -59,14 +59,14 @@ class NetworkE2E(SplitTestBase):
         """Stop a peer's server (and drop the pooled connections to it) just before the transport's Nth call to `hop`."""
         real, seen = transport.forward, {"n": 0}
 
-        def forward(endpoint, session_id, hidden, start_pos):
+        def forward(endpoint, session_id, hidden, start_pos, **kw):
             if endpoint.name == hop:
                 seen["n"] += 1
                 if seen["n"] == call_number:
                     self.servers[peer].stop()
                     for c in list(transport._clients.values()):
                         c.close_connections()
-            return real(endpoint, session_id, hidden, start_pos)
+            return real(endpoint, session_id, hidden, start_pos, **kw)
 
         transport.forward = forward
 

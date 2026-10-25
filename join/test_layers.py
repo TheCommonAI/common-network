@@ -324,6 +324,21 @@ class JoinFlag(unittest.TestCase):
         args = argparse.Namespace(network="", api=11440, layers="27-36", no_update=False)
         self.assertIn("--layers=27-36", join._service_argv(args))
 
+    def test_local_front_is_passed_to_the_node_and_kept_by_a_service(self):
+        with mock.patch.object(join, "run_network_member") as run, \
+                mock.patch.object(sys, "argv", ["join.py", "--no-update", "--network", "--local-front", "auto"]):
+            join.main()
+        run.assert_called_once_with(None, ["--api", "11440", "--local-front", "auto", "--auto-direct"])
+        with mock.patch.object(join, "run_network_member") as run, \
+                mock.patch.object(sys, "argv", ["join.py", "--no-update", "--network"]):
+            join.main()
+        run.assert_called_once_with(None, ["--api", "11440", "--auto-direct"])   # off by default: nothing passed
+        import argparse
+        args = argparse.Namespace(network="", api=11440, local_front="9", no_update=False)
+        self.assertIn("--local-front=9", join._service_argv(args))
+        args = argparse.Namespace(network="", api=11440, no_update=False)
+        self.assertFalse([a for a in join._service_argv(args) if a.startswith("--local-front")])
+
     def test_a_permanent_service_keeps_the_api(self):
         import argparse
         args = argparse.Namespace(network="", api=11440, no_update=False)
