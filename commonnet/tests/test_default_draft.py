@@ -119,3 +119,19 @@ class IdenticalOutput(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HealthField(unittest.TestCase):
+    def test_health_reports_speculation_and_reason(self):
+        b = backend()
+        b.network.status = lambda: {"peers": 1}
+        eps, tr = b.network.plan()
+        b._lazy_drafter(eps, tr, 0.7)
+        h = b.health()["speculation"]
+        self.assertTrue(h["enabled"])
+        self.assertEqual(h["drafter"], "none")
+        self.assertIn("not greedy", h["last_request"]["reason"])
+        self.assertEqual(h["last_request"]["proposed"], 0)
+        b.last_reason = None
+        b._lazy_drafter(eps, FakeTransport(caps=()), 0)
+        self.assertIn("hop 0", b.health()["speculation"]["last_request"]["reason"])
