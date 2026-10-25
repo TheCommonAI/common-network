@@ -1560,12 +1560,13 @@ def _ask_layers(question: str, model: str | None, as_json: bool, quiet: bool, ve
     total_ms = int((time.monotonic() - start) * 1000)
 
     answer = "".join(full)
+    output_tokens, tok_s = _output_rate(answer, total_ms, ttft_ms)
     answer_text, answer_truncated = _truncate_bytes(answer, ANSWER_MAX_BYTES)
     _write_exchange_stash({
         "local": False, "gateway": None, "network": "layers",
         "question": question, "answer": answer_text, "answer_truncated": answer_truncated,
         "request": {"region": region, "node": None, "model": model, "compose": compose},
-        "timings": {"routing_ms": None, "ttft_ms": ttft_ms, "total_ms": total_ms},
+        "timings": {"routing_ms": None, "ttft_ms": ttft_ms, "total_ms": total_ms, "tok_s": tok_s, "output_tokens_estimate": output_tokens},
         "routing": {"topology": "layers", "peer": peer_id, "peers_online": n_peers},
     })
 
@@ -1575,6 +1576,7 @@ def _ask_layers(question: str, model: str | None, as_json: bool, quiet: bool, ve
         print(json.dumps({
             "answer": answer, "node": peer_id or "layer-network", "score": None,
             "latency_ms": total_ms, "routing_ms": None, "ttft_ms": ttft_ms, "total_ms": total_ms,
+            "tok_s": tok_s, "output_tokens_estimate": output_tokens,
             "topology": "single", "network": "layers", "panel": None, "aggregator": None,
             "compose_reason": None, "candidates": n_peers or None, "margin_over_runner_up": None,
             "checks_run": None, "checks_failed": None, "disagreements": None,
@@ -1588,6 +1590,9 @@ def _ask_layers(question: str, model: str | None, as_json: bool, quiet: bool, ve
         if ttft_ms is not None:
             parts.append(f"first token {_fmt_ms(ttft_ms)}")
         parts.append(f"total {_fmt_ms(total_ms)}")
+        if tok_s is not None:
+            parts.append(f"~{tok_s:g} tok/s")
+        parts.append(f"latency {total_ms}ms")
         print(dim("   ·   ".join(parts)))
 
 
@@ -2002,7 +2007,9 @@ def _cmd_ask_gateway(gateway: str, question: str, region: str | None, model: str
     #
     # Normalised fields, never the raw header map: that carries Set-Cookie,
     # CDN noise and server banners, and this file is one the user may open.
-    answer_text, answer_truncated = _truncate_bytes("".join(full), ANSWER_MAX_BYTES)
+    answer = "".join(full)
+    output_tokens, tok_s = _output_rate(answer, latency_ms, ttft_ms)
+    answer_text, answer_truncated = _truncate_bytes(answer, ANSWER_MAX_BYTES)
     routing = {k: v for k, v in {
         "node": node_name,
         "score": _as_float(score),
@@ -2028,17 +2035,20 @@ def _cmd_ask_gateway(gateway: str, question: str, region: str | None, model: str
         "request": {"region": region, "node": node_override, "model": model,
                     "compose": compose},
         "timings": {"routing_ms": routing_ms, "ttft_ms": ttft_ms,
-                    "total_ms": latency_ms},
+                    "total_ms": latency_ms, "tok_s": tok_s,
+                    "output_tokens_estimate": output_tokens},
         "routing": routing,
     })
 
     if as_json:
         print(json.dumps({
-            "answer": "".join(full), "node": node_name, "score": score,
+            "answer": answer, "node": node_name, "score": score,
             # `latency_ms` is the whole request, kept under its old name so
             # existing consumers keep working -- it was always this. The three
             # numbers below it are the ones that actually locate a slowdown.
             "latency_ms": latency_ms,
+            "tok_s": tok_s,
+            "output_tokens_estimate": output_tokens,
             "routing_ms": routing_ms,
             "ttft_ms": ttft_ms,
             "total_ms": latency_ms,
@@ -2083,6 +2093,9 @@ def _cmd_ask_gateway(gateway: str, question: str, region: str | None, model: str
             # the node's model load, which is why it dwarfs it on a cold node.
             parts.append(f"first token {_fmt_ms(ttft_ms)}")
         parts.append(f"total {_fmt_ms(latency_ms)}")
+        if tok_s is not None:
+            parts.append(f"~{tok_s:g} tok/s")
+        parts.append(f"latency {latency_ms}ms")
         print(dim("   ·   ".join(parts)))
         if ttft_ms is not None and routing_ms is not None and ttft_ms > 5000:
             # Above a few seconds, essentially all of the wait is the node
@@ -2748,6 +2761,18 @@ def _fmt_ms(ms: int | None) -> str:
     if ms is None:
         return "—"
     return f"{ms}ms" if ms < 1000 else f"{ms / 1000:.1f}s"
+
+
+def _output_rate(text: str, total_ms: int, ttft_ms: int | None) -> tuple[int, float | None]:
+    """Estimate generated tokens and decode rate without assuming a model tokenizer.
+
+    Four UTF-8 bytes per token is a rough cross-language estimate, not an exact
+    token count. The rate excludes time-to-first-token when available.
+    """
+    output_tokens = round(len(text.encode("utf-8")) / 4)
+    decode_ms = max(total_ms - (ttft_ms or 0), 0)
+    tok_s = round(output_tokens * 1000 / decode_ms, 1) if decode_ms > 0 else None
+    return output_tokens, tok_s
 
 
 def _link_probe(endpoint_url: str, attempts: int = 3, timeout: float = 15.0) -> int | None:
