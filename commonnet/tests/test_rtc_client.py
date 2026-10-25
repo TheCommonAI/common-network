@@ -197,6 +197,7 @@ class ApiCleanup(unittest.TestCase):
         backend.client = mock.Mock()
         backend.client.generate_stream.return_value = iter([1, 2, 3])
         backend.drafter, backend.stop_ids = None, []
+        backend.auto_draft = False
         stream = backend._generate([1], 3, 0, 1, None)
         self.assertEqual(next(stream), 1)
         stream.close()
