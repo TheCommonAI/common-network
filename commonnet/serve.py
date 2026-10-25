@@ -33,6 +33,18 @@ DEFAULT_MAX_TOKENS = 256
 HARD_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.7   # a request with no "temperature" is sampled, so it never speculates; `common ask` sends 0
 DEFAULT_DRAFT = "mlx-community/Qwen3-0.6B-4bit"
+TORCH_DRAFT = "Qwen/Qwen3-0.6B"
+
+
+def build_default_drafter(target_tokenizer):
+    """(drafter, repo): MlxDrafter when mlx_lm imports, else TorchDrafter. Raises if neither can load."""
+    try:
+        import mlx_lm  # noqa: F401
+    except Exception:
+        from commonnet.speculative import TorchDrafter
+        return TorchDrafter(TORCH_DRAFT, target_tokenizer=target_tokenizer), TORCH_DRAFT
+    from commonnet.speculative import MlxDrafter
+    return MlxDrafter(DEFAULT_DRAFT, target_tokenizer=target_tokenizer), DEFAULT_DRAFT
 CHAIN_CAPABILITY = "chain_v1"   # a hop that can verify drafts (chain_step with drafts)
 
 
@@ -222,11 +234,13 @@ class NetworkBackend:
         except Exception:
             return None
         try:
+            repo = [DEFAULT_DRAFT]
+
             def build():
-                from commonnet.speculative import MlxDrafter
-                return MlxDrafter(DEFAULT_DRAFT, target_tokenizer=self.tokenizer)
+                d, repo[0] = build_default_drafter(self.tokenizer)
+                return d
             self.drafter = (self._drafter_factory or build)()
-            self.draft_note = f"on ({DEFAULT_DRAFT}, k={self.draft_k})"
+            self.draft_note = f"on ({repo[0]}, k={self.draft_k})"
             return self.drafter
         except Exception as e:   # mlx_lm missing, out of memory, tokenizer mismatch, no network...
             self._auto_failed = True

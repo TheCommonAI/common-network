@@ -357,6 +357,7 @@ class Node:
         self.local_front_setting = local_front
         self.local_front = None
         self._free_gib, self._bench_front = localfront.free_gib, localfront.benchmark_ms
+        self._free_vram = localfront.free_vram_gib
         # gateway (a URL, or None): the rendezvous directory. Peers found there become seeds and DHT contacts, and this
         # node's record is announced there. Absent or failing, nothing changes.
         self.gateway = gateway.rstrip("/") if gateway else None
@@ -940,7 +941,18 @@ class Node:
             return self._front_decision(setting, front, 0.0, reused=True)
         if self.stub and self._build_block is None:
             return None, "a stub node has no weights"
-        if setting == "auto":
+        if self.hw.backend == "nf4":
+            # CUDA: the front shares the GPU with this node's own window (counted if it is not resident yet)
+            pending = manifest.window_gib(*window, self.hw.backend) if window else 0.0
+            if block is not None:
+                pending = 0.0
+            mem = self._free_vram(pending)
+            if mem is None:
+                return None, "no CUDA device for the nf4 front"
+            ok, why = localfront.vram_fit(setting, mem[0], manifest.window_gib(0, F, self.hw.backend))
+            if not ok:
+                return None, why
+        elif setting == "auto":
             need = manifest.window_gib(0, F, self.hw.backend)
             free = self._free_gib()
             decision = localfront.decide_auto(0.0, free, need)   # memory first: do not load what will not fit
@@ -956,7 +968,7 @@ class Node:
     def _front_decision(self, setting, front, weight_gib, reused):
         if setting != "auto":
             return front, ("reusing this node's own block" if reused else "loaded separately")
-        decision = localfront.decide_auto(self._bench_front(front), self._free_gib() if not reused else 1e9, weight_gib)
+        decision = localfront.decide_auto(self._bench_front(front), self._free_gib() if not (reused or self.hw.backend == 'nf4') else 1e9, weight_gib)
         if decision.enabled:
             return front, decision.reason
         front.shutdown()
