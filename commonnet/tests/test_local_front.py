@@ -255,7 +255,7 @@ class Nf4FrontBudget(unittest.TestCase):
 
     def test_vram_budget_accounts_for_own_window_and_refuses_when_it_does_not_fit(self):
         for setting, vram, enabled in (("auto", 5.0, True), ("auto", 3.0, False),   # 1 GiB front: 1.5x of 3.0 free
-                                       ("on", 3.0, True), ("on", 2.2, False), ("on", None, False)):
+                                       ("on", 3.6, True), ("on", 3.2, False), ("on", None, False)):
             with self.subTest(setting=setting, vram=vram):
                 n = self.node(setting, vram)
                 n._init_local_front(mock.Mock())
