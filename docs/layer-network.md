@@ -136,6 +136,17 @@ Qwen3-8B on a 16 GB Mac, on top of the layers this peer serves** — has downloa
 serving and the status `error` says so. On NVIDIA and CPU peers the client part runs from CPU in fp16; that path is untested.
 `python -m commonnet.serve` still runs the API alone, without serving layers.
 
+## See the layer assignment
+
+```bash
+python -m commonnet.coordinator --network URL --plan    # JSON: the chain, every peer's window, idle peers
+```
+
+The plan covers every layer exactly once (the chain), puts the other peers on windows as replicas, and changes as few
+peers' windows as it can when one joins or drops. If no chain of live peers covers the model it exits 1 and names the
+layers nobody reaches. Peers report their memory (`gib`), device (`backend`) and a measured rough `speed` in their signed
+record. See [NETWORK.md](../commonnet/NETWORK.md).
+
 ## Start a network (be a seed)
 
 Run `common join --network` with nobody else around and you are the network's first peer. Share the
