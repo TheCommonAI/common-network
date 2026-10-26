@@ -376,6 +376,7 @@ class Node:
             self.cpu_dtype, self.hw = choose_cpu_dtype(manifest, hardware, cpu_has_fast_bf16())
         self.port, self.stub, self.use_tunnel, self.advertise = port, stub, tunnel, advertise
         self.log = log
+        self._listed: bool | None = None
         self._open_tunnel = tunnel_opener
         self._build_block = block_builder
         self._fetch = fetcher
@@ -636,8 +637,11 @@ class Node:
             return placement.choose_window(self.manifest, self.table.live(), self.hw.gib, self.hw.backend,
                                            me=self.identity.peer)
         except placement.NoWindow as e:
-            raise NodeError(f"{e}. This network needs at least "
-                            f"{self.manifest.window_gib(*self.manifest.stages()[0], self.hw.backend):.1f} GiB free.") from None
+            kind = {"nf4": "of free GPU memory", "mlx": "of unified memory"}.get(self.hw.backend, "of RAM")
+            raise NodeError(f"{e}. This machine offers {self.hw.gib:.1f} GiB {kind} ({self.hw.name}). "
+                            f"This network needs at least "
+                            f"{self.manifest.window_gib(*self.manifest.stages()[0], self.hw.backend):.1f} GiB free. "
+                            f"Close other programs that use that memory and try again.") from None
 
     def _make_block(self, window, quiet: bool = False):
         # quiet: loading the local front must not move the node's own status phase
@@ -748,13 +752,28 @@ class Node:
         if record is None or not record.get("url"):
             return
         if self.gateway and self.state == "up":
-            mesh_directory.announce(self.gateway, record)
+            self._announce_to_directory(record)
         if self.dht is None:
             return
         try:
             self.dht.announce(record)
         except Exception as e:
             self.log(f"DHT announce failed ({type(e).__name__}: {e})")
+
+    def _announce_to_directory(self, record) -> None:
+        """Say in the log when this node is, or stops being, listed on the directory.
+
+        Runs every maintenance pass, so it logs only changes: a silent failure here leaves a node that looks
+        up locally and is invisible to anyone who joins through the gateway.
+        """
+        listed = mesh_directory.announce(self.gateway, record)
+        if listed and self._listed is not True:
+            again = " again" if self._listed is False else ""
+            self.log(f"listed on the directory{again}: new peers can find this node")
+        elif not listed and self._listed is not False:
+            self.log(f"could not list this node on the directory at {urlsplit(self.gateway).netloc}; "
+                     "it will keep trying, and peers that reach it another way still see it")
+        self._listed = listed
 
     def _serve_direct(self, block) -> bool:
         """Serve `block` over TLS on a public address. False means unreachable and the tunnel should be used."""
