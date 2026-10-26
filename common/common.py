@@ -26,6 +26,7 @@ Usage:
     common report [note]           report a bad answer from the network
     common reports                 reports saved on this machine, and send them
     common test                    benchmark every node + routing, log to jsonl
+    common update                  check for and install CLI updates (--force-update: even from a git checkout)
     common help [verb]             help, per verb
 
 A question is answered by the best available donated machine — `common ask`
@@ -455,6 +456,73 @@ def self_update(force: bool = False) -> None:
         print(dim(f"warning: couldn't self-update ({e}); the disk may be full. Continuing with the installed copy."))
         return
     _exec([sys.executable, local_path] + sys.argv[1:])
+
+
+def cmd_update(force: bool = False) -> None:
+    """Explicit update command: check for and apply CLI updates with user feedback."""
+    local_path = os.path.abspath(__file__)
+
+    if _in_git_work_tree(local_path) and not force:
+        print(dim("This is a git checkout, not an installed copy."))
+        print(dim("Update with `git pull`, or pass --force-update to override."))
+        return
+
+    print(dim("Checking for updates..."))
+    try:
+        with urllib.request.urlopen(UPDATE_URL, timeout=10) as resp:
+            remote = resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 404):
+            print(red(f"✗ Update channel unreachable ({e.code})"))
+            print(comment(f"source: {UPDATE_URL}"))
+        else:
+            print(red(f"✗ HTTP error: {e.code}"))
+        sys.exit(1)
+    except (urllib.error.URLError, socket.timeout):
+        print(red("✗ Could not reach update server (offline?)"))
+        sys.exit(1)
+
+    if not remote.strip():
+        print(red("✗ Empty response from update server"))
+        sys.exit(1)
+
+    try:
+        with open(local_path, "rb") as f:
+            local = f.read()
+    except OSError as e:
+        print(red(f"✗ Could not read local file: {e}"))
+        sys.exit(1)
+
+    if remote == local:
+        print(blue("✓") + f" Already up to date (v{VERSION})")
+        return
+
+    remote_version = None
+    for line in remote.decode("utf-8", errors="replace").splitlines():
+        if line.startswith("VERSION = "):
+            try:
+                remote_version = line.split('"')[1]
+            except (IndexError, ValueError):
+                pass
+            break
+
+    print(dim(f"Updating from v{VERSION} to v{remote_version or 'latest'}..."))
+    backup_path = local_path + ".bak"
+    try:
+        with open(backup_path, "wb") as f:
+            f.write(local)
+        print(dim(f"Backup saved to {backup_path}"))
+    except OSError:
+        pass
+
+    try:
+        with open(local_path, "wb") as f:
+            f.write(remote)
+    except OSError as e:
+        print(red(f"✗ Could not write update: {e}"))
+        sys.exit(1)
+
+    print(blue("✓") + f" Updated to v{remote_version or 'latest'}")
 
 
 # --- Identity ------------------------------------------------------------
@@ -3243,7 +3311,7 @@ def _repl_args(line: str) -> list[str]:
 
 def build_repl_help() -> str:
     return dim(
-        "/ask (implicit: just type)  /join  /serve  /leave  /status\n"
+        "/ask (implicit: just type)  /join  /serve  /leave  /status  /update\n"
         "/demand  /recommend  /peers  /contrib  /whoami  /privacy  /config  /test  /model  /local  /report  /reports  /help  /exit"
     )
 
@@ -3298,6 +3366,9 @@ def interactive_session(gateway: str, args: argparse.Namespace) -> None:
             continue
         if line == "/config":
             cmd_config(False, args)
+            continue
+        if line == "/update" or line.startswith("/update "):
+            cmd_update(force=any(t in ("--force", "--force-update") for t in line.split()[1:]))
             continue
         if line.startswith("/test"):
             # /test full -> the 3-repeat sweep, same as `common test --full`
@@ -3400,7 +3471,10 @@ def main() -> None:
         args.legacy = True
     _LEGACY_GATEWAY[0] = bool(args.legacy)
 
-    if not args.no_update:
+    # `common update` does its own check and reports the outcome, so the silent
+    # startup update is skipped for it -- otherwise the update would happen first
+    # and the explicit command would then report "already up to date".
+    if not args.no_update and args.verb != "update":
         self_update(force=args.force_update)
 
     if args.version:
@@ -3475,6 +3549,9 @@ def main() -> None:
         cmd_join_or_serve("serve", gateway, args, extra_model=model)
     elif args.verb == "leave":
         cmd_leave(gateway)
+    elif args.verb == "update":
+        # Written after the verb, the flag lands in `rest` (REMAINDER), not in args.
+        cmd_update(force=args.force_update or "--force-update" in (args.rest or []))
     else:
         print(red(f"✗ unknown command: {args.verb}"), file=sys.stderr)
         print(dim("  → common help"), file=sys.stderr)
