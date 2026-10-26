@@ -737,6 +737,115 @@ check("and so are the modules it imports",
       [(_home / n).exists() for n in ("worker.py", "runtime.py")], [True, True])
 
 
+# --- cmd_update tests --------------------------------------------------------
+section("cmd_update")
+
+# Test: already up to date (remote == local)
+def _make_update_server(content: bytes, status: int = 200):
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(content)
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+# Save originals
+_orig_update_url = common.UPDATE_URL
+_orig_in_git = common._in_git_work_tree
+
+# Test already up to date
+_update_server = _make_update_server(Path(__file__).parent.joinpath("common.py").read_bytes())
+common.UPDATE_URL = f"http://127.0.0.1:{_update_server.server_address[1]}/common.py"
+common._in_git_work_tree = lambda path: False
+
+_update_out = io.StringIO()
+_update_exit = None
+try:
+    with contextlib.redirect_stdout(_update_out), contextlib.redirect_stderr(io.StringIO()):
+        common.cmd_update(force=False)
+except SystemExit as e:
+    _update_exit = e.code
+finally:
+    _update_server.shutdown()
+
+check("cmd_update reports up to date when versions match",
+      "up to date" in _update_out.getvalue().lower(), True)
+check("cmd_update does not exit with error when up to date", _update_exit, None)
+
+# Test git checkout without force
+common._in_git_work_tree = lambda path: True
+
+_update_out2 = io.StringIO()
+_update_exit2 = None
+try:
+    with contextlib.redirect_stdout(_update_out2), contextlib.redirect_stderr(io.StringIO()):
+        common.cmd_update(force=False)
+except SystemExit as e:
+    _update_exit2 = e.code
+
+check("cmd_update reports git checkout when in work tree",
+      "git checkout" in _update_out2.getvalue().lower() or "git pull" in _update_out2.getvalue().lower(), True)
+check("cmd_update does not exit with error for git checkout", _update_exit2, None)
+
+# Test network error
+_error_server = _make_update_server(b"", status=404)
+common.UPDATE_URL = f"http://127.0.0.1:{_error_server.server_address[1]}/common.py"
+common._in_git_work_tree = lambda path: False
+
+_update_out3 = io.StringIO()
+_update_exit3 = None
+try:
+    with contextlib.redirect_stdout(_update_out3), contextlib.redirect_stderr(io.StringIO()):
+        common.cmd_update(force=False)
+except SystemExit as e:
+    _update_exit3 = e.code
+finally:
+    _error_server.shutdown()
+
+check("cmd_update exits nonzero on HTTP error", _update_exit3, 1)
+
+# A real update: the installed copy is replaced and the old one is kept as .bak.
+_new_source = b'VERSION = "9.9.9"\n'
+_update_server = _make_update_server(_new_source)
+common.UPDATE_URL = f"http://127.0.0.1:{_update_server.server_address[1]}/common.py"
+common._in_git_work_tree = lambda path: False
+_installed = _SANDBOX / "installed-common.py"
+_installed.write_bytes(b'VERSION = "0.0.1"\n')
+try:
+    with patch.object(common, "__file__", str(_installed)), \
+            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        common.cmd_update(force=False)
+finally:
+    _update_server.shutdown()
+check("cmd_update writes the published source over the installed copy",
+      _installed.read_bytes(), _new_source)
+check("and keeps the outgoing copy as .bak",
+      Path(str(_installed) + ".bak").read_bytes(), b'VERSION = "0.0.1"\n')
+
+# `common update` skips the silent startup update, and reads --force-update whether
+# it is written before the verb or after it (after lands in REMAINDER, not args).
+for _argv, _force in ((["common", "update"], False),
+                      (["common", "update", "--force-update"], True),
+                      (["common", "--force-update", "update"], True)):
+    with patch.object(sys, "argv", _argv), patch.object(common, "cmd_update") as _cu, \
+            patch.object(common, "self_update") as _su:
+        common.main()
+    check(f"`{' '.join(_argv[1:])}` passes force={_force} to cmd_update",
+          _cu.call_args.kwargs["force"], _force)
+    check(f"`{' '.join(_argv[1:])}` does not run the silent startup update", _su.called, False)
+
+# Restore originals
+common.UPDATE_URL = _orig_update_url
+common._in_git_work_tree = _orig_in_git
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} of {CHECKS[0]} FAILED\n")
