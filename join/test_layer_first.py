@@ -1,5 +1,6 @@
 """`common join` defaults to the layer network; the whole-model gateway node is --legacy; services keep their mode."""
 import argparse
+import ast
 import json
 import subprocess
 import sys
@@ -65,6 +66,53 @@ class ServiceKeepsItsMode(unittest.TestCase):
         self.assertEqual(join.choose_mode(ns(network=""), supported=lambda: False), "network")
 
 
+class ModelNames(unittest.TestCase):
+    def test_a_network_model_name_in_model_is_the_network(self):
+        args = ns(model="bonsai-8b")
+        join.model_names_a_network(args)
+        self.assertEqual((args.network, args.model), ("bonsai-8b", None))
+        self.assertEqual(join.choose_mode(args, supported=lambda: False), "network")
+
+    def test_the_same_name_in_model_and_network_is_accepted(self):
+        args = ns(model="bonsai-2-9b", network="bonsai-2-9b")
+        join.model_names_a_network(args)
+        self.assertEqual((args.network, args.model), ("bonsai-2-9b", None))
+
+    def test_a_different_network_in_network_is_refused(self):
+        with self.assertRaises(ValueError):
+            join.model_names_a_network(ns(model="bonsai-8b", network="https://x.example"))
+
+    def test_a_catalogue_id_stays_a_model_for_the_legacy_path(self):
+        args = ns(model="qwen-x")
+        join.model_names_a_network(args)
+        self.assertEqual((args.network, args.model), (None, "qwen-x"))
+        self.assertEqual(join.choose_mode(args, supported=lambda: True), "legacy")
+
+    def test_the_names_are_the_networks_commonnet_knows(self):
+        tree = ast.parse((HERE.parent / "commonnet" / "node.py").read_text())
+        table = next(node.value for node in tree.body
+                     if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "NETWORK_MODELS" for t in node.targets))
+        self.assertEqual(set(join.NETWORK_MODEL_NAMES), set(ast.literal_eval(table)))
+
+
+class ServiceForAnotherNetwork(unittest.TestCase):
+    def test_a_service_records_the_network_it_was_given_by_model(self):
+        argv = join._service_argv(ns(network="bonsai-8b"))
+        self.assertEqual(argv[-1], "--network=bonsai-8b")
+
+    def test_linux_service_is_restarted_so_it_switches_to_the_new_network(self):
+        from unittest import mock
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(join, "_systemd_unit_path", return_value=Path(tmp) / "common-join.service"), \
+                mock.patch.object(join.subprocess, "run", side_effect=lambda cmd, **k: calls.append(cmd[2:])):
+            join.install_linux_service(["python3", "join.py", "--network=bonsai-8b"])
+            unit = (Path(tmp) / "common-join.service").read_text()
+        self.assertIn("--network=bonsai-8b", unit)
+        self.assertLess(calls.index(["enable", join.SYSTEMD_UNIT]), calls.index(["restart", join.SYSTEMD_UNIT]))
+        self.assertNotIn(["enable", "--now", join.SYSTEMD_UNIT], calls)
+
+
 class Notice(unittest.TestCase):
     def test_the_change_is_announced_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -112,6 +160,12 @@ class Dispatch(unittest.TestCase):
 
     def test_model_implies_legacy(self):
         self.assertEqual(dispatch(["--model", "qwen-x"]), ["legacy"])
+
+    def test_model_naming_a_network_joins_that_network(self):
+        self.assertEqual(dispatch(["--model", "bonsai-8b"]), [["network", "bonsai-8b"]])
+
+    def test_permanent_with_a_network_model_installs_that_network(self):
+        self.assertEqual(dispatch(["--permanent", "--model", "bonsai-27b"]), [["service", "bonsai-27b"]])
 
     def test_plain_join_on_an_unsupported_machine_explains_and_exits(self):
         # the legacy gateway is retired, so a machine the layer network cannot use at all is told so rather than

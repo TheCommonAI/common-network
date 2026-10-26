@@ -11,6 +11,7 @@ Usage:
     common                         open the interactive session
     common ask "<prompt>"          route one question through the network
     common join                    put this machine on the commons as a node
+    common join --model bonsai-8b  serve a different layer-network model
     common serve <model>           contribute a specific model
     common leave                   take this machine off the commons
     common status                  this node: health, position, requests served
@@ -3325,7 +3326,7 @@ def main() -> None:
     parser.add_argument("--gateway", default=os.environ.get("COMMON_GATEWAY_URL", DEFAULT_GATEWAY))
     parser.add_argument("--region", default=None)
     parser.add_argument("--temperature", type=float, default=None, help="ask (layer network): sampling temperature. Default 0 (greedy, enables speculative decoding); above 0 samples normally")
-    parser.add_argument("--model", default=None)
+    parser.add_argument("--model", default=None, help="join: a layer-network model to serve (qwen3-8b, bonsai-8b, bonsai-27b, bonsai-2-9b, bonsai-2-27b), same as --network NAME")
     parser.add_argument("--auto", action="store_true")
     parser.add_argument("--local", action="store_true")
     parser.add_argument("--legacy", action="store_true", help="ask/status/peers/recommend/demand/contrib/leave: use the old gateway instead of the layer network (same as COMMON_LEGACY_GATEWAY=1)")

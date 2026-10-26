@@ -48,12 +48,17 @@ been verified on real hardware; see the status notes in
 
 ```bash
 common join --network bonsai-8b        # also: bonsai-2-9b, bonsai-27b, bonsai-2-27b, qwen3-8b
+common join --model bonsai-8b          # the same, named as a model
 common join --network URL              # a network a friend runs (any peer's URL)
 common join --network manifest.json
 ```
 
 A network is defined by a manifest: the model and the fixed layer boundaries
 every peer's window is made of. See [docs/bonsai-networks.md](docs/bonsai-networks.md).
+
+To change the model a machine serves, press Ctrl+C and join with another name, or
+run the new command with `--permanent` to replace a background service. See
+[docs/layer-network.md](docs/layer-network.md#switching-the-model).
 
 ### Useful `join` flags
 

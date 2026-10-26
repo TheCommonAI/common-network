@@ -1599,7 +1599,9 @@ RestartSec=5
 WantedBy=default.target
 """)
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT], check=True)
+    subprocess.run(["systemctl", "--user", "enable", SYSTEMD_UNIT], check=True)
+    # `enable --now` leaves a running unit alone, so a service re-installed for another network would keep serving the old one.
+    subprocess.run(["systemctl", "--user", "restart", SYSTEMD_UNIT], check=True)
     print(f"{GLYPH_DONE} {blue('installed as a background service (systemd --user)', bold=True)} — starts at login, restarts if it crashes.")
     print(comment(f"logs: journalctl --user -u {SYSTEMD_UNIT} -f"))
     print(comment("if this is a server, also run `loginctl enable-linger $USER` so it keeps running after you log out."))
@@ -1698,6 +1700,24 @@ def layer_network_supported() -> bool:
     return True
 
 
+# The layer-network models, by name. Must match NETWORK_MODELS in commonnet/node.py (a test checks it).
+NETWORK_MODEL_NAMES = ("qwen3-8b", "bonsai-8b", "bonsai-27b", "bonsai-2-9b", "bonsai-2-27b")
+
+
+def model_names_a_network(args: argparse.Namespace) -> None:
+    """`--model bonsai-8b` means `--network bonsai-8b`: a layer-network model is picked by name, however it is spelled.
+
+    Any other --model is a catalogue id for the retired gateway and is left alone. Raises ValueError when --network
+    already names a different network.
+    """
+    if args.model not in NETWORK_MODEL_NAMES:
+        return
+    if args.network not in (None, "", args.model):
+        raise ValueError(f"--model {args.model} and --network {args.network} name different networks; give one")
+    args.network = args.model
+    args.model = None
+
+
 def choose_mode(args: argparse.Namespace, supported=None) -> str:
     """'network' or 'legacy' for this invocation.
 
@@ -1757,14 +1777,14 @@ def main() -> None:
     _enable_windows_ansi()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--gateway", default=os.environ.get("COMMON_GATEWAY_URL", DEFAULT_GATEWAY), help="Gateway base URL (default: the shared Common Network gateway)")
-    parser.add_argument("--model", default=None, help="Catalogue id (e.g. qwen2.5-coder-14b) or a raw model tag (e.g. mathstral:7b). Default: probe hardware and ask the network what it needs most (see --auto, --list-catalogue)")
+    parser.add_argument("--model", default=None, help=f"A layer-network model by name ({', '.join(NETWORK_MODEL_NAMES)}), the same as --network NAME. Any other value is a catalogue id or raw model tag for the retired whole-model gateway (see --auto, --list-catalogue)")
     # The v0.2 RPC-group prototype was removed; the layer network (--network) replaced it. These stay
     # parseable, hidden, only so that a script or service that still passes one gets a clear message.
     for removed_flag in ("--distributed-config", "--group-token", "--relay"):
         parser.add_argument(removed_flag, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--local-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--network", nargs="?", const="", default=None, metavar="MODEL|URL|FILE", help="Join the decentralised layer network: serve a slice of the shared model as a peer. Choose qwen3-8b, bonsai-8b, bonsai-27b, bonsai-2-9b, or bonsai-2-27b, or give a seed peer URL or manifest file (default: COMMONNET_NETWORK or the built-in seeds). No gateway registration")
+    parser.add_argument("--network", nargs="?", const="", default=None, metavar="MODEL|URL|FILE", help=f"Join the decentralised layer network: serve a slice of the shared model as a peer. Choose {', '.join(NETWORK_MODEL_NAMES)}, or give a seed peer URL or manifest file (default: COMMONNET_NETWORK or the built-in seeds). No gateway registration")
     parser.add_argument("--layers", metavar="A-B", help="With the layer network: serve exactly this window of layers (for example 27-36) instead of the one the network picks for you. It must start and end on a stage boundary and fit in memory")
     parser.add_argument("--local-front", metavar="N|auto|on", default=None, help="With the layer network: also hold the first layers (N = a stage boundary, on = the first stage, auto = only if this machine is fast and has the memory) and run them in the chat client, so your prompts never leave this machine and the first network hop disappears. Costs memory (about 1 GB for 9 layers of Qwen3-8B 4-bit) and helps only this machine's own chat. Default off (or set COMMONNET_LOCAL_FRONT)")
     parser.add_argument("--no-draft", action="store_true", help="With the layer network: turn off speculative decoding in the local chat API (same as COMMONNET_DRAFT=0)")
@@ -1799,6 +1819,10 @@ def main() -> None:
     parser.add_argument("--permanent", action="store_true", help="Install as a background service that starts at login/boot and restarts if it crashes, then exit")
     parser.add_argument("--remove-permanent", action="store_true", help="Remove the background service installed by --permanent, then exit")
     args = parser.parse_args()
+    try:
+        model_names_a_network(args)
+    except ValueError as e:
+        parser.error(str(e))
 
     # Before updates, catalogue lookup, identity reads, tunnel creation or any
     # registration path. A local test must not contact the public gateway.

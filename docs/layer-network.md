@@ -6,8 +6,8 @@ There is no central server: peers find each other by gossip, build their own rou
 that drops out in the middle of a generation.
 
 `common join` joins this network by default. The original whole-model gateway node is still there as
-`common join --legacy` (and anything that only makes sense for it, such as `--model` or `--lan`, implies
-it). A background service keeps the mode it was installed with.
+`common join --legacy` (and anything that only makes sense for it, such as `--lan`, or a `--model` that is not a
+network name, implies it). A background service keeps the mode it was installed with.
 
 ## Join (Apple silicon, NVIDIA, or any machine with enough RAM)
 
@@ -20,10 +20,24 @@ common join --network bonsai-27b         # Ternary Bonsai 27B
 common join --network bonsai-2-9b        # Ternary Bonsai 2 9B
 common join --network bonsai-2-27b       # Ternary Bonsai 2 27B
 common join --network qwen3-8b           # default model
+common join --model bonsai-8b            # the same as --network bonsai-8b, named as a model
 common join --layers 27-36       # serve exactly this window (a stage boundary pair) instead of the one the network picks
 common join --permanent          # keep serving after reboots (records the mode)
 common join --legacy             # the original whole-model gateway node instead
 ```
+
+### Switching the model
+
+The model a machine serves is the network it joins. Name a different one with `--model` (or `--network`):
+
+- **In a terminal:** press Ctrl+C, then run the new command, for example `common join --model bonsai-2-9b`. Each
+  network keeps its own identity under `~/.common-network/net/`, so switching does not reuse another network's node.
+- **As a background service:** run the new command with `--permanent`, for example
+  `common join --model bonsai-2-9b --permanent`. It replaces the installed service and restarts it, so the old model
+  stops. On Linux this is `systemctl --user restart`; on macOS launchd reloads the agent. Windows (Task Scheduler) has
+  not been checked for an in-place switch: run `common leave` first, then the command with `--permanent`.
+- `--model` takes a layer-network name (`qwen3-8b`, `bonsai-8b`, `bonsai-27b`, `bonsai-2-9b`, `bonsai-2-27b`). Any other
+  value is a catalogue id for the retired whole-model gateway and goes to `--legacy`.
 
 The first run sets itself up: it makes a private Python environment, installs the model runtime, fetches
 the code, picks the layers the network needs most that fit your memory, downloads only those layers, opens a
