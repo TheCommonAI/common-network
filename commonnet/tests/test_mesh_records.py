@@ -42,6 +42,18 @@ class RecordTests(unittest.TestCase):
         self.assertFalse(verify_record({**r, "url": "ftp://x"}))
         self.assertFalse(verify_record({**r, "state": "zombie"}))
 
+    def test_speed_is_signed_optional_and_checked(self):
+        plain = self.who.sign_record(FIELDS, now=1000.0)
+        self.assertNotIn("speed", plain)  # a peer that did not measure reports exactly what it did before
+        fast = self.who.sign_record({**FIELDS, "speed": 812.456}, now=1000.0)
+        self.assertEqual(fast["speed"], 812.46)
+        self.assertTrue(verify_record(fast))
+        self.assertFalse(verify_record({**fast, "speed": 9999.0}))
+        for bad in (-1.0, float("nan"), float("inf"), True, "fast"):
+            with self.subTest(speed=bad):
+                with self.assertRaises(RecordError):
+                    records.check_shape({**fast, "speed": bad})
+
     def test_seq_is_strictly_increasing_for_one_identity(self):
         a = self.who.sign_record(FIELDS, now=1000.0)
         b = self.who.sign_record(FIELDS, now=1000.0)

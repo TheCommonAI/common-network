@@ -41,6 +41,8 @@ Any peer serves its manifest at `GET /manifest`. A manifest's `id` is the networ
 - Live = verified, same network, `state=="up"`, `now - ts <= 60`, `ts <= now + 120`.
 - The block `token` is public to anyone who reads the mesh: it keeps random scanners off a tunnel URL, nothing more.
   Honest limit: the network is open; do not put private prompts on it. (Activations also reveal content to peers.)
+Optional `speed`: the rough GFLOP/s the peer measured at join (`node.probe_speed`, a short matrix-product run). It is
+signed like every other field and absent when not measured, so older peers ignore it.
 API: `Identity.load_or_create(path)` (private key file mode 0600), `Identity.sign_record(fields)->record`,
 `verify_record(record)->bool`, `is_live(record, now)`.
 
@@ -59,6 +61,13 @@ plus one seed; drops a peer from its table's *candidates* after 3 failed exchang
   window identical to an existing one with the fewest replicas.
 - `should_move(manifest, live, me)` -> new window or None: only when some stage has zero live coverage, `me` is in a
   window whose every stage has coverage >= 2, and `me` can fit the uncovered window; cooldown handled by the caller (5 min).
+- Whole-network plan (`commonnet/mesh/assign.py`, `plan(manifest, live, previous=None)`): the same records, decided for every
+  peer at once. Returns a **chain** of boundary-aligned windows that tiles `[0, num_layers)` exactly (checked by
+  `check_cover`: no gaps, no overlaps), one peer per chain window, plus replicas and `idle` peers. Among covering plans it
+  moves the fewest peers off their current windows, then uses the fewest hops, then puts the fastest peers (`speed`) on the
+  chain. It raises `AssignmentError` naming the layers no chain of live peers reaches. `coordinator --network URL --plan`
+  prints it. Live nodes still decide their own windows with `choose_window` and `should_move` above; the plan is the view
+  a coordinator uses.
 - `best_route(manifest, live, prefer_backend=None)` -> list[Hop(window, primary, alternates)]: shortest path over
   boundaries by hop count, then lowest penalty (older record, `loading`, backend differing from the previous hop). `alternates` are other live
   peers with the identical window (same backend first). Raises `NoRoute(boundary)` naming the first uncovered boundary.
