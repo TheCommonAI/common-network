@@ -41,6 +41,23 @@ RTC_RETRY_SECONDS = 60.0
 RTC_MAX_ENDPOINTS = 16
 _RTC_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="commonnet-rtc-upgrade")
 _RTC_SLOTS = threading.BoundedSemaphore(8)
+
+# Endpoints that are this process's own (its tunnel/advertised URL): never negotiate a WebRTC link to them.
+LOCAL_ENDPOINTS: set = set()
+# One link per endpoint for the whole process: a second client reuses a ready link, and only one negotiation
+# per endpoint runs at a time.
+_RTC_LINKS: dict = {}
+_RTC_INFLIGHT: set = set()
+_RTC_GLOBAL_LOCK = threading.Lock()
+
+
+def register_local_endpoint(url: str | None) -> None:
+    if url:
+        LOCAL_ENDPOINTS.add(url.rstrip("/"))
+
+
+def is_local_endpoint(endpoint: str) -> bool:
+    return isinstance(endpoint, str) and endpoint.rstrip("/") in LOCAL_ENDPOINTS
 DIRECT = "direct (webrtc)"
 TUNNEL = "tunnel"
 
@@ -307,7 +324,9 @@ class BlockClient:
         self._rtc_states.close()
 
     def transport_report(self, endpoint: str) -> dict:
-        """{"transport": "direct (webrtc)" | "tunnel" | "https", "last_failure": str | None} for one peer."""
+        """{"transport": "direct (webrtc)" | "tunnel" | "https" | "local", "last_failure": str | None} for one peer."""
+        if is_local_endpoint(endpoint):
+            return {"transport": "local", "last_failure": None}
         parts = urllib.parse.urlsplit(endpoint)
         host = parts.hostname or ""
         try:
@@ -343,6 +362,8 @@ class BlockClient:
     def _rtc_endpoint_allowed(self, endpoint: str) -> bool:
         if not self._rtc_enabled:
             return False
+        if is_local_endpoint(endpoint):
+            return False
         parts = urllib.parse.urlsplit(endpoint)
         if parts.scheme != "https" and not (self._rtc_allow_private and parts.scheme == "http"):
             return False
@@ -373,6 +394,12 @@ class BlockClient:
             return None
         now = time.monotonic()
         retired = None
+        with _RTC_GLOBAL_LOCK:
+            shared = _RTC_LINKS.get(endpoint)
+            if shared is not None and shared.ready:
+                return shared
+            if endpoint in _RTC_INFLIGHT:
+                return None
         with self._rtc_lock:
             state = self._rtc_states.get(endpoint)
             blocked = False
@@ -387,6 +414,11 @@ class BlockClient:
             elif len(self._rtc_states) >= RTC_MAX_ENDPOINTS:
                 blocked = True
             if not blocked and _RTC_SLOTS.acquire(blocking=False):
+                with _RTC_GLOBAL_LOCK:
+                    if endpoint in _RTC_INFLIGHT:
+                        _RTC_SLOTS.release()
+                        return None
+                    _RTC_INFLIGHT.add(endpoint)
                 state = {"peer": None, "future": None, "after": now + RTC_RETRY_SECONDS,
                          "epoch": self._rtc_epoch, "error": (state or {}).get("error")}
                 self._rtc_states[endpoint] = state
@@ -396,6 +428,8 @@ class BlockClient:
                         lambda future: _RTC_SLOTS.release() if future.cancelled() else None)
                 except RuntimeError:
                     _RTC_SLOTS.release()
+                    with _RTC_GLOBAL_LOCK:
+                        _RTC_INFLIGHT.discard(endpoint)
         # A remote channel can close without another RPC being attempted. Retire
         # its ICE sockets before forgetting the old state, outside the HTTP lock.
         if retired is not None:
@@ -427,6 +461,8 @@ class BlockClient:
                 if self._rtc_states.get(endpoint) is state and state["epoch"] == self._rtc_epoch:
                     state["peer"] = peer
                     state["error"] = None
+                    with _RTC_GLOBAL_LOCK:
+                        _RTC_LINKS[endpoint] = peer
                     peer = None
             if peer is None:
                 self._rtc_log(f"{_label(endpoint)}: direct (webrtc) link up after "
@@ -444,6 +480,8 @@ class BlockClient:
                 if peer is not None:
                     peer.close()
             finally:
+                with _RTC_GLOBAL_LOCK:
+                    _RTC_INFLIGHT.discard(endpoint)
                 _RTC_SLOTS.release()
 
     def _drop_rtc(self, endpoint: str, peer, reason: str = "direct link dropped mid-request") -> None:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import re
 import struct
 import sys
@@ -38,10 +39,38 @@ class HubError(RuntimeError):
     pass
 
 
+class NoDiskSpace(HubError):
+    """Not worth retrying until the person frees space."""
+
+
+ATTEMPTS = 6  # whole-fetch attempts; each resumes the partial file where the last one stopped
+
+
 def cache_dir(repo: str, revision: str = "main", environ=None) -> str:
     env = os.environ if environ is None else environ
     root = env.get("COMMONNET_CACHE") or os.path.expanduser("~/.common-network/commonnet/models")
     return os.path.join(root, *repo.split("/"), revision)
+
+
+def window_cache_bytes(repo: str, window, revision: str = "main", environ=None) -> int:
+    """Bytes of `window` (layers a-b) already on disk, partial downloads (.part) included."""
+    root = cache_dir(repo, revision, environ)
+    prefix = "compact-L%d-%d" % (window[0], window[1])
+    total = 0
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return 0
+    for d in names:
+        if d != prefix and not d.startswith(prefix + "+"):
+            continue
+        for dirpath, _dirs, files in os.walk(os.path.join(root, d)):
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, f))
+                except OSError:
+                    pass
+    return total
 
 
 LAYOUTS = ("model.language_model.", "language_model.model.", "model.")  # qwen3_5 HF, qwen3_5 MLX, qwen3
@@ -193,6 +222,7 @@ class Hub:
         if have > size:
             os.remove(part)
             have = 0
+        self._need_space(name, size, have)
         with open(part, "ab") as out:
             if have < size:
                 self.stream_range(name, have, size, out, name)
@@ -246,6 +276,7 @@ class Hub:
         if have > total:
             os.remove(part)
             have = 0
+        self._need_space(out_name, total, have)
         with open(part, "ab") as out:
             if have < len(head):
                 out.truncate(0)
@@ -342,7 +373,48 @@ class Hub:
         finally:
             self.dir = base
 
+    def _need_space(self, name, size, have=0):
+        free = shutil.disk_usage(self.dir if os.path.isdir(self.dir) else os.path.dirname(self.dir.rstrip(os.sep)) or ".").free \
+            if self._disk_ok() else None
+        if free is not None and size - have + (1 << 28) > free:
+            raise NoDiskSpace(f"{name}: not enough free disk space: {(size - have) / 2**30:.2f} GB still to download but "
+                              f"only {free / 2**30:.2f} GB free. Free some space, or set COMMONNET_CACHE to a drive with room, "
+                              f"then run again (the partial download is kept and resumed).")
+
+    def _disk_ok(self):
+        try:
+            p = self.dir
+            while not os.path.exists(p) and os.path.dirname(p) != p:
+                p = os.path.dirname(p)
+            self.dir_probe = p
+            return True
+        except OSError:
+            return False
+
     def fetch(self, layers=None, client=False, ranged=False, embed=False, head=False):
+        """fetch with retries: a dropped connection resumes the partial file (HTTP Range) after a backoff."""
+        last = None
+        for attempt in range(ATTEMPTS):
+            try:
+                return self._fetch_once(layers, client, ranged, embed, head)
+            except NoDiskSpace:
+                raise
+            except OSError as e:
+                if getattr(e, "errno", None) == 28:
+                    raise NoDiskSpace("the disk is full. Free some space (or set COMMONNET_CACHE to a drive with room) "
+                                      "and run again; the partial download is kept and resumed.") from None
+                last = e
+            except HubError as e:
+                if "HTTP 40" in str(e):
+                    raise
+                last = e
+            if attempt + 1 < ATTEMPTS:
+                self.log(f"download interrupted ({last}); retrying and resuming in {min(5 * 2 ** attempt, 60)}s "
+                         f"(attempt {attempt + 2} of {ATTEMPTS})")
+                self.sleep(min(5 * 2 ** attempt, 60))
+        raise last
+
+    def _fetch_once(self, layers=None, client=False, ranged=False, embed=False, head=False):
         """Download what is needed; returns the checkpoint directory. `ranged` forces the range-download route
         (only the needed tensors of each shard) for a sharded repo of plain layers, for example a float16 repo
         that an NVIDIA peer quantises on load."""

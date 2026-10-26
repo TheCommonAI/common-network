@@ -696,8 +696,12 @@ class HttpTransport:
         out = []
         for name in self.urls:
             try:
-                client, url = self._target(name, self._first_alive(name))
-                row = client.transport_report(url)
+                index = self._first_alive(name)
+                client, url = self._target(name, index)
+                entry = self._candidates(name)[index]
+                public = entry[0] if isinstance(entry, tuple) else entry
+                row = ({"transport": "local", "last_failure": None} if public in self._local_urls
+                       else client.transport_report(url))
             except Exception as e:
                 row = {"transport": "unknown", "last_failure": type(e).__name__}
             out.append({"hop": name, **row})

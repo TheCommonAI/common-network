@@ -623,10 +623,19 @@ def apply_update_and_restart(remote: bytes) -> None:
     """
     local_path = os.path.abspath(__file__)
     try:
-        with open(local_path, "wb") as f:
-            f.write(remote)
+        tmp_path = local_path + ".new"  # swap in a finished copy, so a full disk cannot leave a half-written join.py
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(remote)
+            os.replace(tmp_path, local_path)
+        except OSError:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
     except OSError as e:
-        print(f"{GLYPH_FORMING} {red(f'could not self-update ({e}), continuing with current version')}", file=sys.stderr)
+        print(f"{GLYPH_FORMING} {red(f'could not self-update ({e}); the disk may be full. Continuing with the installed copy. Free some space on this drive to get updates.')}", file=sys.stderr)
         return
     _exec([sys.executable, local_path] + sys.argv[1:])
 
@@ -1501,6 +1510,8 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
             argv += ["--no-draft"]
         if getattr(args, "layers", None):
             argv += [f"--layers={args.layers}"]
+        if getattr(args, "stage_gib", None):
+            argv += [f"--stage-gib={args.stage_gib}"]
         if getattr(args, "local_front", None):
             argv += [f"--local-front={args.local_front}"]
         if getattr(args, "no_direct", False):
@@ -1766,6 +1777,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--network", nargs="?", const="", default=None, metavar="MODEL|URL|FILE", help="Join the decentralised layer network: serve a slice of the shared model as a peer. Choose qwen3-8b, bonsai-8b, bonsai-27b, bonsai-2-9b, or bonsai-2-27b, or give a seed peer URL or manifest file (default: COMMONNET_NETWORK or the built-in seeds). No gateway registration")
     parser.add_argument("--layers", metavar="A-B", help="With the layer network: serve exactly this window of layers (for example 27-36) instead of the one the network picks for you. It must start and end on a stage boundary and fit in memory")
+    parser.add_argument("--stage-gib", type=float, default=None, metavar="GIB", help="With the layer network: how much memory to offer, in GiB (default: detected). Raise it if a window is just over what this machine offers and you can spare the memory")
     parser.add_argument("--local-front", metavar="N|auto|on", default=None, help="With the layer network: also hold the first layers (N = a stage boundary, on = the first stage, auto = only if this machine is fast and has the memory) and run them in the chat client, so your prompts never leave this machine and the first network hop disappears. Costs memory (about 1 GB for 9 layers of Qwen3-8B 4-bit) and helps only this machine's own chat. Default off (or set COMMONNET_LOCAL_FRONT)")
     parser.add_argument("--no-draft", action="store_true", help="With the layer network: turn off speculative decoding in the local chat API (same as COMMONNET_DRAFT=0)")
     parser.add_argument("--no-api", action="store_true", help="With the layer network: do not serve the local chat API (on by default, so `common ask` and chat apps work). Saves the ~1 GB client part of the model")
@@ -1830,6 +1842,8 @@ def main() -> None:
         parser.error("--bootstrap, --public-ip, --external-port, --direct-port, --dht-port and --no-tunnel-fallback need --direct")
     if args.layers and mode != "network":
         parser.error("--layers is only used with the layer network (--network, or a plain join on a machine that can serve it)")
+    if args.stage_gib and mode != "network":
+        parser.error("--stage-gib is only used with the layer network (--network, or a plain join on a machine that can serve it)")
     if args.local_front and mode != "network":
         parser.error("--local-front is only used with the layer network (--network, or a plain join on a machine that can serve it)")
     if mode == "network" and args.api is None and not args.no_api and not args.remove_permanent:
@@ -1864,6 +1878,8 @@ def main() -> None:
             node_args += ["--no-draft"]
         if args.layers:
             node_args += ["--layers", args.layers]
+        if args.stage_gib:
+            node_args += ["--stage-gib", str(args.stage_gib)]
         if args.local_front:
             node_args += ["--local-front", args.local_front]
         node_args += _direct_flags(args)

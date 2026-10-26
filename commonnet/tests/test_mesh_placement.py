@@ -196,3 +196,56 @@ class CpuPeers(unittest.TestCase):
         # fewest hops still wins: one CPU peer for everything beats two GPU peers
         cpu, a, b = peer([0, 36], backend="cpu"), peer([0, 18], backend="nf4"), peer([18, 36], backend="nf4")
         self.assertEqual(len(best_route(MANIFEST, [cpu, a, b], now=NOW)), 1)
+
+
+class CachePreference(unittest.TestCase):
+    def test_nothing_cached_changes_nothing(self):
+        self.assertEqual(choose_window(MANIFEST, [], 1.5, "mlx", cached={(9, 18): 0}),
+                         choose_window(MANIFEST, [], 1.5, "mlx"))
+
+    def test_most_cached_window_wins_when_everything_is_covered(self):
+        live = [peer([0, 36]), peer([0, 36])]
+        self.assertEqual(choose_window(MANIFEST, live, 1.5, "mlx", cached={(18, 27): 10, (9, 18): 500}), (9, 18))
+
+    def test_uncovered_stage_still_beats_a_bigger_cache_elsewhere(self):
+        live = [peer([0, 9]), peer([9, 18]), peer([18, 27])]  # stage 27-36 has no peer
+        self.assertEqual(choose_window(MANIFEST, live, 1.5, "mlx", cached={(0, 9): 10**9, (27, 36): 5}), (27, 36))
+
+    def test_among_uncovered_candidates_most_cached_wins(self):
+        live = [peer([0, 9]), peer([18, 36])]  # 9-18 uncovered
+        self.assertEqual(choose_window(MANIFEST, live, 2.6, "mlx", cached={(9, 18): 7, (0, 18): 1}), (9, 18))
+        live = [peer([0, 9])]  # 9-18, 18-27, 27-36 uncovered
+        self.assertEqual(choose_window(MANIFEST, live, 1.5, "mlx", cached={(18, 27): 9, (27, 36): 3}), (18, 27))
+
+
+class Preflight(unittest.TestCase):
+    def test_disk_message_names_the_drive_and_fixes(self):
+        from commonnet import preflight
+        with self.assertRaises(preflight.PreflightError) as cm:
+            preflight.check_disk("C:\\x\\models", 5 * 2**30, 1 * 2**30, (27, 36), free=2 * 2**30)
+        msg = str(cm.exception)
+        for part in ("27-36", "4.00 GB", "2.00 GB free", "COMMONNET_CACHE", "--layers"):
+            self.assertIn(part, msg)
+
+    def test_enough_disk_and_resumed_partial_pass(self):
+        from commonnet import preflight
+        preflight.check_disk("/tmp", 5 * 2**30, 4.5 * 2**30, (0, 9), free=2 * 2**30)
+
+    def test_memory_message_has_two_decimals_and_fixes(self):
+        from commonnet import preflight
+        msg = preflight.memory_message((27, 36), 5.1049, 5.1)
+        self.assertIn("5.10 GiB", msg)
+        self.assertIn("--stage-gib", msg)
+        self.assertIn("--layers", msg)
+
+    def test_window_cache_bytes_counts_partial_files(self):
+        import os, tempfile
+        from commonnet import hub
+        with tempfile.TemporaryDirectory() as d:
+            env = {"COMMONNET_CACHE": d}
+            sub = os.path.join(hub.cache_dir("a/b", environ=env), "compact-L9-18")
+            os.makedirs(sub)
+            open(os.path.join(sub, "model.safetensors.part"), "wb").write(b"x" * 100)
+            open(os.path.join(sub, "config.json"), "wb").write(b"y" * 5)
+            self.assertEqual(hub.window_cache_bytes("a/b", (9, 18), environ=env), 105)
+            self.assertEqual(hub.window_cache_bytes("a/b", (0, 9), environ=env), 0)

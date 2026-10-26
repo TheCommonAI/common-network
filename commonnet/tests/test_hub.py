@@ -325,3 +325,40 @@ class CoalesceTest(HubTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetryAndLocal(unittest.TestCase):
+    def test_fetch_retries_and_resumes_after_incomplete_download(self):
+        from commonnet import hub
+        h = hub.Hub("a/b", environ={"COMMONNET_CACHE": "/nonexistent-cache"}, log=lambda m: None, sleep=lambda s: None)
+        calls = []
+
+        def once(*a, **k):
+            calls.append(1)
+            if len(calls) < 3:
+                raise hub.HubError("x: incomplete download (1 of 2 bytes)")
+            return "dir"
+        h._fetch_once = once
+        self.assertEqual(h.fetch(layers=(0, 9)), "dir")
+        self.assertEqual(len(calls), 3)
+
+    def test_no_space_is_not_retried_and_says_so(self):
+        from commonnet import hub
+        h = hub.Hub("a/b", environ={"COMMONNET_CACHE": "/nonexistent-cache"}, log=lambda m: None, sleep=lambda s: None)
+        calls = []
+
+        def once(*a, **k):
+            calls.append(1)
+            raise OSError(28, "No space left on device")
+        h._fetch_once = once
+        with self.assertRaises(hub.NoDiskSpace) as cm:
+            h.fetch()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("COMMONNET_CACHE", str(cm.exception))
+
+    def test_own_endpoint_is_local_and_never_rtc(self):
+        from commonnet.net import client as nc
+        nc.register_local_endpoint("https://me-abc.trycloudflare.com")
+        self.assertEqual(nc.BlockClient(token="t" * 24).transport_report("https://me-abc.trycloudflare.com/")["transport"], "local")
+        self.assertFalse(nc.BlockClient(token="t" * 24, rtc=True)._rtc_endpoint_allowed("https://me-abc.trycloudflare.com"))
+        self.assertIsNone(nc.BlockClient(token="t" * 24, rtc=True)._rtc_peer("https://me-abc.trycloudflare.com"))
