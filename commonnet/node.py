@@ -735,6 +735,8 @@ class Node:
         else:
             with self._lock:
                 self.url = self.advertise or server.url
+                from commonnet.net import client as _nc
+                _nc.register_local_endpoint(self.url)
 
     # -- direct mode (experimental; see commonnet/direct.py and commonnet/net/DIRECT.md) -------------
 
@@ -925,6 +927,8 @@ class Node:
                 pins = transport._kw.get("pin")
                 if isinstance(pins, dict):
                     pins[f"127.0.0.1:{self.server.port}"] = self.fp
+        from commonnet.net import client as net_client
+        net_client.register_local_endpoint(own)
         if not own or not local:
             return
 
@@ -1047,20 +1051,36 @@ class Node:
         self._spawn(lambda: self._load_api_backend(lazy, network), "node-api-load")
         self.write_status()
 
+    API_RETRY_SECONDS = 30.0
+
     def _load_api_backend(self, lazy, network) -> None:
+        """Load the chat API's model part; on failure keep retrying in the background (downloads resume)."""
         self._init_local_front(network)
-        try:
-            backend = (self._api_backend or self._default_api_backend)(network)
-        except (Exception, SystemExit) as e:  # NetworkBackend exits (not raises) when the manifest names no client repo
-            lazy.fail(friendly(f"the chat API could not load its model part ({type(e).__name__}: {e})"))
-            self._api_error = lazy.error
-            self.log(lazy.error)
-        else:
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                backend = (self._api_backend or self._default_api_backend)(network)
+            except (Exception, SystemExit) as e:  # NetworkBackend exits (not raises) when the manifest names no client repo
+                lazy.fail(friendly(f"the chat API could not load its model part ({type(e).__name__}: {e})"))
+                self._api_error = lazy.error
+                self.log(lazy.error)
+                self.write_status()
+                if isinstance(e, SystemExit) or self._stop.is_set() or self._api_server is None:
+                    return
+                from commonnet.hub import NoDiskSpace
+                wait = self.API_RETRY_SECONDS * (4 if isinstance(e, NoDiskSpace) else 1)
+                self.log(f"will try the chat API's model part again in {wait:.0f}s (attempt {attempt + 1}); what is downloaded is kept")
+                if self._stop.wait(wait):
+                    return
+                continue
             lazy.set(backend)
             with self._lock:
+                self._api_error = None
                 if self._api is not None:
                     self._api["ready"] = True
             self.log("chat API ready")
+            break
         self.write_status()
 
     def _teardown_api(self) -> None:
@@ -1090,6 +1110,8 @@ class Node:
             raise NodeError(f"could not open a tunnel ({e}). Is cloudflared installed? `common join` installs it.") from None
         with self._lock:
             self._tunnel_proc, self.url = proc, url
+            from commonnet.net import client as _nc
+            _nc.register_local_endpoint(url)
         deadline = time.monotonic() + TUNNEL_WAIT_SECONDS
         from commonnet.net import tunnel as tunnel_mod
         while time.monotonic() < deadline and not self._stop.is_set():

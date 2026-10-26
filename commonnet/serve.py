@@ -305,6 +305,7 @@ class LazyBackend:
 
     def set(self, backend) -> None:
         self._backend = backend
+        self.error = None
 
     def fail(self, message: str) -> None:
         self.error = message
