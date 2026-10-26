@@ -627,6 +627,9 @@ check("and neither request identifies the caller to the gateway",
 
 
 # --- ask --json streams a single node's answer, never a panel's -------------
+# These drive the gateway's SSE path, so they select it explicitly; the default
+# route is the layer network, which has its own tests.
+common._LEGACY_GATEWAY[0] = True
 #
 # The desktop app runs `common ask --json` for every question and has nothing
 # to show until this process exits, which on a cold model is tens of seconds
