@@ -297,6 +297,22 @@ class Hardware(unittest.TestCase):
             node.detect_hardware("Linux", "x86_64", nvidia=lambda: None, meminfo=lambda s: None)
         self.assertIn("memory", str(caught.exception))
 
+    def test_speed_is_measured_on_cpu_and_unknown_without_a_framework(self):
+        self.assertGreater(node.probe_speed("cpu", seconds=0.05), 0.0)
+        with mock.patch.dict(sys.modules, {"torch": None}):
+            self.assertEqual(node.probe_speed("cpu", seconds=0.05), 0.0)
+
+    def test_the_record_carries_the_measured_speed_and_nothing_when_unknown(self):
+        manifest = Manifest.from_dict(MANIFEST)
+        for hw, expected in ((node.Hardware("cpu", 4.0, "x", speed=123.4), 123.4), (node.Hardware("cpu", 4.0, "x"), None)):
+            with self.subTest(speed=expected):
+                n = node.Node(manifest, [], Identity.generate(), hw, port=18974, stub=True, tunnel=False,
+                              log=lambda *_: None)
+                record = n.record()
+                self.assertEqual(record.get("speed"), expected)
+                self.assertTrue(verify_record(record))
+        self.assertEqual(node.choose_cpu_dtype(manifest, node.Hardware("cpu", 1e9, "x", speed=7.0), True)[1].speed, 7.0)
+
 
 class Network(NodeCase):
     def test_resolve_network_from_a_file_a_seed_and_nothing(self):

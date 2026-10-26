@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import threading
 import time
@@ -28,7 +29,8 @@ SIGNED_FIELDS = ("v", "network", "peer", "pub", "url", "token", "window", "backe
 # `fpsig` the identity's signature binding it (commonnet.net.secure). canonical() already signs every key but
 # `sig`, so they are covered by the record signature; a peer that does not know them ignores them (see DIRECT.md).
 # `dht` is the UDP port of the peer's DHT node (a directly reachable peer only; the host is the one in `url`).
-OPTIONAL_FIELDS = ("fp", "fpsig", "dht")
+# `speed` is the rough compute the peer measured at join (GFLOP/s); absent or 0 means not measured.
+OPTIONAL_FIELDS = ("fp", "fpsig", "dht", "speed")
 
 
 class RecordError(ValueError):
@@ -115,6 +117,8 @@ class Identity:
             record["fpsig"] = fields.get("fpsig") or secure.bind_fingerprint(self, fp)
         if fields.get("dht"):
             record["dht"] = int(fields["dht"])
+        if fields.get("speed"):
+            record["speed"] = round(float(fields["speed"]), 2)
         check_shape(record)
         record["sig"] = _b64e(self._key.sign(canonical(record)))
         return record
@@ -152,6 +156,10 @@ def check_shape(record: dict) -> None:
         raise RecordError("ts must be a number")
     if "dht" in record and (type(record["dht"]) is not int or not 1 <= record["dht"] <= 65535):
         raise RecordError("dht must be a port number")
+    if "speed" in record:
+        speed = record["speed"]
+        if isinstance(speed, bool) or not isinstance(speed, (int, float)) or not math.isfinite(speed) or speed < 0:
+            raise RecordError("speed must be a non-negative number")
     if ("fp" in record) != ("fpsig" in record):
         raise RecordError("fp and fpsig come together")
     if "fp" in record:

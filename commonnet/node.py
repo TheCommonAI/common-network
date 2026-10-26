@@ -28,7 +28,7 @@ import sys
 import threading
 import urllib.request
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -90,6 +90,46 @@ class Hardware:
     backend: str  # "mlx" | "nf4" | "cpu" | "stub"
     gib: float    # memory this node offers for its layers
     name: str
+    speed: float = 0.0  # rough compute in GFLOP/s, measured at join by probe_speed; 0.0 when unknown
+
+
+SPEED_PROBE_SECONDS = 0.5
+_MATMUL_FLOPS = 2 * 1024 ** 3  # one 1024 x 1024 by 1024 x 1024 product
+
+
+def probe_speed(backend: str, seconds: float = SPEED_PROBE_SECONDS) -> float:
+    """Rough compute of this machine in GFLOP/s: repeated 1024 x 1024 matrix products on the device the backend runs on.
+
+    Returns 0.0 when it cannot be measured (no framework, no device). Planning treats 0.0 as unknown speed.
+    """
+    try:
+        if backend == "mlx":
+            import mlx.core as mx
+            a = mx.random.normal((1024, 1024)).astype(mx.float16)
+
+            def product():
+                mx.eval(a @ a)
+        else:
+            import torch
+            on_gpu = backend == "nf4" and torch.cuda.is_available()
+            device, dtype = ("cuda", torch.float16) if on_gpu else ("cpu", torch.float32)
+            a = torch.randn(1024, 1024, device=device, dtype=dtype)
+
+            def product():
+                torch.matmul(a, a)
+                if on_gpu:
+                    torch.cuda.synchronize()
+        product()  # the first call pays for setup; do not time it
+        runs, start = 0, time.perf_counter()
+        while True:
+            product()
+            runs += 1
+            elapsed = time.perf_counter() - start
+            if elapsed >= seconds:
+                break
+        return round(runs * _MATMUL_FLOPS / elapsed / 1e9, 2)
+    except Exception:
+        return 0.0
 
 
 def _sysctl_memsize() -> int:
@@ -179,7 +219,7 @@ def choose_cpu_dtype(manifest, hw: "Hardware", fast_bf16: bool) -> tuple[str, "H
     smallest = min(manifest.window_gib(a, b, "cpu") for a, b in manifest.stages())
     half = round(hw.gib / 2, 2)
     if half >= smallest:
-        return "float32", Hardware(hw.backend, half, hw.name)
+        return "float32", replace(hw, gib=half)
     return "bfloat16", hw
 
 
@@ -485,6 +525,7 @@ class Node:
                 "network": self.manifest.id, "url": self.url, "token": self.token,
                 "window": None if self.window is None else list(self.window),
                 "backend": self.hw.backend, "state": self.state, "gib": self.hw.gib,
+                "speed": self.hw.speed or None,
                 "fp": self.fp, "fpsig": self.fpsig, "dht": self._published_dht_port()}, now=self.clock())
 
     def _published_dht_port(self):
@@ -1284,6 +1325,7 @@ def _main(args) -> int:
                 hardware = Hardware(args.backend, hardware.gib, hardware.name)
             if args.stage_gib:
                 hardware = Hardware(hardware.backend, args.stage_gib, hardware.name)
+            hardware = replace(hardware, speed=probe_speed(hardware.backend))
         check_backend_supported(manifest, hardware)
         fixed_window = None
         if args.layers:
