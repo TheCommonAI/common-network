@@ -11,6 +11,7 @@ Usage:
     common                         open the interactive session
     common ask "<prompt>"          route one question through the network
     common join                    put this machine on the commons as a node
+    common join --model bonsai-8b  serve a different layer-network model
     common serve <model>           contribute a specific model
     common leave                   take this machine off the commons
     common status                  this node: health, position, requests served
@@ -26,6 +27,7 @@ Usage:
     common report [note]           report a bad answer from the network
     common reports                 reports saved on this machine, and send them
     common test                    benchmark every node + routing, log to jsonl
+    common update                  check for and install CLI updates (--force-update: even from a git checkout)
     common help [verb]             help, per verb
 
 A question is answered by the best available donated machine — `common ask`
@@ -450,12 +452,78 @@ def self_update(force: bool = False) -> None:
     except OSError:
         pass  # a failed backup must not block the update
     try:
+        _write_bytes_safely(Path(local_path), remote)
+    except OSError as e:
+        print(dim(f"warning: couldn't self-update ({e}); the disk may be full. Continuing with the installed copy."))
+        return
+    _exec([sys.executable, local_path] + sys.argv[1:])
+
+
+def cmd_update(force: bool = False) -> None:
+    """Explicit update command: check for and apply CLI updates with user feedback."""
+    local_path = os.path.abspath(__file__)
+
+    if _in_git_work_tree(local_path) and not force:
+        print(dim("This is a git checkout, not an installed copy."))
+        print(dim("Update with `git pull`, or pass --force-update to override."))
+        return
+
+    print(dim("Checking for updates..."))
+    try:
+        with urllib.request.urlopen(UPDATE_URL, timeout=10) as resp:
+            remote = resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 404):
+            print(red(f"✗ Update channel unreachable ({e.code})"))
+            print(comment(f"source: {UPDATE_URL}"))
+        else:
+            print(red(f"✗ HTTP error: {e.code}"))
+        sys.exit(1)
+    except (urllib.error.URLError, socket.timeout):
+        print(red("✗ Could not reach update server (offline?)"))
+        sys.exit(1)
+
+    if not remote.strip():
+        print(red("✗ Empty response from update server"))
+        sys.exit(1)
+
+    try:
+        with open(local_path, "rb") as f:
+            local = f.read()
+    except OSError as e:
+        print(red(f"✗ Could not read local file: {e}"))
+        sys.exit(1)
+
+    if remote == local:
+        print(blue("✓") + f" Already up to date (v{VERSION})")
+        return
+
+    remote_version = None
+    for line in remote.decode("utf-8", errors="replace").splitlines():
+        if line.startswith("VERSION = "):
+            try:
+                remote_version = line.split('"')[1]
+            except (IndexError, ValueError):
+                pass
+            break
+
+    print(dim(f"Updating from v{VERSION} to v{remote_version or 'latest'}..."))
+    backup_path = local_path + ".bak"
+    try:
+        with open(backup_path, "wb") as f:
+            f.write(local)
+        print(dim(f"Backup saved to {backup_path}"))
+    except OSError:
+        pass
+
+    try:
         with open(local_path, "wb") as f:
             f.write(remote)
     except OSError as e:
-        print(dim(f"warning: couldn't self-update ({e}), continuing with current version"))
-        return
-    _exec([sys.executable, local_path] + sys.argv[1:])
+        print(red(f"✗ Could not write update: {e}"))
+        sys.exit(1)
+
+    print(blue("✓") + f" Updated to v{remote_version or 'latest'}")
 
 
 # --- Identity ------------------------------------------------------------
@@ -2675,6 +2743,20 @@ def _cmd_leave_legacy(gateway: str) -> None:
         print(dim("not currently on the commons."))
 
 
+def _write_bytes_safely(path: Path, data: bytes) -> None:
+    """Write beside the file, then swap it in, so a full disk never leaves a truncated copy behind."""
+    tmp = path.with_name(path.name + ".new")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_model: str | None = None) -> None:
     join_py = INSTALL_DIR / "join.py"
     checkout_join = Path(__file__).resolve().parent.parent / "join" / "join.py"
@@ -2706,12 +2788,19 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
             with urllib.request.urlopen(JOIN_SCRIPT_URL, timeout=10) as resp:
                 remote = resp.read()
             join_py.parent.mkdir(parents=True, exist_ok=True)
-            join_py.write_bytes(remote)
+            _write_bytes_safely(join_py, remote)
         except (urllib.error.URLError, socket.timeout) as e:
             if not join_py.exists():
                 print(red(f"✗ couldn't fetch the join script: {e}"), file=sys.stderr)
                 sys.exit(1)
             # Offline but we already have a copy -- use it as-is.
+        except OSError as e:
+            # disk full or read-only: keep the installed copy rather than a traceback
+            print(dim(f"warning: couldn't update the join script ({e}); the disk may be full. "
+                      f"Using the installed copy. Free some space on this drive to get updates."), file=sys.stderr)
+            if not join_py.exists():
+                print(red("✗ and there is no installed copy to use. Free some disk space and run the command again."), file=sys.stderr)
+                sys.exit(1)
 
     if verb == "serve":
         print(dim(f"putting {extra_model} out to graze on the commons.\n"))
@@ -3223,7 +3312,7 @@ def _repl_args(line: str) -> list[str]:
 
 def build_repl_help() -> str:
     return dim(
-        "/ask (implicit: just type)  /join  /serve  /leave  /status\n"
+        "/ask (implicit: just type)  /join  /serve  /leave  /status  /update\n"
         "/demand  /recommend  /peers  /contrib  /whoami  /privacy  /config  /test  /model  /local  /report  /reports  /help  /exit"
     )
 
@@ -3279,6 +3368,9 @@ def interactive_session(gateway: str, args: argparse.Namespace) -> None:
         if line == "/config":
             cmd_config(False, args)
             continue
+        if line == "/update" or line.startswith("/update "):
+            cmd_update(force=any(t in ("--force", "--force-update") for t in line.split()[1:]))
+            continue
         if line.startswith("/test"):
             # /test full -> the 3-repeat sweep, same as `common test --full`
             args.full = "full" in line.split()[1:]
@@ -3325,7 +3417,7 @@ def main() -> None:
     parser.add_argument("--gateway", default=os.environ.get("COMMON_GATEWAY_URL", DEFAULT_GATEWAY))
     parser.add_argument("--region", default=None)
     parser.add_argument("--temperature", type=float, default=None, help="ask (layer network): sampling temperature. Default 0 (greedy, enables speculative decoding); above 0 samples normally")
-    parser.add_argument("--model", default=None)
+    parser.add_argument("--model", default=None, help="join: a layer-network model to serve (qwen3-8b, bonsai-8b, bonsai-27b, bonsai-2-9b, bonsai-2-27b), same as --network NAME")
     parser.add_argument("--auto", action="store_true")
     parser.add_argument("--local", action="store_true")
     parser.add_argument("--legacy", action="store_true", help="ask/status/peers/recommend/demand/contrib/leave: use the old gateway instead of the layer network (same as COMMON_LEGACY_GATEWAY=1)")
@@ -3380,7 +3472,10 @@ def main() -> None:
         args.legacy = True
     _LEGACY_GATEWAY[0] = bool(args.legacy)
 
-    if not args.no_update:
+    # `common update` does its own check and reports the outcome, so the silent
+    # startup update is skipped for it -- otherwise the update would happen first
+    # and the explicit command would then report "already up to date".
+    if not args.no_update and args.verb != "update":
         self_update(force=args.force_update)
 
     if args.version:
@@ -3455,6 +3550,9 @@ def main() -> None:
         cmd_join_or_serve("serve", gateway, args, extra_model=model)
     elif args.verb == "leave":
         cmd_leave(gateway)
+    elif args.verb == "update":
+        # Written after the verb, the flag lands in `rest` (REMAINDER), not in args.
+        cmd_update(force=args.force_update or "--force-update" in (args.rest or []))
     else:
         print(red(f"✗ unknown command: {args.verb}"), file=sys.stderr)
         print(dim("  → common help"), file=sys.stderr)

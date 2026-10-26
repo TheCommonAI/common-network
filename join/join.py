@@ -623,10 +623,19 @@ def apply_update_and_restart(remote: bytes) -> None:
     """
     local_path = os.path.abspath(__file__)
     try:
-        with open(local_path, "wb") as f:
-            f.write(remote)
+        tmp_path = local_path + ".new"  # swap in a finished copy, so a full disk cannot leave a half-written join.py
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(remote)
+            os.replace(tmp_path, local_path)
+        except OSError:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
     except OSError as e:
-        print(f"{GLYPH_FORMING} {red(f'could not self-update ({e}), continuing with current version')}", file=sys.stderr)
+        print(f"{GLYPH_FORMING} {red(f'could not self-update ({e}); the disk may be full. Continuing with the installed copy. Free some space on this drive to get updates.')}", file=sys.stderr)
         return
     _exec([sys.executable, local_path] + sys.argv[1:])
 
@@ -1501,6 +1510,8 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
             argv += ["--no-draft"]
         if getattr(args, "layers", None):
             argv += [f"--layers={args.layers}"]
+        if getattr(args, "stage_gib", None):
+            argv += [f"--stage-gib={args.stage_gib}"]
         if getattr(args, "local_front", None):
             argv += [f"--local-front={args.local_front}"]
         if getattr(args, "no_direct", False):
@@ -1599,7 +1610,9 @@ RestartSec=5
 WantedBy=default.target
 """)
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT], check=True)
+    subprocess.run(["systemctl", "--user", "enable", SYSTEMD_UNIT], check=True)
+    # `enable --now` leaves a running unit alone, so a service re-installed for another network would keep serving the old one.
+    subprocess.run(["systemctl", "--user", "restart", SYSTEMD_UNIT], check=True)
     print(f"{GLYPH_DONE} {blue('installed as a background service (systemd --user)', bold=True)} — starts at login, restarts if it crashes.")
     print(comment(f"logs: journalctl --user -u {SYSTEMD_UNIT} -f"))
     print(comment("if this is a server, also run `loginctl enable-linger $USER` so it keeps running after you log out."))
@@ -1698,6 +1711,24 @@ def layer_network_supported() -> bool:
     return True
 
 
+# The layer-network models, by name. Must match NETWORK_MODELS in commonnet/node.py (a test checks it).
+NETWORK_MODEL_NAMES = ("qwen3-8b", "bonsai-8b", "bonsai-27b", "bonsai-2-9b", "bonsai-2-27b")
+
+
+def model_names_a_network(args: argparse.Namespace) -> None:
+    """`--model bonsai-8b` means `--network bonsai-8b`: a layer-network model is picked by name, however it is spelled.
+
+    Any other --model is a catalogue id for the retired gateway and is left alone. Raises ValueError when --network
+    already names a different network.
+    """
+    if args.model not in NETWORK_MODEL_NAMES:
+        return
+    if args.network not in (None, "", args.model):
+        raise ValueError(f"--model {args.model} and --network {args.network} name different networks; give one")
+    args.network = args.model
+    args.model = None
+
+
 def choose_mode(args: argparse.Namespace, supported=None) -> str:
     """'network' or 'legacy' for this invocation.
 
@@ -1757,15 +1788,16 @@ def main() -> None:
     _enable_windows_ansi()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--gateway", default=os.environ.get("COMMON_GATEWAY_URL", DEFAULT_GATEWAY), help="Gateway base URL (default: the shared Common Network gateway)")
-    parser.add_argument("--model", default=None, help="Catalogue id (e.g. qwen2.5-coder-14b) or a raw model tag (e.g. mathstral:7b). Default: probe hardware and ask the network what it needs most (see --auto, --list-catalogue)")
+    parser.add_argument("--model", default=None, help=f"A layer-network model by name ({', '.join(NETWORK_MODEL_NAMES)}), the same as --network NAME. Any other value is a catalogue id or raw model tag for the retired whole-model gateway (see --auto, --list-catalogue)")
     # The v0.2 RPC-group prototype was removed; the layer network (--network) replaced it. These stay
     # parseable, hidden, only so that a script or service that still passes one gets a clear message.
     for removed_flag in ("--distributed-config", "--group-token", "--relay"):
         parser.add_argument(removed_flag, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--local-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--network", nargs="?", const="", default=None, metavar="MODEL|URL|FILE", help="Join the decentralised layer network: serve a slice of the shared model as a peer. Choose qwen3-8b, bonsai-8b, bonsai-27b, bonsai-2-9b, or bonsai-2-27b, or give a seed peer URL or manifest file (default: COMMONNET_NETWORK or the built-in seeds). No gateway registration")
+    parser.add_argument("--network", nargs="?", const="", default=None, metavar="MODEL|URL|FILE", help=f"Join the decentralised layer network: serve a slice of the shared model as a peer. Choose {', '.join(NETWORK_MODEL_NAMES)}, or give a seed peer URL or manifest file (default: COMMONNET_NETWORK or the built-in seeds). No gateway registration")
     parser.add_argument("--layers", metavar="A-B", help="With the layer network: serve exactly this window of layers (for example 27-36) instead of the one the network picks for you. It must start and end on a stage boundary and fit in memory")
+    parser.add_argument("--stage-gib", type=float, default=None, metavar="GIB", help="With the layer network: how much memory to offer, in GiB (default: detected). Raise it if a window is just over what this machine offers and you can spare the memory")
     parser.add_argument("--local-front", metavar="N|auto|on", default=None, help="With the layer network: also hold the first layers (N = a stage boundary, on = the first stage, auto = only if this machine is fast and has the memory) and run them in the chat client, so your prompts never leave this machine and the first network hop disappears. Costs memory (about 1 GB for 9 layers of Qwen3-8B 4-bit) and helps only this machine's own chat. Default off (or set COMMONNET_LOCAL_FRONT)")
     parser.add_argument("--no-draft", action="store_true", help="With the layer network: turn off speculative decoding in the local chat API (same as COMMONNET_DRAFT=0)")
     parser.add_argument("--no-api", action="store_true", help="With the layer network: do not serve the local chat API (on by default, so `common ask` and chat apps work). Saves the ~1 GB client part of the model")
@@ -1797,8 +1829,20 @@ def main() -> None:
     parser.add_argument("--no-update", action="store_true", default=bool(os.environ.get("COMMON_NO_UPDATE")), help="Skip the self-update check (useful when hacking on this script locally)")
     parser.add_argument("--lan", action="store_true", help="Use a LAN worker address instead of a Cloudflare tunnel; still registers with --gateway (production by default).")
     parser.add_argument("--permanent", action="store_true", help="Install as a background service that starts at login/boot and restarts if it crashes, then exit")
+    parser.add_argument("--check", action="store_true", help="Check that this machine can join the layer network (reads only: nothing is installed, downloaded or started), then exit")
     parser.add_argument("--remove-permanent", action="store_true", help="Remove the background service installed by --permanent, then exit")
     args = parser.parse_args()
+    try:
+        model_names_a_network(args)
+    except ValueError as e:
+        parser.error(str(e))
+
+    if args.check:
+        layers = _load_layers()
+        if layers is None:
+            die("layers.py is missing: join.py needs it beside it to check the layer network. "
+                "Re-run the installer to fetch it.")
+        sys.exit(layers.report(layers.preflight()))
 
     # Before updates, catalogue lookup, identity reads, tunnel creation or any
     # registration path. A local test must not contact the public gateway.
@@ -1830,6 +1874,8 @@ def main() -> None:
         parser.error("--bootstrap, --public-ip, --external-port, --direct-port, --dht-port and --no-tunnel-fallback need --direct")
     if args.layers and mode != "network":
         parser.error("--layers is only used with the layer network (--network, or a plain join on a machine that can serve it)")
+    if args.stage_gib and mode != "network":
+        parser.error("--stage-gib is only used with the layer network (--network, or a plain join on a machine that can serve it)")
     if args.local_front and mode != "network":
         parser.error("--local-front is only used with the layer network (--network, or a plain join on a machine that can serve it)")
     if mode == "network" and args.api is None and not args.no_api and not args.remove_permanent:
@@ -1864,6 +1910,8 @@ def main() -> None:
             node_args += ["--no-draft"]
         if args.layers:
             node_args += ["--layers", args.layers]
+        if args.stage_gib:
+            node_args += ["--stage-gib", str(args.stage_gib)]
         if args.local_front:
             node_args += ["--local-front", args.local_front]
         node_args += _direct_flags(args)

@@ -28,7 +28,9 @@ import signal
 import subprocess
 import sys
 import tarfile
+import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO = "TheCommonAI/common-network"
@@ -64,6 +66,213 @@ CUDA_TORCH_INDEX = "https://download.pytorch.org/whl/cu128"  # UNTESTED
 
 class LayersError(RuntimeError):
     """Something stopped the join. The message says what to do about it."""
+
+
+DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"  # commonnet/mesh/directory.py; a test keeps them equal
+GATEWAY_ENV = "COMMONNET_GATEWAY"
+PYPI_INDEX = "https://pypi.org/simple/"
+MIN_FREE_DISK_GIB = 8.0
+# The smallest slice any peer can serve, per backend: one 9-layer stage of the default network, rounded up.
+# join/test_layers.py recomputes these from commonnet/networks/main.json and fails if they drift.
+SMALLEST_SLICE_GIB = {"mac-arm64": 1.5, "nvidia": 1.9, "cpu": 4.0}
+# The shares commonnet/node.py offers out of what it finds: VRAM less a reserve, unified memory, and RAM.
+NVIDIA_RESERVE_GIB = 1.5
+MAC_MEMORY_FRACTION = 0.62
+CPU_MEMORY_FRACTION = 0.5  # node.py takes the lower of this and 60% of free RAM; this is the ceiling
+PLATFORM_LABEL = {"mac-arm64": "Apple silicon Mac (MLX)", "nvidia": "NVIDIA GPU (NF4)",
+                  "cpu": "no NVIDIA GPU, so the CPU (bfloat16, slower)"}
+NETWORK_FIX = ("Check this machine's internet connection. On a school or work network GitHub or pypi.org may be "
+               "blocked: ask that network's IT team, or download the repository yourself and set COMMONNET_SRC "
+               "to its folder.")
+
+
+@dataclass(frozen=True)
+class Check:
+    """One thing `join` needs from this machine. `blocks` False means join can go on without it."""
+    name: str
+    ok: bool
+    detail: str
+    fix: str = ""
+    blocks: bool = True
+
+
+def _unreachable(url: str, urlopen=urllib.request.urlopen, timeout: float = 8.0) -> str | None:
+    """None if something answers at `url` (any HTTP status counts as an answer), else why it could not be reached."""
+    request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "common-join"})
+    try:
+        urlopen(request, timeout=timeout).close()
+    except urllib.error.HTTPError:
+        return None
+    except (OSError, ValueError) as e:
+        return str(getattr(e, "reason", None) or e)
+    return None
+
+
+def _host(url: str) -> str:
+    return url.split("://", 1)[-1].split("/", 1)[0]
+
+
+def nvidia_free_gib(which=shutil.which, run=subprocess.run) -> float | None:
+    """Free memory on the emptiest NVIDIA GPU, or None when there is no readable GPU."""
+    exe = which("nvidia-smi")
+    if not exe:
+        return None
+    try:
+        out = run([exe, "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                  capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    values = []
+    for field in (out.stdout or "").split():
+        try:
+            values.append(float(field))
+        except ValueError:
+            continue
+    return max(values) / 1024 if values else None
+
+
+def total_memory_gib(system: str) -> float | None:
+    """Installed memory (unified or RAM), or None where it cannot be read cheaply."""
+    try:
+        if system == "Darwin":
+            out = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5)
+            return int(out.stdout.strip()) / 2**30
+        if system == "Linux":
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / 2**20
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return None
+
+
+def free_disk_gib(path: Path) -> float:
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    return shutil.disk_usage(path).free / 2**30
+
+
+def gateway_from_env(env) -> str | None:
+    """COMMONNET_GATEWAY if set ("off" disables the directory), else the default gateway."""
+    value = env.get(GATEWAY_ENV)
+    if value is None:
+        return DEFAULT_GATEWAY
+    value = value.strip().rstrip("/")
+    if not value or value.lower() in ("off", "none", "no", "0", "false") or not value.startswith(("http://", "https://")):
+        return None
+    return value
+
+
+def preflight(env=None, *, system: str | None = None, machine: str | None = None, nvidia: bool | None = None,
+              urlopen=urllib.request.urlopen, probe_gpu=nvidia_free_gib, probe_memory=total_memory_gib,
+              probe_disk=lambda: free_disk_gib(Path.home()), gateway: str | None = None) -> list[Check]:
+    """Everything `common join` needs from this machine, checked before anything is downloaded. Read-only, and fast.
+
+    Blocking failures stop the join with the reason and the fix. The directory is only a warning: a node can
+    still find its peers through the seed list without it.
+    """
+    env = os.environ if env is None else env
+    system = system or platform.system()
+    try:
+        kind = platform_kind(system, machine, nvidia=nvidia)
+    except LayersError as e:
+        return [Check("this machine", False, str(e), "The layer network runs on macOS, Windows and Linux.")]
+    checks = [Check("this machine", True, PLATFORM_LABEL[kind])]
+
+    if env.get("COMMONNET_SRC"):
+        checks.append(Check("code", True, "COMMONNET_SRC is set, so nothing is downloaded"))
+    else:
+        ref = env.get("COMMONNET_REF") or DEFAULT_REF
+        url = TARBALL_URL.format(ref=ref)
+        why = _unreachable(url, urlopen)
+        checks.append(Check("code", why is None, f"{_host(url)} reachable" if why is None
+                            else f"cannot reach {_host(url)} ({why})", NETWORK_FIX))
+
+    runtime_present = venv_python().is_file()
+    if runtime_present:
+        checks.append(Check("model runtime", True, "already installed on this machine"))
+    else:
+        indexes = [PYPI_INDEX]
+        _, torch_args = requirements(kind)
+        if "--index-url" in torch_args:
+            indexes.append(torch_args[torch_args.index("--index-url") + 1])
+        for url in indexes:
+            why = _unreachable(url, urlopen)
+            checks.append(Check(f"packages from {_host(url)}", why is None,
+                                "reachable" if why is None else f"cannot reach {_host(url)} ({why})",
+                                NETWORK_FIX))
+
+    free = probe_disk()
+    if free >= MIN_FREE_DISK_GIB:
+        checks.append(Check("disk space", True, f"{free:.0f} GiB free"))
+    else:
+        checks.append(Check("disk space", False, f"{free:.1f} GiB free; a first join downloads several GiB",
+                            f"Free at least {MIN_FREE_DISK_GIB:.0f} GiB in your home folder, then run this again.",
+                            blocks=not runtime_present))
+
+    need = SMALLEST_SLICE_GIB[kind]
+    if kind == "nvidia":
+        free_vram = probe_gpu()
+        if free_vram is None:
+            checks.append(Check("GPU memory", True, "not readable here; the node checks it when it starts"))
+        elif free_vram - NVIDIA_RESERVE_GIB >= need:
+            checks.append(Check("GPU memory", True, f"{free_vram:.1f} GiB free"))
+        else:
+            checks.append(Check("GPU memory", False,
+                                f"{free_vram:.1f} GiB free; the smallest slice of the network needs about {need:.1f} GiB",
+                                "Close programs that use the GPU (games, video editors, browsers with hardware "
+                                "acceleration), then run this again."))
+    else:
+        total = probe_memory(system)
+        share = MAC_MEMORY_FRACTION if kind == "mac-arm64" else CPU_MEMORY_FRACTION
+        if total is None:
+            checks.append(Check("memory", True, "not readable here; the node checks it when it starts"))
+        elif total * share >= need:
+            checks.append(Check("memory", True, f"{total:.0f} GiB installed"))
+        else:
+            checks.append(Check("memory", False,
+                                f"{total:.1f} GiB installed; the smallest slice of the network needs about "
+                                f"{need / share:.0f} GiB installed",
+                                "Use a machine with more memory, or an NVIDIA GPU."))
+
+    url = gateway_from_env(env) if gateway is None else gateway
+    if url:
+        why = _unreachable(url + "/health", urlopen)
+        checks.append(Check("directory", why is None,
+                            "reachable" if why is None else f"cannot reach {_host(url)} ({why})",
+                            "Joining can still work through the network's seed peers, but other machines may take "
+                            "a few minutes to see this one.", blocks=False))
+    return checks
+
+
+def blocking(checks: list[Check]) -> list[Check]:
+    return [c for c in checks if not c.ok and c.blocks]
+
+
+def describe_failures(checks: list[Check]) -> str:
+    lines = ["this machine cannot join the network yet:"]
+    for c in blocking(checks):
+        lines.append(f"  - {c.name}: {c.detail}.")
+        if c.fix:
+            lines.append(f"    {c.fix}")
+    return "\n".join(lines)
+
+
+def report(checks: list[Check], log=print) -> int:
+    """Print the checks for a person to read. 0 if this machine can join, 1 if something blocks it."""
+    log("Checking this machine for the Common network (nothing is installed or downloaded):")
+    for c in checks:
+        tag = "ok" if c.ok else ("FAIL" if c.blocks else "warn")
+        log(f"  [{tag:<4}] {c.name}: {c.detail}")
+        if not c.ok and c.fix:
+            log(f"         {c.fix}")
+    if blocking(checks):
+        log("Fix the items marked FAIL, then run this check again.")
+        return 1
+    log("This machine can join. Run `common join` to start.")
+    return 0
 
 
 def has_nvidia(which=shutil.which, run=subprocess.run) -> bool:
@@ -240,10 +449,20 @@ def build_command(python: str, network: str | None, extra: list[str] | None = No
 
 
 def run(network: str | None, extra: list[str] | None = None, *, dry_run: bool = False, env=None,
-        runner=subprocess.Popen, run_cmd=subprocess.run, log=print, nvidia: bool | None = None) -> int:
-    """Set everything up and run the node in the foreground. Returns its exit code."""
+        runner=subprocess.Popen, run_cmd=subprocess.run, log=print, nvidia: bool | None = None,
+        checks=None) -> int:
+    """Set everything up and run the node in the foreground. Returns its exit code.
+
+    The preflight runs first, so a machine that cannot join is told why before a multi-GB download starts.
+    """
     env = dict(os.environ if env is None else env)
     kind = platform_kind(nvidia=nvidia)
+    found = checks(env) if checks is not None else preflight(env, nvidia=nvidia)
+    if blocking(found):
+        raise LayersError(describe_failures(found))
+    for c in found:
+        if not c.ok:
+            log(f"warning: {c.name}: {c.detail}. {c.fix}".rstrip())
     source = ensure_source(env, dry_run=dry_run, log=log)
     python = ensure_runtime(kind, source=source, run=run_cmd, dry_run=dry_run, log=log)
     command = build_command(python, network, extra, source=source)

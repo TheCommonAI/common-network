@@ -2,7 +2,7 @@
 
 The Common Network CLI (v0.4): join the distributed layer network as a peer, ask it
 questions, and inspect it. `common join` serves a slice of a model's layers
-(`--network NAME` picks bonsai-8b, bonsai-2-9b, bonsai-27b, bonsai-2-27b or
+(`--network NAME`, or `--model NAME` for the same choice, picks bonsai-8b, bonsai-2-9b, bonsai-27b, bonsai-2-27b or
 qwen3-8b); `common ask` sends greedy (`temperature` 0) requests so Common Flash
 speculative decoding applies, and needs `common join` running for its local API.
 See [docs/layer-network.md](../docs/layer-network.md) and the
@@ -35,8 +35,8 @@ Short alias: `cmn` does the same thing as `common`.
 --gateway <url>     talk to a different network
 --region <id>       bias routing to a region
 --model <id>         pin a specific model (ask: refuses rather than silently
-                     rerouting if nothing serves it; join/serve: pick from
-                     the catalogue or a raw Ollama tag)
+                     rerouting if nothing serves it; join: a layer-network
+                     name such as bonsai-8b, the same as --network NAME)
 --auto              accept join's recommended model without confirming
 --local             ask only — never leaves this machine, talks to your
                      local Ollama directly

@@ -158,6 +158,49 @@ class Rebalance(NodeCase):
         self.assertEqual(movers[0].server.port, {c: 18943, survivor_twin: survivor_twin.port}[movers[0]])
 
 
+class DirectoryListing(NodeCase):
+    """The log says when this node is, or stops being, listed on the rendezvous directory, and why a machine is too small."""
+
+    def _node(self, port, logs, gib=30.0, gateway="https://gateway.example"):
+        identity = Identity.load_or_create(Path(self.tmp.name) / f"idd{port}.key")
+        return node.Node(self.manifest, [], identity, node.Hardware("stub", gib, "stub"), port=port, stub=True,
+                         tunnel=False, log=logs.append, resign_s=5, gossip_s=5, gateway=gateway)
+
+    def test_listing_is_logged_when_it_changes_not_on_every_pass(self):
+        logs = []
+        n = self._node(18974, logs)
+        with mock.patch.object(node.mesh_directory, "announce", side_effect=[True, True, True]):
+            for _ in range(3):
+                n._announce_to_directory({"url": "http://x"})
+        self.assertEqual(logs, ["listed on the directory: new peers can find this node"])
+
+    def test_a_failed_listing_is_said_out_loud_and_so_is_its_recovery(self):
+        logs = []
+        n = self._node(18975, logs)
+        with mock.patch.object(node.mesh_directory, "announce", side_effect=[False, False, True, False]):
+            for _ in range(4):
+                n._announce_to_directory({"url": "http://x"})
+        self.assertEqual(len(logs), 3)
+        self.assertIn("could not list this node on the directory at gateway.example", logs[0])
+        self.assertEqual(logs[1], "listed on the directory again: new peers can find this node")
+        self.assertIn("could not list this node", logs[2])
+
+    def test_a_node_with_no_directory_says_nothing_about_one(self):
+        logs = []
+        n = self._node(18976, logs, gateway=None)
+        with mock.patch.object(node.mesh_directory, "announce", side_effect=AssertionError("no directory")):
+            n._announce({"url": "http://x"})
+        self.assertEqual(logs, [])
+
+    def test_too_little_memory_names_what_the_machine_offers(self):
+        n = self._node(18977, [], gib=0.5, gateway=None)
+        with self.assertRaises(node.NodeError) as caught:
+            n._choose()
+        message = str(caught.exception)
+        self.assertIn("This machine offers 0.5 GiB", message)
+        self.assertIn("This network needs at least 9.0 GiB free", message)
+
+
 class PinnedWindow(NodeCase):
     """--layers A-B: serve exactly that window, or refuse with a reason."""
 

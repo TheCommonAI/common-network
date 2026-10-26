@@ -30,9 +30,14 @@ irm https://commonai.com.au/install.ps1 | iex
 Open a new terminal, then:
 
 ```bash
+common join --check              # can this machine join? checks only, installs nothing
 common join                      # serve a slice of the default model
 common ask "What's a good way to learn recursion?"
 ```
+
+`common join --check` reads this machine's platform, memory, disk and network
+access and says what would stop a join, with the fix, before anything is
+downloaded.
 
 `common join` sets itself up on first run (private Python environment, model
 runtime, code), picks the layers the network needs most that fit your memory,
@@ -48,12 +53,17 @@ been verified on real hardware; see the status notes in
 
 ```bash
 common join --network bonsai-8b        # also: bonsai-2-9b, bonsai-27b, bonsai-2-27b, qwen3-8b
+common join --model bonsai-8b          # the same, named as a model
 common join --network URL              # a network a friend runs (any peer's URL)
 common join --network manifest.json
 ```
 
 A network is defined by a manifest: the model and the fixed layer boundaries
 every peer's window is made of. See [docs/bonsai-networks.md](docs/bonsai-networks.md).
+
+To change the model a machine serves, press Ctrl+C and join with another name, or
+run the new command with `--permanent` to replace a background service. See
+[docs/layer-network.md](docs/layer-network.md#switching-the-model).
 
 ### Useful `join` flags
 
@@ -103,6 +113,7 @@ Everything is documented in [docs/layer-network.md](docs/layer-network.md).
 ## Commands
 
 ```bash
+common join --check   # can this machine join? checks only, installs nothing
 common join           # put this machine on the network
 common ask "..."      # ask the network (or `common` for an interactive session)
 common ask --temperature 0.7 "..."   # sampled instead of greedy (no speculation)
