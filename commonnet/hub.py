@@ -44,6 +44,27 @@ def cache_dir(repo: str, revision: str = "main", environ=None) -> str:
     return os.path.join(root, *repo.split("/"), revision)
 
 
+def window_cache_bytes(repo: str, window, revision: str = "main", environ=None) -> int:
+    """Bytes of `window` (layers a-b) already on disk, partial downloads (.part) included."""
+    root = cache_dir(repo, revision, environ)
+    prefix = "compact-L%d-%d" % (window[0], window[1])
+    total = 0
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return 0
+    for d in names:
+        if d != prefix and not d.startswith(prefix + "+"):
+            continue
+        for dirpath, _dirs, files in os.walk(os.path.join(root, d)):
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, f))
+                except OSError:
+                    pass
+    return total
+
+
 LAYOUTS = ("model.language_model.", "language_model.model.", "model.")  # qwen3_5 HF, qwen3_5 MLX, qwen3
 
 

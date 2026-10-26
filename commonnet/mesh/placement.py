@@ -65,11 +65,17 @@ def replica_counts(manifest: Manifest, live) -> dict[tuple[int, int], int]:
     return counts
 
 
-def choose_window(manifest: Manifest, live, gib: float, backend: str, me: str | None = None) -> tuple[int, int]:
+def choose_window(manifest: Manifest, live, gib: float, backend: str, me: str | None = None,
+                  cached: dict | None = None) -> tuple[int, int]:
     """The window a joining peer with `gib` of memory should serve.
 
     Stages nobody serves dominate the score, then a longer window (fewer hops), then a window some peer
     already serves with the fewest replicas, so that failover has an identical peer to go to.
+
+    `cached` maps a window to the bytes of it already on this machine's disk (partial downloads count). When any
+    window has some, finishing what is on disk comes first: a window that covers a stage nobody serves still beats
+    one that does not, and among those the most cached wins; with no uncovered stage the most cached wins, then
+    the old order. With nothing cached the old order applies unchanged.
     """
     others = [r for r in live if r.get("peer") != me]
     cov = coverage(manifest, others)
@@ -79,9 +85,16 @@ def choose_window(manifest: Manifest, live, gib: float, backend: str, me: str | 
     if not candidates:
         raise NoWindow(f"{gib:.2f} GiB is too little for even one stage ({manifest.window_gib(*manifest.stages()[0], backend):.2f} GiB)")
 
+    cached = cached or {}
+    use_cache = any(v > 0 for v in cached.values())
+    uncovered = {s for s in manifest.stages() if cov[stage_index[s]] == 0}
+
     def key(w):
         score = sum(Fraction(1, 1 + cov[stage_index[s]]) for s in manifest.stages() if w[0] <= s[0] and s[1] <= w[1])
         existing = replicas.get(w, 0)
+        if use_cache:
+            gap = 0 if any(w[0] <= s[0] and s[1] <= w[1] for s in uncovered) or not uncovered else 1
+            return (gap, -cached.get(w, 0), -score, -(w[1] - w[0]), 0 if existing else 1, existing, w[0])
         return (-score, -(w[1] - w[0]), 0 if existing else 1, existing, w[0])
 
     return min(candidates, key=key)

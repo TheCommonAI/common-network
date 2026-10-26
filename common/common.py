@@ -450,10 +450,9 @@ def self_update(force: bool = False) -> None:
     except OSError:
         pass  # a failed backup must not block the update
     try:
-        with open(local_path, "wb") as f:
-            f.write(remote)
+        _write_bytes_safely(Path(local_path), remote)
     except OSError as e:
-        print(dim(f"warning: couldn't self-update ({e}), continuing with current version"))
+        print(dim(f"warning: couldn't self-update ({e}); the disk may be full. Continuing with the installed copy."))
         return
     _exec([sys.executable, local_path] + sys.argv[1:])
 
@@ -2675,6 +2674,20 @@ def _cmd_leave_legacy(gateway: str) -> None:
         print(dim("not currently on the commons."))
 
 
+def _write_bytes_safely(path: Path, data: bytes) -> None:
+    """Write beside the file, then swap it in, so a full disk never leaves a truncated copy behind."""
+    tmp = path.with_name(path.name + ".new")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_model: str | None = None) -> None:
     join_py = INSTALL_DIR / "join.py"
     checkout_join = Path(__file__).resolve().parent.parent / "join" / "join.py"
@@ -2706,12 +2719,19 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
             with urllib.request.urlopen(JOIN_SCRIPT_URL, timeout=10) as resp:
                 remote = resp.read()
             join_py.parent.mkdir(parents=True, exist_ok=True)
-            join_py.write_bytes(remote)
+            _write_bytes_safely(join_py, remote)
         except (urllib.error.URLError, socket.timeout) as e:
             if not join_py.exists():
                 print(red(f"✗ couldn't fetch the join script: {e}"), file=sys.stderr)
                 sys.exit(1)
             # Offline but we already have a copy -- use it as-is.
+        except OSError as e:
+            # disk full or read-only: keep the installed copy rather than a traceback
+            print(dim(f"warning: couldn't update the join script ({e}); the disk may be full. "
+                      f"Using the installed copy. Free some space on this drive to get updates."), file=sys.stderr)
+            if not join_py.exists():
+                print(red("✗ and there is no installed copy to use. Free some disk space and run the command again."), file=sys.stderr)
+                sys.exit(1)
 
     if verb == "serve":
         print(dim(f"putting {extra_model} out to graze on the commons.\n"))

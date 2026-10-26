@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from commonnet import localfront
+from commonnet import localfront, preflight
 from commonnet.mesh import placement
 from commonnet.mesh import directory as mesh_directory
 from commonnet.mesh import gossip as mesh_gossip
@@ -525,6 +525,7 @@ class Node:
         self.publish()
         self._gossiper.start()
         self._spawn(self._maintain, "node-maintain")
+        self.log(preflight.progress(2, "finding the network"))
         window = self._choose()
         with self._lock:
             self._status_window = window
@@ -535,6 +536,7 @@ class Node:
         self._announce(self.publish())
         self._push_to_peers()
         self.write_status()
+        self.log(preflight.progress(5, f"starting, ready at {self.url}"))
         self.log(f"up at {self.url}")
         self._log_direct_capability()
         self.log(f"you are part of the network. A friend can join through you with:  common join --network {self.url}")
@@ -629,15 +631,34 @@ class Node:
                                 f"({stages}); a window starts and ends on a stage boundary.")
             need = self.manifest.window_gib(*window, self.hw.backend)
             if need > self.hw.gib:
-                raise NodeError(f"layers {window[0]}-{window[1]} need {need:.1f} GiB here and this machine offers "
-                                f"{self.hw.gib:.1f} GiB. Pick a shorter window.")
+                raise NodeError(preflight.memory_message(window, need, self.hw.gib))
+            self.log(preflight.progress(3, f"using the layers you asked for: {window[0]}-{window[1]}"))
             return window
+        cached = self._cached_windows()
         try:
-            return placement.choose_window(self.manifest, self.table.live(), self.hw.gib, self.hw.backend,
-                                           me=self.identity.peer)
+            chosen = placement.choose_window(self.manifest, self.table.live(), self.hw.gib, self.hw.backend,
+                                             me=self.identity.peer, cached=cached)
+            have = cached.get(chosen, 0) / 2**30
+            need = self.manifest.window_gib(*chosen, self.hw.backend)
+            why = f": {min(have, need):.1f} of {need:.1f} GB already downloaded" if have > 0 else ""
+            self.log(preflight.progress(3, f"choosing layers {chosen[0]}-{chosen[1]}{why}"))
+            return chosen
         except placement.NoWindow as e:
             raise NodeError(f"{e}. This network needs at least "
                             f"{self.manifest.window_gib(*self.manifest.stages()[0], self.hw.backend):.1f} GiB free.") from None
+
+    def _cached_windows(self) -> dict:
+        """Bytes already on disk for each window this machine could serve (empty when unknown)."""
+        if self.stub or self._fetch is not None or self._build_block is not None:
+            return {}
+        repo = self.manifest.repo(self.hw.backend)
+        if not repo:
+            return {}
+        try:
+            from commonnet import hub
+            return {w: hub.window_cache_bytes(repo, w) for w in self.manifest.windows_fitting(self.hw.gib, self.hw.backend)}
+        except Exception:
+            return {}
 
     def _make_block(self, window, quiet: bool = False):
         # quiet: loading the local front must not move the node's own status phase
@@ -665,6 +686,17 @@ class Node:
             fetch = lambda r, w: hub.Hub(r, log=(self.log if quiet else self._hub_log)).fetch(  # noqa: E731
                 layers=tuple(w), ranged=ranged, embed=w[0] == 0 and os.environ.get("COMMONNET_IDS", "1") != "0",
                 head=w[1] == nl and os.environ.get("COMMONNET_IDS", "1") != "0")
+        if os.environ.get("COMMONNET_LOCAL_CHECKPOINT") is None and self._fetch is None:
+            from commonnet import hub
+            have = hub.window_cache_bytes(repo, window)
+            need = self.manifest.window_gib(*window, self.hw.backend) * 2**30
+            try:
+                preflight.check_disk(hub.cache_dir(repo), need, have, window)
+            except preflight.PreflightError as e:
+                raise NodeError(str(e)) from None
+            left = max(0.0, need - have) / 2**30
+            self.log(preflight.progress(4, f"downloading {left:.1f} GB ({min(have, need) / 2**30:.1f} GB already here)"
+                                        if have else f"downloading {left:.1f} GB"))
         self.log(f"downloading layers {window[0]}-{window[1]} of {repo} (only these)...")
         if not quiet:
             self.progress.reset()
@@ -1284,6 +1316,7 @@ def _main(args) -> int:
                 hardware = Hardware(args.backend, hardware.gib, hardware.name)
             if args.stage_gib:
                 hardware = Hardware(hardware.backend, args.stage_gib, hardware.name)
+        print(preflight.progress(1, f"checking this machine: {hardware.name}, {hardware.gib:.2f} GiB to offer"), flush=True)
         check_backend_supported(manifest, hardware)
         fixed_window = None
         if args.layers:
