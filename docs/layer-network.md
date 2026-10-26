@@ -21,6 +21,7 @@ common join --network bonsai-2-9b        # Ternary Bonsai 2 9B
 common join --network bonsai-2-27b       # Ternary Bonsai 2 27B
 common join --network qwen3-8b           # default model
 common join --layers 27-36       # serve exactly this window (a stage boundary pair) instead of the one the network picks
+common join --check              # can this machine join? reads only: nothing is installed, downloaded or started
 common join --permanent          # keep serving after reboots (records the mode)
 common join --legacy             # the original whole-model gateway node instead
 ```
@@ -29,6 +30,12 @@ The first run sets itself up: it makes a private Python environment, installs th
 the code, picks the layers the network needs most that fit your memory, downloads only those layers, opens a
 Cloudflare tunnel (no ports to forward), and starts serving. Ctrl+C leaves cleanly. Running it again
 resumes. Nothing is registered with any gateway.
+
+Before the first join, `common join --check` looks at this machine and reports each thing a join needs: the
+platform, GitHub and pypi.org (the code and packages), disk space, memory (GPU memory on NVIDIA), and the
+rendezvous directory. A failure in any of those except the directory stops `common join` before it downloads
+anything, and says what to do. The directory is only a warning: a node still finds its peers through the seed
+list without it, and the node log says whenever it is listed on the directory or cannot be.
 
 Supported: Apple silicon Macs (MLX), NVIDIA GPUs on Windows/Linux (NF4), and **CPU-only machines** (Windows,
 Linux, Intel Macs) running the unquantised model in bfloat16 on the CPU with plain PyTorch. A CPU peer is

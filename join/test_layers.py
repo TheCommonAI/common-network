@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Tests for layers.py and join.py's --network option. Offline: no pip, no download, no node is started."""
 import io
+import json
 import os
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +19,11 @@ import join
 import layers
 
 JOIN_PY = Path(__file__).resolve().parent / "join.py"
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def no_checks(env):
+    return []
 
 
 class PlatformChoice(unittest.TestCase):
@@ -219,7 +227,7 @@ class Run(unittest.TestCase):
             (src / "commonnet" / "node.py").write_text("")
             ok = mock.Mock(returncode=0)
             code = layers.run("https://seed", ["--port", "9"], env={"COMMONNET_SRC": str(src)}, runner=runner,
-                              run_cmd=lambda *a, **k: ok, log=lambda *_: None, nvidia=False) \
+                              run_cmd=lambda *a, **k: ok, log=lambda *_: None, nvidia=False, checks=no_checks) \
                 if sys.platform == "darwin" else 7
             if sys.platform == "darwin":
                 self.assertEqual(code, 7)
@@ -254,7 +262,7 @@ class Run(unittest.TestCase):
                 with mock.patch.object(layers, "ensure_runtime", return_value=sys.executable):
                     code = layers.run("network.json", ["--auto-direct"],
                                       env={**os.environ, "COMMONNET_SRC": str(relative_source)},
-                                      nvidia=False, log=lambda *_: None)
+                                      nvidia=False, log=lambda *_: None, checks=no_checks)
                 self.assertEqual(code, 0)
                 self.assertEqual(Path((old / "selected-ran").read_text()), (source / "commonnet" / "node.py").resolve())
             finally:
@@ -269,9 +277,142 @@ class Run(unittest.TestCase):
             lines = []
             code = layers.run("x", dry_run=True, env={"COMMONNET_SRC": str(src)}, nvidia=True,
                               runner=lambda *a, **k: 1 / 0, run_cmd=lambda *a, **k: mock.Mock(returncode=0),
-                              log=lines.append)
+                              log=lines.append, checks=no_checks)
             self.assertEqual(code, 0)
             self.assertTrue(any("would run" in l and "commonnet.node" in l for l in lines))
+
+
+class Preflight(unittest.TestCase):
+    """The checks run before anything is installed or downloaded, so they must be correct offline and never download."""
+
+    def setUp(self):
+        patcher = mock.patch.object(layers, "venv_python", return_value=Path("/nonexistent/runtime/python"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def check(self, env=None, *, net=None, system="Linux", machine="x86_64", nvidia=False,
+              gpu=lambda: None, memory=lambda system: 32.0, disk=lambda: 100.0, gateway=None):
+        return layers.preflight(env if env is not None else {}, system=system, machine=machine, nvidia=nvidia,
+                                urlopen=net or Offline(), probe_gpu=gpu, probe_memory=memory, probe_disk=disk,
+                                gateway=gateway)
+
+    def named(self, checks, name):
+        return next(c for c in checks if c.name == name)
+
+    def test_a_machine_the_layer_network_cannot_use_is_blocked(self):
+        checks = self.check(system="FreeBSD", machine="amd64", nvidia=False)
+        self.assertEqual([c.name for c in layers.blocking(checks)], ["this machine"])
+
+    def test_a_cpu_machine_with_everything_reachable_can_join(self):
+        net = Offline()
+        checks = self.check(net=net)
+        self.assertEqual(layers.blocking(checks), [])
+        self.assertTrue(all(c.ok for c in checks))
+        self.assertTrue(any("github.com" in url for url in net.asked))
+        self.assertTrue(any("download.pytorch.org" in url for url in net.asked))
+        self.assertTrue(any("pypi.org" in url for url in net.asked))
+
+    def test_github_being_blocked_stops_the_join_and_says_how_to_work_around_it(self):
+        checks = self.check(net=Offline(blocked=["github.com"]))
+        failure = layers.blocking(checks)
+        self.assertEqual([c.name for c in failure], ["code"])
+        self.assertIn("cannot reach github.com", failure[0].detail)
+        self.assertIn("COMMONNET_SRC", failure[0].fix)
+
+    def test_an_http_error_still_means_the_server_answered(self):
+        class Answers404(Offline):
+            def __call__(self, request, timeout=None):
+                raise urllib.error.HTTPError(request.full_url, 404, "not here", None, None)
+        checks = self.check(net=Answers404())
+        self.assertEqual(layers.blocking(checks), [])
+
+    def test_a_local_source_means_nothing_is_fetched_from_github(self):
+        net = Offline(blocked=["github.com"])
+        checks = self.check({"COMMONNET_SRC": "/some/checkout"}, net=net)
+        self.assertTrue(self.named(checks, "code").ok)
+        self.assertFalse(any("github.com" in url for url in net.asked))
+
+    def test_no_gpu_memory_blocks_an_nvidia_machine_with_a_reason(self):
+        small = self.check(system="Linux", nvidia=True, gpu=lambda: 1.0)
+        self.assertEqual([c.name for c in layers.blocking(small)], ["GPU memory"])
+        self.assertIn("1.0 GiB free", self.named(small, "GPU memory").detail)
+        self.assertEqual(layers.blocking(self.check(system="Linux", nvidia=True, gpu=lambda: 4.0)), [])
+        unknown = self.named(self.check(system="Linux", nvidia=True, gpu=lambda: None), "GPU memory")
+        self.assertTrue(unknown.ok)
+
+    def test_too_little_memory_blocks_a_cpu_machine(self):
+        checks = self.check(system="Windows", machine="AMD64", memory=lambda system: 6.0)
+        self.assertEqual([c.name for c in layers.blocking(checks)], ["memory"])
+        self.assertEqual(layers.blocking(self.check(memory=lambda system: 8.0)), [])
+
+    def test_low_disk_blocks_a_first_join_but_not_a_machine_that_already_has_the_runtime(self):
+        self.assertEqual([c.name for c in layers.blocking(self.check(disk=lambda: 2.0))], ["disk space"])
+        with mock.patch.object(layers, "venv_python", return_value=Path(__file__)):
+            checks = self.check(disk=lambda: 2.0)
+        self.assertEqual(layers.blocking(checks), [])
+        self.assertFalse(self.named(checks, "disk space").ok)
+
+    def test_the_directory_is_a_warning_not_a_blocker(self):
+        checks = self.check(net=Offline(blocked=["gateway-production"]))
+        directory = self.named(checks, "directory")
+        self.assertFalse(directory.ok)
+        self.assertFalse(directory.blocks)
+        self.assertEqual(layers.blocking(checks), [])
+        lines = []
+        self.assertEqual(layers.report(checks, log=lines.append), 0)
+        self.assertTrue(any("[warn]" in line for line in lines))
+
+    def test_the_directory_can_be_turned_off(self):
+        checks = self.check({"COMMONNET_GATEWAY": "off"})
+        self.assertFalse(any(c.name == "directory" for c in checks))
+
+    def test_report_names_each_blocker_and_exits_non_zero(self):
+        lines = []
+        code = layers.report(self.check(net=Offline(blocked=["github.com"])), log=lines.append)
+        self.assertEqual(code, 1)
+        self.assertTrue(any("[FAIL]" in line and "code" in line for line in lines))
+        self.assertTrue(any("COMMONNET_SRC" in line for line in lines))
+        self.assertIn("Fix the items marked FAIL", lines[-1])
+
+    def test_run_stops_before_any_download_when_a_check_blocks(self):
+        with mock.patch.object(layers.urllib.request, "urlopen", side_effect=AssertionError("downloaded")):
+            with self.assertRaises(layers.LayersError) as caught:
+                layers.run("x", env={}, nvidia=False, log=lambda *_: None,
+                           checks=lambda env: [layers.Check("disk space", False, "2.0 GiB free", "free some", True)])
+        self.assertIn("cannot join the network yet", str(caught.exception))
+        self.assertIn("free some", str(caught.exception))
+
+    def test_smallest_slices_match_the_default_manifest(self):
+        manifest = json.loads((ROOT / "commonnet" / "networks" / "main.json").read_text())
+        bounds = manifest["boundaries"]
+        backend_key = {"mac-arm64": "mlx", "nvidia": "nf4", "cpu": "cpu"}
+        for kind, backend in backend_key.items():
+            with self.subTest(kind=kind):
+                per_layer = manifest["gib_per_layer"][backend]
+                io = manifest["io_gib"].get(backend, max(manifest["io_gib"].values()))
+                smallest = min(
+                    manifest["fixed_gib"] + (b - a) * per_layer + io * ((a == 0) + (b == bounds[-1]))
+                    for a, b in zip(bounds, bounds[1:]))
+                self.assertGreaterEqual(layers.SMALLEST_SLICE_GIB[kind], smallest)
+                self.assertLess(layers.SMALLEST_SLICE_GIB[kind] - smallest, 0.2)
+
+    def test_the_default_gateway_is_the_one_the_node_uses(self):
+        text = (ROOT / "commonnet" / "mesh" / "directory.py").read_text()
+        self.assertIn(f'DEFAULT_GATEWAY = "{layers.DEFAULT_GATEWAY}"', text)
+
+
+class Offline:
+    """Stands in for urlopen: named hosts fail to resolve, everything else answers. Records what was asked."""
+
+    def __init__(self, blocked=()):
+        self.blocked = tuple(blocked)
+        self.asked = []
+
+    def __call__(self, request, timeout=None):
+        self.asked.append(request.full_url)
+        if any(host in request.full_url for host in self.blocked):
+            raise urllib.error.URLError("name or service not known")
+        return mock.Mock()
 
 
 class JoinFlag(unittest.TestCase):

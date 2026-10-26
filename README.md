@@ -30,9 +30,14 @@ irm https://commonai.com.au/install.ps1 | iex
 Open a new terminal, then:
 
 ```bash
+common join --check              # can this machine join? checks only, installs nothing
 common join                      # serve a slice of the default model
 common ask "What's a good way to learn recursion?"
 ```
+
+`common join --check` reads this machine's platform, memory, disk and network
+access and says what would stop a join, with the fix, before anything is
+downloaded.
 
 `common join` sets itself up on first run (private Python environment, model
 runtime, code), picks the layers the network needs most that fit your memory,
@@ -103,6 +108,7 @@ Everything is documented in [docs/layer-network.md](docs/layer-network.md).
 ## Commands
 
 ```bash
+common join --check   # can this machine join? checks only, installs nothing
 common join           # put this machine on the network
 common ask "..."      # ask the network (or `common` for an interactive session)
 common ask --temperature 0.7 "..."   # sampled instead of greedy (no speculation)

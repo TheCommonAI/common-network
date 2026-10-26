@@ -1797,8 +1797,16 @@ def main() -> None:
     parser.add_argument("--no-update", action="store_true", default=bool(os.environ.get("COMMON_NO_UPDATE")), help="Skip the self-update check (useful when hacking on this script locally)")
     parser.add_argument("--lan", action="store_true", help="Use a LAN worker address instead of a Cloudflare tunnel; still registers with --gateway (production by default).")
     parser.add_argument("--permanent", action="store_true", help="Install as a background service that starts at login/boot and restarts if it crashes, then exit")
+    parser.add_argument("--check", action="store_true", help="Check that this machine can join the layer network (reads only: nothing is installed, downloaded or started), then exit")
     parser.add_argument("--remove-permanent", action="store_true", help="Remove the background service installed by --permanent, then exit")
     args = parser.parse_args()
+
+    if args.check:
+        layers = _load_layers()
+        if layers is None:
+            die("layers.py is missing: join.py needs it beside it to check the layer network. "
+                "Re-run the installer to fetch it.")
+        sys.exit(layers.report(layers.preflight()))
 
     # Before updates, catalogue lookup, identity reads, tunnel creation or any
     # registration path. A local test must not contact the public gateway.
