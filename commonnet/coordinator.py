@@ -7,9 +7,12 @@ or a comma-separated list of URL@START:END (token from COMMONNET_BLOCK_TOKEN).
 
     python -m commonnet.coordinator --network URL|FILE --prompt TEXT
 
+    python -m commonnet.coordinator --network URL|FILE --plan
+
 --network uses the live layer network: the route, replicas and failover come from the peers it lists.
 The client then holds its embedding and head as mlx4 and exchanges float32 hidden states with the peers.
 Prints the generated text only. It never prints the bearer token or token ids.
+--plan prints the layer assignment the live peers add up to (commonnet.mesh.assign) as JSON and generates nothing.
 """
 from __future__ import annotations
 
@@ -92,6 +95,21 @@ def generate_network(network, checkpoint, prompt_ids, max_new_tokens, fmt="mlx4"
     return client.generate(endpoints, prompt_ids, max_new_tokens, **sampling)
 
 
+def print_plan(spec: str) -> int:
+    """The assignment the live network at `spec` adds up to: every peer's window, the chain, and the idle peers."""
+    from commonnet.mesh import assign
+    from commonnet.netclient import Network, NetworkUnreachable
+    try:
+        network = Network.from_spec(spec)
+        network.refresh(force=True)
+        result = assign.plan(network.manifest, network.table.live())
+    except (NetworkUnreachable, assign.AssignmentError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(result.to_dict(), indent=2))
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="commonnet.coordinator", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -101,7 +119,9 @@ def main(argv=None) -> int:
     p.add_argument("--checkpoint", help="local checkpoint directory")
     p.add_argument("--repo", help="Hugging Face repo id; downloads only embed, final norm and lm_head")
     p.add_argument("--revision", default="main")
-    p.add_argument("--prompt", required=True)
+    p.add_argument("--prompt")
+    p.add_argument("--plan", action="store_true",
+                   help="with --network: print the layer assignment the live peers add up to (JSON) and exit")
     p.add_argument("--max-new-tokens", type=int, default=64)
     p.add_argument("--client-format", choices=["fp32", "fp16", "mlx4"], default=None,
                    help="default: fp16 with --endpoints, mlx4 with --network")
@@ -112,6 +132,11 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     if bool(args.endpoints) == bool(args.network):
         print("error: give exactly one of --endpoints and --network", file=sys.stderr)
+        return 2
+    if args.plan:
+        return print_plan(args.network)
+    if args.prompt is None:
+        print("error: --prompt is required", file=sys.stderr)
         return 2
     if args.client_format is None:
         args.client_format = "mlx4" if args.network else "fp16"
