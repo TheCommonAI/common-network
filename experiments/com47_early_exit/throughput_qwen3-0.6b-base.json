@@ -1,0 +1,62 @@
+{
+  "model": "Qwen/Qwen3-0.6B-Base",
+  "prompts": 4,
+  "new_tokens": 64,
+  "N": 28,
+  "configs": [
+    {
+      "config": "plain",
+      "tokens_per_s": 21.119,
+      "tokens_per_round": 1.0,
+      "draft_precision": null,
+      "exact_match_vs_plain": "reference"
+    },
+    {
+      "config": "spec L=24 K=4 ungated",
+      "tokens_per_s": 11.164,
+      "tokens_per_round": 2.977,
+      "draft_precision": 0.488,
+      "exact_match_vs_plain": "4/4"
+    },
+    {
+      "config": "spec L=24 K=8 ungated",
+      "tokens_per_s": 7.292,
+      "tokens_per_round": 3.413,
+      "draft_precision": 0.305,
+      "exact_match_vs_plain": "4/4"
+    },
+    {
+      "config": "spec L=24 K=4 pmax>=0.5",
+      "tokens_per_s": 12.874,
+      "tokens_per_round": 2.909,
+      "draft_precision": 0.622,
+      "exact_match_vs_plain": "4/4"
+    },
+    {
+      "config": "spec L=20 K=4 ungated",
+      "tokens_per_s": 6.734,
+      "tokens_per_round": 1.641,
+      "draft_precision": 0.16,
+      "exact_match_vs_plain": "4/4"
+    },
+    {
+      "config": "spec L=12 K=4 ungated",
+      "tokens_per_s": 5.267,
+      "tokens_per_round": 1.053,
+      "draft_precision": 0.009,
+      "exact_match_vs_plain": "4/4"
+    }
+  ],
+  "components": {
+    "20": {
+      "full_step_s": 0.04779215399980785,
+      "verify_block_s": 0.11607913600005304,
+      "draft_step_s": 0.0377291075001267
+    },
+    "24": {
+      "full_step_s": 0.04772610600002736,
+      "verify_block_s": 0.11600397899997006,
+      "draft_step_s": 0.04249340349974773
+    }
+  }
+}
