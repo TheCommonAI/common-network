@@ -1,0 +1,1205 @@
+{
+  "model": "Qwen/Qwen3-0.6B-Base",
+  "K": 8,
+  "n_seqs": 120,
+  "gen_len": 128,
+  "layer_sanity": {
+    "4": 0.008854166666666666,
+    "8": 0.034830729166666664,
+    "12": 0.0427734375,
+    "16": 0.0982421875,
+    "20": 0.34765625,
+    "24": 0.7018229166666666,
+    "28": 0.9999348958333333
+  },
+  "results": {
+    "4": {
+      "train_positions": 11520,
+      "test_positions": 3840,
+      "base_accept_rate": 0.0067708333333333336,
+      "top1_agreement_train": 0.009548611111111112,
+      "auc": {
+        "pmax": 0.5597898430882176,
+        "logreg": 0.6702230648219112,
+        "mlp": 0.6902101569117824
+      },
+      "r_cost": 0.3665911328187411,
+      "sim": {
+        "pmax": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.0068169900367068,
+            "draft_precision": 0.0008760698160253386,
+            "drafted_per_round": 7.781331934976403,
+            "cost_per_token": 3.8264821978630494,
+            "speedup": 0.26133663984075595
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.0023492560689116,
+            "draft_precision": 0.00497787610619469,
+            "drafted_per_round": 0.4719394413991125,
+            "cost_per_token": 1.17025957503551,
+            "speedup": 0.854511273680163
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.001303780964798,
+            "draft_precision": 0.007246376811594203,
+            "drafted_per_round": 0.17992177314211213,
+            "cost_per_token": 1.064569760845043,
+            "speedup": 0.9393466137965554
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.0007818608287724,
+            "draft_precision": 0.00946372239747634,
+            "drafted_per_round": 0.08261662757362523,
+            "cost_per_token": 1.0294816117457184,
+            "speedup": 0.9713626631021357
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.0007818608287724,
+            "draft_precision": 0.014705882352941176,
+            "drafted_per_round": 0.053166536356528536,
+            "cost_per_token": 1.0186939039309988,
+            "speedup": 0.9816491451859469
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.0005211047420532,
+            "draft_precision": 0.01680672268907563,
+            "drafted_per_round": 0.031005732152162586,
+            "cost_per_token": 1.010839673126416,
+            "speedup": 0.9892765653994466
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.0005211047420532,
+            "draft_precision": 0.024390243902439025,
+            "drafted_per_round": 0.02136529442417926,
+            "cost_per_token": 1.0073074148154018,
+            "speedup": 0.9927455961229661
+          }
+        ],
+        "logreg": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.0068169900367068,
+            "draft_precision": 0.0008760698160253386,
+            "drafted_per_round": 7.781331934976403,
+            "cost_per_token": 3.8264821978630494,
+            "speedup": 0.26133663984075595
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.0002604845011722,
+            "draft_precision": 0.0625,
+            "drafted_per_round": 0.004167752018754884,
+            "cost_per_token": 1.0012670463867452,
+            "speedup": 0.9987345569882503
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.0,
+            "draft_precision": 0.0,
+            "drafted_per_round": 0.0018229166666666667,
+            "cost_per_token": 1.0006682650858676,
+            "speedup": 0.999332181194124
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.0,
+            "draft_precision": 0.0,
+            "drafted_per_round": 0.00078125,
+            "cost_per_token": 1.0002863993225146,
+            "speedup": 0.9997136826785722
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.0,
+            "draft_precision": 0.0,
+            "drafted_per_round": 0.0005208333333333333,
+            "cost_per_token": 1.0001909328816765,
+            "speedup": 0.9998091035667296
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.0,
+            "draft_precision": 0.0,
+            "drafted_per_round": 0.00026041666666666666,
+            "cost_per_token": 1.0000954664408384,
+            "speedup": 0.999904542672133
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.0,
+            "draft_precision": NaN,
+            "drafted_per_round": 0.0,
+            "cost_per_token": 1.0,
+            "speedup": 1.0
+          }
+        ],
+        "mlp": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.0068169900367068,
+            "draft_precision": 0.0008760698160253386,
+            "drafted_per_round": 7.781331934976403,
+            "cost_per_token": 3.8264821978630494,
+            "speedup": 0.26133663984075595
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.0,
+            "draft_precision": 0.0,
+            "drafted_per_round": 0.004166666666666667,
+            "cost_per_token": 1.0015274630534121,
+            "speedup": 0.9984748665316124
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.0,
+            "draft_precision": 0.0,
+            "drafted_per_round": 0.003125,
+            "cost_per_token": 1.0011455972900591,
+            "speedup": 0.9988557136013383
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.0,
+            "draft_precision": 0.0,
+            "drafted_per_round": 0.0018229166666666667,
+            "cost_per_token": 1.0006682650858678,
+            "speedup": 0.9993321811941238
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.0,
+            "draft_precision": 0.0,
+            "drafted_per_round": 0.0005208333333333333,
+            "cost_per_token": 1.0001909328816765,
+            "speedup": 0.9998091035667296
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.0,
+            "draft_precision": 0.0,
+            "drafted_per_round": 0.00026041666666666666,
+            "cost_per_token": 1.0000954664408384,
+            "speedup": 0.999904542672133
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.0,
+            "draft_precision": NaN,
+            "drafted_per_round": 0.0,
+            "cost_per_token": 1.0,
+            "speedup": 1.0
+          }
+        ],
+        "oracle": [
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.0068169900367068,
+            "draft_precision": 1.0,
+            "drafted_per_round": 0.0068169900367068695,
+            "cost_per_token": 0.9957112941284607,
+            "speedup": 1.00430717809151
+          }
+        ]
+      }
+    },
+    "8": {
+      "train_positions": 11520,
+      "test_positions": 3840,
+      "base_accept_rate": 0.029166666666666667,
+      "top1_agreement_train": 0.03671875,
+      "auc": {
+        "pmax": 0.6707541385652974,
+        "logreg": 0.8030133928571429,
+        "mlp": 0.8303643278663396
+      },
+      "r_cost": 0.4721592773489509,
+      "sim": {
+        "pmax": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.029490616621984,
+            "draft_precision": 0.0038599393438103115,
+            "drafted_per_round": 7.779088471849866,
+            "cost_per_token": 4.5391077061347636,
+            "speedup": 0.22030761654949602
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.0180275715800635,
+            "draft_precision": 0.029138513513513514,
+            "drafted_per_round": 0.6277836691410392,
+            "cost_per_token": 1.2734565543651748,
+            "speedup": 0.7852643237589724
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.0107923137667807,
+            "draft_precision": 0.04325437693099897,
+            "drafted_per_round": 0.25559357725717297,
+            "cost_per_token": 1.1087152756004772,
+            "speedup": 0.9019448202861665
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.006025674613571,
+            "draft_precision": 0.05542168674698795,
+            "drafted_per_round": 0.10872412889703956,
+            "cost_per_token": 1.0450380469009948,
+            "speedup": 0.9569029596247212
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.0047095761381475,
+            "draft_precision": 0.06870229007633588,
+            "drafted_per_round": 0.0685504971219257,
+            "cost_per_token": 1.0275275340274554,
+            "speedup": 0.9732099305217062
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.0031347962382444,
+            "draft_precision": 0.08823529411764706,
+            "drafted_per_round": 0.035527690700104496,
+            "cost_per_token": 1.0135973077394425,
+            "speedup": 0.9865850988004619
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.001826245760501,
+            "draft_precision": 0.0875,
+            "drafted_per_round": 0.020871380120010434,
+            "cost_per_token": 1.0080137349447702,
+            "speedup": 0.9920499744527695
+          }
+        ],
+        "logreg": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.029490616621984,
+            "draft_precision": 0.0038599393438103115,
+            "drafted_per_round": 7.779088471849866,
+            "cost_per_token": 4.5391077061347636,
+            "speedup": 0.22030761654949602
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.0091984231274638,
+            "draft_precision": 0.16981132075471697,
+            "drafted_per_round": 0.0557161629434954,
+            "cost_per_token": 1.0169525434369742,
+            "speedup": 0.9833300545375697
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.007081038552321,
+            "draft_precision": 0.224,
+            "drafted_per_round": 0.032782585890375034,
+            "cost_per_token": 1.00833851814287,
+            "speedup": 0.9917304377519689
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.0052356020942408,
+            "draft_precision": 0.2597402597402597,
+            "drafted_per_round": 0.020157068062827226,
+            "cost_per_token": 1.0042594438426746,
+            "speedup": 0.9957586220684405
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.0047095761381475,
+            "draft_precision": 0.3,
+            "drafted_per_round": 0.015698587127158554,
+            "cost_per_token": 1.0026899887085776,
+            "speedup": 0.9973172279180306
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.0026109660574412,
+            "draft_precision": 0.2631578947368421,
+            "drafted_per_round": 0.009921671018276762,
+            "cost_per_token": 1.0020682428487657,
+            "speedup": 0.9979360259508014
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.0010427528675705,
+            "draft_precision": 0.19047619047619047,
+            "drafted_per_round": 0.005474452554744526,
+            "cost_per_token": 1.0015404543813355,
+            "speedup": 0.9984619149684901
+          }
+        ],
+        "mlp": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.029490616621984,
+            "draft_precision": 0.0038599393438103115,
+            "drafted_per_round": 7.779088471849866,
+            "cost_per_token": 4.5391077061347636,
+            "speedup": 0.22030761654949602
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.0097291611885353,
+            "draft_precision": 0.3877551020408163,
+            "drafted_per_round": 0.02576912963449908,
+            "cost_per_token": 1.0024144815573435,
+            "speedup": 0.9975913341219969
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.0076095512988716,
+            "draft_precision": 0.4838709677419355,
+            "drafted_per_round": 0.016268695880346365,
+            "cost_per_token": 1.0000713216655301,
+            "speedup": 0.999928683420887
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.0049725202826485,
+            "draft_precision": 0.4878048780487805,
+            "drafted_per_round": 0.010730175346767862,
+            "cost_per_token": 1.0000933672841947,
+            "speedup": 0.9999066414324412
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.00418410041841,
+            "draft_precision": 0.5862068965517241,
+            "drafted_per_round": 0.007583682008368201,
+            "cost_per_token": 0.9993991195424792,
+            "speedup": 1.0006012417319279
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.002872812744842,
+            "draft_precision": 0.5789473684210527,
+            "drafted_per_round": 0.004962131104727083,
+            "cost_per_token": 0.999471621424383,
+            "speedup": 1.000528657907129
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.0020876826722338,
+            "draft_precision": 0.5333333333333333,
+            "drafted_per_round": 0.003914405010438413,
+            "cost_per_token": 0.9997610388438111,
+            "speedup": 1.0002390182722716
+          }
+        ],
+        "oracle": [
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.029490616621984,
+            "draft_precision": 1.0,
+            "drafted_per_round": 0.030026809651474532,
+            "cost_per_token": 0.9851254789226781,
+            "speedup": 1.0150991131541827
+          }
+        ]
+      }
+    },
+    "12": {
+      "train_positions": 11520,
+      "test_positions": 3840,
+      "base_accept_rate": 0.042708333333333334,
+      "top1_agreement_train": 0.04279513888888889,
+      "auc": {
+        "pmax": 0.6650538098144856,
+        "logreg": 0.8066479338623637,
+        "mlp": 0.8343722630643065
+      },
+      "r_cost": 0.5777274218791607,
+      "sim": {
+        "pmax": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.044329616535219,
+            "draft_precision": 0.005732662192393736,
+            "drafted_per_round": 7.780255643187381,
+            "cost_per_token": 5.261621376333095,
+            "speedup": 0.19005548451244042
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.0270125702059374,
+            "draft_precision": 0.042677824267782424,
+            "drafted_per_round": 0.6392083444771329,
+            "cost_per_token": 1.333273056846649,
+            "speedup": 0.7500339070566087
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.0172185430463576,
+            "draft_precision": 0.07205240174672489,
+            "drafted_per_round": 0.24264900662251657,
+            "cost_per_token": 1.1208849787607498,
+            "speedup": 0.8921522002245046
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.0086682427107958,
+            "draft_precision": 0.08521303258145363,
+            "drafted_per_round": 0.10480693459416864,
+            "cost_per_token": 1.0514357399296268,
+            "speedup": 0.9510804721807636
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.0057621791513882,
+            "draft_precision": 0.09019607843137255,
+            "drafted_per_round": 0.06678889470927186,
+            "cost_per_token": 1.0326355449424929,
+            "speedup": 0.9683958729657031
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.0033969166448915,
+            "draft_precision": 0.08609271523178808,
+            "drafted_per_round": 0.03945649333681735,
+            "cost_per_token": 1.0193325105999334,
+            "speedup": 0.981034146955094
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.0020876826722338,
+            "draft_precision": 0.09090909090909091,
+            "drafted_per_round": 0.022964509394572025,
+            "cost_per_token": 1.0111562534180627,
+            "speedup": 0.9889668353626349
+          }
+        ],
+        "logreg": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.044329616535219,
+            "draft_precision": 0.005732662192393736,
+            "drafted_per_round": 7.780255643187381,
+            "cost_per_token": 5.261621376333095,
+            "speedup": 0.19005548451244042
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.015604337476858,
+            "draft_precision": 0.16164383561643836,
+            "drafted_per_round": 0.0965353081195451,
+            "cost_per_token": 1.039549611715074,
+            "speedup": 0.961955051236252
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.01159114857745,
+            "draft_precision": 0.18181818181818182,
+            "drafted_per_round": 0.06375131717597471,
+            "cost_per_token": 1.0249505302330075,
+            "speedup": 0.9756568444065925
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.0094637223974763,
+            "draft_precision": 0.21428571428571427,
+            "drafted_per_round": 0.04416403785488959,
+            "cost_per_token": 1.0159005747072114,
+            "speedup": 0.9843482963755641
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.0089332632685233,
+            "draft_precision": 0.25,
+            "drafted_per_round": 0.03573305307409354,
+            "cost_per_token": 1.0116070128582186,
+            "speedup": 0.9885261641025759
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.0073452256033577,
+            "draft_precision": 0.3146067415730337,
+            "drafted_per_round": 0.02334732423924449,
+            "cost_per_token": 1.0060983699341772,
+            "speedup": 0.9939385947573136
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.0062893081761006,
+            "draft_precision": 0.35294117647058826,
+            "drafted_per_round": 0.01781970649895178,
+            "cost_per_token": 1.0039805897624425,
+            "speedup": 0.9960351925096637
+          }
+        ],
+        "mlp": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.044329616535219,
+            "draft_precision": 0.005732662192393736,
+            "drafted_per_round": 7.780255643187381,
+            "cost_per_token": 5.261621376333095,
+            "speedup": 0.19005548451244042
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.015067406819984,
+            "draft_precision": 0.2893401015228426,
+            "drafted_per_round": 0.0520750726936294,
+            "cost_per_token": 1.0147948703411949,
+            "speedup": 0.9854208266383723
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.0131926121372032,
+            "draft_precision": 0.373134328358209,
+            "drafted_per_round": 0.03535620052770449,
+            "cost_per_token": 1.007139446492657,
+            "speedup": 0.9929111638735629
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.0110584518167456,
+            "draft_precision": 0.42424242424242425,
+            "drafted_per_round": 0.026066350710900472,
+            "cost_per_token": 1.0039570350953213,
+            "speedup": 0.9960585613158778
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.0091984231274638,
+            "draft_precision": 0.4268292682926829,
+            "drafted_per_round": 0.021550591327201052,
+            "cost_per_token": 1.0032223043213775,
+            "speedup": 0.996788045573252
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.0076095512988716,
+            "draft_precision": 0.5576923076923077,
+            "drafted_per_round": 0.013644712673838887,
+            "cost_per_token": 1.0002713088379465,
+            "speedup": 0.9997287647505738
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.0054988216810683,
+            "draft_precision": 0.5833333333333334,
+            "drafted_per_round": 0.009426551453260016,
+            "cost_per_token": 0.9999474445801168,
+            "speedup": 1.0000525581821007
+          }
+        ],
+        "oracle": [
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.044329616535219,
+            "draft_precision": 1.0,
+            "drafted_per_round": 0.04460157737285831,
+            "cost_per_token": 0.9822258586427546,
+            "speedup": 1.018095778278334
+          }
+        ]
+      }
+    },
+    "16": {
+      "train_positions": 11520,
+      "test_positions": 3840,
+      "base_accept_rate": 0.10572916666666667,
+      "top1_agreement_train": 0.09574652777777778,
+      "auc": {
+        "pmax": 0.7150115764981309,
+        "logreg": 0.7794304133397982,
+        "mlp": 0.8291354780218677
+      },
+      "r_cost": 0.6832955664093705,
+      "sim": {
+        "pmax": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.1175785797438882,
+            "draft_precision": 0.015194610778443115,
+            "drafted_per_round": 7.7764842840512225,
+            "cost_per_token": 5.64938998293226,
+            "speedup": 0.1770102618196239
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.0756302521008403,
+            "draft_precision": 0.1111565181855333,
+            "drafted_per_round": 0.6854341736694678,
+            "cost_per_token": 1.365110482032245,
+            "speedup": 0.732541441269498
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.0477489768076398,
+            "draft_precision": 0.17860746720484358,
+            "drafted_per_round": 0.2703956343792633,
+            "cost_per_token": 1.1307671631020146,
+            "speedup": 0.8843553585839163
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.0311493018259936,
+            "draft_precision": 0.2537634408602151,
+            "drafted_per_round": 0.12486573576799141,
+            "cost_per_token": 1.0525344891615585,
+            "speedup": 0.9500876316144213
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.0212765957446808,
+            "draft_precision": 0.2733333333333333,
+            "drafted_per_round": 0.0797872340425532,
+            "cost_per_token": 1.0325491327924043,
+            "speedup": 0.9684769162467077
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.0118577075098814,
+            "draft_precision": 0.2781065088757396,
+            "drafted_per_round": 0.04453227931488801,
+            "cost_per_token": 1.0183533725841658,
+            "speedup": 0.9819774028561495
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.0068169900367068,
+            "draft_precision": 0.3068181818181818,
+            "drafted_per_round": 0.023072889355007866,
+            "cost_per_token": 1.008888023396883,
+            "speedup": 0.9911902776217348
+          }
+        ],
+        "logreg": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.1175785797438882,
+            "draft_precision": 0.015194610778443115,
+            "drafted_per_round": 7.7764842840512225,
+            "cost_per_token": 5.64938998293226,
+            "speedup": 0.1770102618196239
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.0457516339869282,
+            "draft_precision": 0.30671506352087113,
+            "drafted_per_round": 0.15005446623093682,
+            "cost_per_token": 1.0542957961176012,
+            "speedup": 0.9485004148574402
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.032258064516129,
+            "draft_precision": 0.3746130030959752,
+            "drafted_per_round": 0.0868279569892473,
+            "cost_per_token": 1.0262251218620426,
+            "speedup": 0.9744450595650413
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.022636484687084,
+            "draft_precision": 0.4725274725274725,
+            "drafted_per_round": 0.04846870838881491,
+            "cost_per_token": 1.0102499461162802,
+            "speedup": 0.9898540493313717
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.0172185430463576,
+            "draft_precision": 0.55,
+            "drafted_per_round": 0.031788079470198675,
+            "cost_per_token": 1.0044259031169618,
+            "speedup": 0.9955935991861348
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.0131926121372032,
+            "draft_precision": 0.6219512195121951,
+            "drafted_per_round": 0.02163588390501319,
+            "cost_per_token": 1.0015703740743684,
+            "speedup": 0.9984320881337772
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.0107923137667807,
+            "draft_precision": 0.711864406779661,
+            "drafted_per_round": 0.015530402737562517,
+            "cost_per_token": 0.999821468338062,
+            "speedup": 1.0001785635411837
+          }
+        ],
+        "mlp": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.1175785797438882,
+            "draft_precision": 0.015194610778443115,
+            "drafted_per_round": 7.7764842840512225,
+            "cost_per_token": 5.64938998293226,
+            "speedup": 0.1770102618196239
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.0506155950752394,
+            "draft_precision": 0.43661971830985913,
+            "drafted_per_round": 0.11655266757865937,
+            "cost_per_token": 1.027626018565212,
+            "speedup": 0.9731166610555619
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.0347615198059823,
+            "draft_precision": 0.5701754385964912,
+            "drafted_per_round": 0.06143896523848019,
+            "cost_per_token": 1.0069769242555602,
+            "speedup": 0.9930714159505512
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.0242731395038678,
+            "draft_precision": 0.6865671641791045,
+            "drafted_per_round": 0.03574286476393705,
+            "cost_per_token": 1.0001462515361628,
+            "speedup": 0.9998537698502212
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.0188378880339612,
+            "draft_precision": 0.7659574468085106,
+            "drafted_per_round": 0.02494030246749801,
+            "cost_per_token": 0.9982369227193978,
+            "speedup": 1.0017661912122016
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.0126582278481013,
+            "draft_precision": 0.8596491228070176,
+            "drafted_per_round": 0.015031645569620253,
+            "cost_per_token": 0.9976426685638901,
+            "speedup": 1.002362901578281
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.0078740157480315,
+            "draft_precision": 0.8857142857142857,
+            "drafted_per_round": 0.009186351706036745,
+            "cost_per_token": 0.998415454381336,
+            "speedup": 1.0015870603882486
+          }
+        ],
+        "oracle": [
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.1175785797438882,
+            "draft_precision": 1.0,
+            "drafted_per_round": 0.11816065192083819,
+            "cost_per_token": 0.967035937490163,
+            "speedup": 1.034087732660062
+          }
+        ]
+      }
+    },
+    "20": {
+      "train_positions": 11520,
+      "test_positions": 3840,
+      "base_accept_rate": 0.3768229166666667,
+      "top1_agreement_train": 0.33793402777777776,
+      "auc": {
+        "pmax": 0.7577215681189463,
+        "logreg": 0.8085229581441609,
+        "mlp": 0.8437238189825139
+      },
+      "r_cost": 0.7888637109395804,
+      "sim": {
+        "pmax": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.5966735966735968,
+            "draft_precision": 0.0773182085718872,
+            "drafted_per_round": 7.770893970893971,
+            "cost_per_token": 4.465644243163851,
+            "speedup": 0.22393185519218903
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.5317112086158755,
+            "draft_precision": 0.15633737185461324,
+            "drafted_per_round": 3.424012764260072,
+            "cost_per_token": 2.4163036704961978,
+            "speedup": 0.4138552667077007
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.443609022556391,
+            "draft_precision": 0.27176901924839597,
+            "drafted_per_round": 1.6406015037593984,
+            "cost_per_token": 1.5892190714948906,
+            "speedup": 0.6292398687736331
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.3426573426573427,
+            "draft_precision": 0.40261331155573704,
+            "drafted_per_round": 0.8562937062937063,
+            "cost_per_token": 1.2478977156487068,
+            "speedup": 0.8013477286318778
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.284710605553697,
+            "draft_precision": 0.4698133918770582,
+            "drafted_per_round": 0.6095684175309468,
+            "cost_per_token": 1.1526848128468472,
+            "speedup": 0.8675398416417465
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.2256623045004789,
+            "draft_precision": 0.5634920634920635,
+            "drafted_per_round": 0.4021704436642196,
+            "cost_per_token": 1.0747313218187058,
+            "speedup": 0.930465112254994
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.187017001545595,
+            "draft_precision": 0.6268041237113402,
+            "drafted_per_round": 0.29984544049459044,
+            "cost_per_token": 1.041718176982124,
+            "speedup": 0.9599525304406396
+          }
+        ],
+        "logreg": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.5966735966735968,
+            "draft_precision": 0.0773182085718872,
+            "drafted_per_round": 7.770893970893971,
+            "cost_per_token": 4.465644243163851,
+            "speedup": 0.22393185519218903
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.4050493962678376,
+            "draft_precision": 0.3529597974042418,
+            "drafted_per_round": 1.1558726673984632,
+            "cost_per_token": 1.360682412202648,
+            "speedup": 0.7349253514500994
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.3310225303292895,
+            "draft_precision": 0.4966373512674599,
+            "drafted_per_round": 0.6700173310225304,
+            "cost_per_token": 1.148404571157863,
+            "speedup": 0.8707732667693614
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.2415130940834143,
+            "draft_precision": 0.6320675105485232,
+            "drafted_per_round": 0.3831231813773036,
+            "cost_per_token": 1.048907160797753,
+            "speedup": 0.953373222506598
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.1851851851851851,
+            "draft_precision": 0.7032710280373832,
+            "drafted_per_round": 0.2641975308641975,
+            "cost_per_token": 1.019600868896941,
+            "speedup": 0.9807759393946515
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.1214953271028036,
+            "draft_precision": 0.8007662835249042,
+            "drafted_per_round": 0.15245327102803738,
+            "cost_per_token": 0.9989028273725103,
+            "speedup": 1.001098377737478
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.0759316335107874,
+            "draft_precision": 0.8584905660377359,
+            "drafted_per_round": 0.08910058840011208,
+            "cost_per_token": 0.9947548593955137,
+            "speedup": 1.0052727971670061
+          }
+        ],
+        "mlp": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 1.5966735966735968,
+            "draft_precision": 0.0773182085718872,
+            "drafted_per_round": 7.770893970893971,
+            "cost_per_token": 4.465644243163851,
+            "speedup": 0.22393185519218903
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 1.3928182807399347,
+            "draft_precision": 0.46720960137162454,
+            "drafted_per_round": 0.8462096481682989,
+            "cost_per_token": 1.1972445410474029,
+            "speedup": 0.8352512504464256
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.3370473537604457,
+            "draft_precision": 0.5572082379862701,
+            "drafted_per_round": 0.6086350974930362,
+            "cost_per_token": 1.1070140017506136,
+            "speedup": 0.9033309410889262
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 1.283851554663992,
+            "draft_precision": 0.6824,
+            "drafted_per_round": 0.4179204279505182,
+            "cost_per_token": 1.0356978225714695,
+            "speedup": 0.9655325889525985
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 1.2524461839530332,
+            "draft_precision": 0.7353497164461248,
+            "drafted_per_round": 0.345075016307893,
+            "cost_per_token": 1.015785887024491,
+            "speedup": 0.9844594345854402
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.1992504684572143,
+            "draft_precision": 0.7952853598014888,
+            "drafted_per_round": 0.2517176764522174,
+            "cost_per_token": 0.9994333726607487,
+            "speedup": 1.000566948587821
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.161875945537065,
+            "draft_precision": 0.8619582664526485,
+            "drafted_per_round": 0.18850226928895614,
+            "cost_per_token": 0.988662003102952,
+            "speedup": 1.0114680212868132
+          }
+        ],
+        "oracle": [
+          {
+            "tau": 0.5,
+            "tokens_per_round": 1.5966735966735968,
+            "draft_precision": 1.0,
+            "drafted_per_round": 0.6008316008316008,
+            "cost_per_token": 0.9231531412259547,
+            "speedup": 1.0832438902520465
+          }
+        ]
+      }
+    },
+    "24": {
+      "train_positions": 11520,
+      "test_positions": 3840,
+      "base_accept_rate": 0.7263020833333333,
+      "top1_agreement_train": 0.6936631944444445,
+      "auc": {
+        "pmax": 0.8488268953845116,
+        "logreg": 0.8482225434364103,
+        "mlp": 0.8703787033401235
+      },
+      "r_cost": 0.8944318554697902,
+      "sim": {
+        "pmax": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 3.3362293657688964,
+            "draft_precision": 0.30179028132992325,
+            "drafted_per_round": 7.813205907906169,
+            "cost_per_token": 2.3944337698540767,
+            "speedup": 0.41763527251828836
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 3.2514817950889077,
+            "draft_precision": 0.3572094261749434,
+            "drafted_per_round": 6.359864521591871,
+            "cost_per_token": 2.057051475633721,
+            "speedup": 0.486132705887648
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 3.014128728414443,
+            "draft_precision": 0.4586213007265639,
+            "drafted_per_round": 4.429356357927786,
+            "cost_per_token": 1.6461663959416628,
+            "speedup": 0.6074720043279502
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 2.6740947075208914,
+            "draft_precision": 0.5876937984496124,
+            "drafted_per_round": 2.8746518105849583,
+            "cost_per_token": 1.3354725779633574,
+            "speedup": 0.7487986024580416
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 2.5048923679060664,
+            "draft_precision": 0.6607954545454545,
+            "drafted_per_round": 2.2961513372472275,
+            "cost_per_token": 1.219114617513975,
+            "speedup": 0.8202674183656374
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 2.256169212690952,
+            "draft_precision": 0.7496522948539638,
+            "drafted_per_round": 1.6897767332549942,
+            "cost_per_token": 1.1131213584195658,
+            "speedup": 0.8983746403175858
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 2.0317460317460316,
+            "draft_precision": 0.8343949044585988,
+            "drafted_per_round": 1.246031746031746,
+            "cost_per_token": 1.0407257863623374,
+            "speedup": 0.9608678992141757
+          }
+        ],
+        "logreg": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 3.3362293657688964,
+            "draft_precision": 0.30179028132992325,
+            "drafted_per_round": 7.813205907906169,
+            "cost_per_token": 2.3944337698540767,
+            "speedup": 0.41763527251828836
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 2.8721017202692596,
+            "draft_precision": 0.5294611029565947,
+            "drafted_per_round": 3.566940912490651,
+            "cost_per_token": 1.4589962288373461,
+            "speedup": 0.6854027311618798
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 2.6519337016574585,
+            "draft_precision": 0.6184008200922604,
+            "drafted_per_round": 2.6947513812154695,
+            "cost_per_token": 1.2859565364695626,
+            "speedup": 0.7776312586313208
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 2.3443223443223444,
+            "draft_precision": 0.7013888888888888,
+            "drafted_per_round": 1.934065934065934,
+            "cost_per_token": 1.1644687807625802,
+            "speedup": 0.8587606782769445
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 2.1321488062187672,
+            "draft_precision": 0.762416604892513,
+            "drafted_per_round": 1.4980566352026652,
+            "cost_per_token": 1.0974419651191434,
+            "speedup": 0.9112099152244787
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 1.836441893830703,
+            "draft_precision": 0.8524431543299468,
+            "drafted_per_round": 0.9885222381635581,
+            "cost_per_token": 1.0259871472021023,
+            "speedup": 0.9746710791914206
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 1.614802354920101,
+            "draft_precision": 0.8981707317073171,
+            "drafted_per_round": 0.6896551724137931,
+            "cost_per_token": 1.0012677716068945,
+            "speedup": 0.9987338336029135
+          }
+        ],
+        "mlp": [
+          {
+            "tau": 0.0,
+            "tokens_per_round": 3.3362293657688964,
+            "draft_precision": 0.30179028132992325,
+            "drafted_per_round": 7.813205907906169,
+            "cost_per_token": 2.3944337698540767,
+            "speedup": 0.41763527251828836
+          },
+          {
+            "tau": 0.3,
+            "tokens_per_round": 2.809070958302853,
+            "draft_precision": 0.5891802504134184,
+            "drafted_per_round": 3.0965618141916607,
+            "cost_per_token": 1.3419609490113609,
+            "speedup": 0.7451781668734193
+          },
+          {
+            "tau": 0.5,
+            "tokens_per_round": 2.709950599858857,
+            "draft_precision": 0.6413014956704277,
+            "drafted_per_round": 2.689484827099506,
+            "cost_per_token": 1.256687448227963,
+            "speedup": 0.7957428089300054
+          },
+          {
+            "tau": 0.7,
+            "tokens_per_round": 2.598105548037889,
+            "draft_precision": 0.6891266628108733,
+            "drafted_per_round": 2.3396481732070367,
+            "cost_per_token": 1.1903503531808712,
+            "speedup": 0.840088800182052
+          },
+          {
+            "tau": 0.8,
+            "tokens_per_round": 2.5048923679060664,
+            "draft_precision": 0.7191844300278035,
+            "drafted_per_round": 2.111545988258317,
+            "cost_per_token": 1.153196853165554,
+            "speedup": 0.8671546382172091
+          },
+          {
+            "tau": 0.9,
+            "tokens_per_round": 2.373300370828183,
+            "draft_precision": 0.7594035920027109,
+            "drafted_per_round": 1.8238566131025957,
+            "cost_per_token": 1.108715730596711,
+            "speedup": 0.9019444501448535
+          },
+          {
+            "tau": 0.95,
+            "tokens_per_round": 2.2641509433962264,
+            "draft_precision": 0.791651409740022,
+            "drafted_per_round": 1.6102594339622642,
+            "cost_per_token": 1.077784738877088,
+            "speedup": 0.9278290589286599
+          }
+        ],
+        "oracle": [
+          {
+            "tau": 0.5,
+            "tokens_per_round": 3.3362293657688964,
+            "draft_precision": 1.0,
+            "drafted_per_round": 2.357949609035621,
+            "cost_per_token": 0.9318979311836003,
+            "speedup": 1.073078892588487
+          }
+        ]
+      }
+    }
+  }
+}
