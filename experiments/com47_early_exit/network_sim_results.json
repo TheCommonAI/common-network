@@ -1,0 +1,235 @@
+{
+  "rtt_ms_default": 86,
+  "layer": 24,
+  "rows": [
+    {
+      "config": "plain (1 round trip per token)",
+      "tok_s": 7.48,
+      "speedup": 1.0
+    },
+    {
+      "draft": "measured CPU draft step 42.5 ms",
+      "K": 4,
+      "mode": "synchronous",
+      "gate": "ungated",
+      "tok_s": 8.05,
+      "speedup": 1.076
+    },
+    {
+      "draft": "measured CPU draft step 42.5 ms",
+      "K": 4,
+      "mode": "synchronous",
+      "gate": "pmax>=0.5 gate",
+      "tok_s": 8.71,
+      "speedup": 1.164
+    },
+    {
+      "draft": "measured CPU draft step 42.5 ms",
+      "K": 4,
+      "mode": "pipelined M=2",
+      "gate": "ungated",
+      "tok_s": 8.37,
+      "speedup": 1.119
+    },
+    {
+      "draft": "measured CPU draft step 42.5 ms",
+      "K": 4,
+      "mode": "pipelined M=2",
+      "gate": "pmax>=0.5 gate",
+      "tok_s": 8.08,
+      "speedup": 1.081
+    },
+    {
+      "draft": "measured CPU draft step 42.5 ms",
+      "K": 4,
+      "mode": "pipelined M=4",
+      "gate": "ungated",
+      "tok_s": 8.37,
+      "speedup": 1.119
+    },
+    {
+      "draft": "measured CPU draft step 42.5 ms",
+      "K": 4,
+      "mode": "pipelined M=4",
+      "gate": "pmax>=0.5 gate",
+      "tok_s": 8.08,
+      "speedup": 1.081
+    },
+    {
+      "draft": "measured CPU draft step 42.5 ms",
+      "K": 8,
+      "mode": "synchronous",
+      "gate": "ungated",
+      "tok_s": 5.84,
+      "speedup": 0.781
+    },
+    {
+      "draft": "measured CPU draft step 42.5 ms",
+      "K": 8,
+      "mode": "synchronous",
+      "gate": "pmax>=0.5 gate",
+      "tok_s": 7.59,
+      "speedup": 1.014
+    },
+    {
+      "draft": "measured CPU draft step 42.5 ms",
+      "K": 8,
+      "mode": "pipelined M=2",
+      "gate": "ungated",
+      "tok_s": 4.82,
+      "speedup": 0.645
+    },
+    {
+      "draft": "measured CPU draft step 42.5 ms",
+      "K": 8,
+      "mode": "pipelined M=2",
+      "gate": "pmax>=0.5 gate",
+      "tok_s": 6.66,
+      "speedup": 0.89
+    },
+    {
+      "draft": "measured CPU draft step 42.5 ms",
+      "K": 8,
+      "mode": "pipelined M=4",
+      "gate": "ungated",
+      "tok_s": 4.82,
+      "speedup": 0.645
+    },
+    {
+      "draft": "measured CPU draft step 42.5 ms",
+      "K": 8,
+      "mode": "pipelined M=4",
+      "gate": "pmax>=0.5 gate",
+      "tok_s": 6.66,
+      "speedup": 0.89
+    },
+    {
+      "draft": "illustrative cheap draft step 15 ms",
+      "K": 4,
+      "mode": "synchronous",
+      "gate": "ungated",
+      "tok_s": 11.91,
+      "speedup": 1.593
+    },
+    {
+      "draft": "illustrative cheap draft step 15 ms",
+      "K": 4,
+      "mode": "synchronous",
+      "gate": "pmax>=0.5 gate",
+      "tok_s": 12.37,
+      "speedup": 1.654
+    },
+    {
+      "draft": "illustrative cheap draft step 15 ms",
+      "K": 4,
+      "mode": "pipelined M=2",
+      "gate": "ungated",
+      "tok_s": 12.71,
+      "speedup": 1.699
+    },
+    {
+      "draft": "illustrative cheap draft step 15 ms",
+      "K": 4,
+      "mode": "pipelined M=2",
+      "gate": "pmax>=0.5 gate",
+      "tok_s": 11.39,
+      "speedup": 1.523
+    },
+    {
+      "draft": "illustrative cheap draft step 15 ms",
+      "K": 4,
+      "mode": "pipelined M=4",
+      "gate": "ungated",
+      "tok_s": 9.56,
+      "speedup": 1.278
+    },
+    {
+      "draft": "illustrative cheap draft step 15 ms",
+      "K": 4,
+      "mode": "pipelined M=4",
+      "gate": "pmax>=0.5 gate",
+      "tok_s": 10.98,
+      "speedup": 1.468
+    },
+    {
+      "draft": "illustrative cheap draft step 15 ms",
+      "K": 8,
+      "mode": "synchronous",
+      "gate": "ungated",
+      "tok_s": 9.79,
+      "speedup": 1.309
+    },
+    {
+      "draft": "illustrative cheap draft step 15 ms",
+      "K": 8,
+      "mode": "synchronous",
+      "gate": "pmax>=0.5 gate",
+      "tok_s": 11.72,
+      "speedup": 1.567
+    },
+    {
+      "draft": "illustrative cheap draft step 15 ms",
+      "K": 8,
+      "mode": "pipelined M=2",
+      "gate": "ungated",
+      "tok_s": 10.05,
+      "speedup": 1.343
+    },
+    {
+      "draft": "illustrative cheap draft step 15 ms",
+      "K": 8,
+      "mode": "pipelined M=2",
+      "gate": "pmax>=0.5 gate",
+      "tok_s": 10.49,
+      "speedup": 1.402
+    },
+    {
+      "draft": "illustrative cheap draft step 15 ms",
+      "K": 8,
+      "mode": "pipelined M=4",
+      "gate": "ungated",
+      "tok_s": 9.17,
+      "speedup": 1.226
+    },
+    {
+      "draft": "illustrative cheap draft step 15 ms",
+      "K": 8,
+      "mode": "pipelined M=4",
+      "gate": "pmax>=0.5 gate",
+      "tok_s": 10.43,
+      "speedup": 1.394
+    }
+  ],
+  "rtt_sensitivity": [
+    {
+      "rtt_ms": 20,
+      "plain_tok_s": 14.77,
+      "sync_measured_draft_tok_s": 10.02,
+      "pipelined_cheap_draft_tok_s": 17.35
+    },
+    {
+      "rtt_ms": 50,
+      "plain_tok_s": 10.24,
+      "sync_measured_draft_tok_s": 9.02,
+      "pipelined_cheap_draft_tok_s": 14.95
+    },
+    {
+      "rtt_ms": 86,
+      "plain_tok_s": 7.48,
+      "sync_measured_draft_tok_s": 8.05,
+      "pipelined_cheap_draft_tok_s": 12.71
+    },
+    {
+      "rtt_ms": 150,
+      "plain_tok_s": 5.06,
+      "sync_measured_draft_tok_s": 6.76,
+      "pipelined_cheap_draft_tok_s": 10.03
+    },
+    {
+      "rtt_ms": 250,
+      "plain_tok_s": 3.36,
+      "sync_measured_draft_tok_s": 5.41,
+      "pipelined_cheap_draft_tok_s": 7.86
+    }
+  ]
+}
