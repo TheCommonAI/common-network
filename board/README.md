@@ -27,13 +27,19 @@ Locally, put `BOARD_PASSWORD=...` in `board/.env` (git-ignored). On Netlify, set
 it under Site configuration > Environment variables, marked as secret.
 
 The board is served from `/admin-mes/` (with the trailing slash). The redirects
-in `netlify.toml` map that path onto the site root. For the URL to be
-`commonai.com.au/admin-mes/`, either attach `commonai.com.au` to this Netlify
-site, or add a proxy rule on the site that serves `commonai.com.au`:
+in `netlify.toml` map that path onto the site root.
+
+`commonai.com.au` is served by the existing Netlify project `commonai1`, not by
+this site. To show the board at `commonai.com.au/admin-mes/`, add this proxy rule
+to `commonai1` (in its `netlify.toml`, or under Site configuration > Redirects),
+above any catch-all rule, and deploy `commonai1`:
 
 ```
-/admin-mes/*  https://<this-site>.netlify.app/:splat  200
+/admin-mes/*  https://common-message-board.netlify.app/admin-mes/:splat  200
 ```
+
+The browser only talks to `commonai.com.au`, so this also avoids the
+`.netlify.app` address at school. This board site must be deployed first.
 
 ## Deploy
 
