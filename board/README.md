@@ -16,6 +16,25 @@ npx netlify database migrations apply   # once, to create the table locally
 `netlify dev` does not apply migrations itself. Run the apply command after
 adding a migration, then restart the dev server if it was already running.
 
+## Password and `/admin-mes`
+
+Every page and API request needs the board password. The browser asks for it
+(HTTP Basic auth; any username works, the password is what counts). The check
+is in `netlify/edge-functions/gate.ts` and reads the `BOARD_PASSWORD` secret.
+If that secret is not set, the board returns 503 and lets nobody in.
+
+Locally, put `BOARD_PASSWORD=...` in `board/.env` (git-ignored). On Netlify, set
+it under Site configuration > Environment variables, marked as secret.
+
+The board is served from `/admin-mes/` (with the trailing slash). The redirects
+in `netlify.toml` map that path onto the site root. For the URL to be
+`commonai.com.au/admin-mes/`, either attach `commonai.com.au` to this Netlify
+site, or add a proxy rule on the site that serves `commonai.com.au`:
+
+```
+/admin-mes/*  https://<this-site>.netlify.app/:splat  200
+```
+
 ## Deploy
 
 Netlify applies the committed migration in `netlify/database/migrations/`
@@ -35,7 +54,7 @@ from `netlify/functions/`. The site's base directory must be `board`.
 Limits: name up to 32 characters, body up to 500, request body up to 4 KB.
 Message text is always shown as plain text, never as HTML.
 
-Anyone who can reach the page can post, and there is no sign-in.
+Anyone with the password can post. There are no individual accounts.
 
 ## Tests
 

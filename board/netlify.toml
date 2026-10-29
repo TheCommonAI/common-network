@@ -1,6 +1,18 @@
 [build]
   publish = "public"
   functions = "netlify/functions"
+  edge_functions = "netlify/edge-functions"
+
+# Serves the board under /admin-mes on any domain that points at this site.
+[[redirects]]
+  from = "/admin-mes/api/*"
+  to = "/api/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/admin-mes/*"
+  to = "/:splat"
+  status = 200
 
 [[headers]]
   for = "/*"

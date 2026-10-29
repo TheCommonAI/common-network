@@ -12,6 +12,8 @@
   const submit = form.querySelector("button");
 
   let renderedKey = null;
+  let latestRequest = 0;
+  let submitting = false;
 
   try {
     nameInput.value = localStorage.getItem(NAME_KEY) || "";
@@ -68,11 +70,12 @@
   }
 
   async function refresh() {
+    const request = ++latestRequest;
     try {
-      const res = await fetch("/api/messages?limit=200", { cache: "no-store" });
+      const res = await fetch("api/messages?limit=200", { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const { messages } = await res.json();
-      render(messages);
+      if (request === latestRequest) render(messages);
     } catch (_) {
       if (!list.children.length) {
         statusLine.hidden = false;
@@ -83,6 +86,7 @@
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (submitting) return;
     const body = bodyInput.value.trim();
     const name = nameInput.value.trim();
     if (!body) {
@@ -90,13 +94,14 @@
       return;
     }
 
+    submitting = true;
     submit.disabled = true;
     try {
       localStorage.setItem(NAME_KEY, name);
     } catch (_) {}
 
     try {
-      const res = await fetch("/api/messages", {
+      const res = await fetch("api/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, body }),
@@ -110,6 +115,7 @@
     } catch (err) {
       showError(`didn't post: ${err.message}`);
     } finally {
+      submitting = false;
       submit.disabled = false;
     }
   });
