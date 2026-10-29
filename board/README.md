@@ -4,6 +4,9 @@ A small message board for the Common community: one page, messages kept in
 Netlify Database, no accounts. The page is static HTML/CSS/JS in `public/`; the
 API is one Netlify Function, `netlify/functions/messages.mts`, at `/api/messages`.
 
+**To take this and run it yourself** (Python, or drop it into
+`commonai-website`), see [TAKE-THIS.md](TAKE-THIS.md).
+
 ## Run it locally
 
 ```bash
