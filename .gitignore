@@ -16,3 +16,7 @@ SCHOOL-NETWORK-REQUIREMENTS.md
 *.bak
 *.orig
 *.rej
+
+# Message board data (board/board.py keeps messages here by default).
+board/*.db
+board/*.db-journal

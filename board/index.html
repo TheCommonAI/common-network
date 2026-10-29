@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>message board · common.</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main>
+    <header>
+      <p class="wordmark">common<span>.</span></p>
+      <h1>message board</h1>
+      <p class="dim">for contacting each other. newest first.</p>
+    </header>
+
+    <form id="compose" autocomplete="off">
+      <input id="name" name="name" maxlength="32" placeholder="name (optional)" aria-label="name">
+      <textarea id="body" name="body" maxlength="500" rows="3" placeholder="what do you want to say?" aria-label="message" required></textarea>
+      <div class="row">
+        <span id="count" class="dim">0 / 500</span>
+        <button type="submit">post</button>
+      </div>
+      <p id="error" class="error" role="alert" hidden></p>
+    </form>
+
+    <p id="status" class="dim">loading…</p>
+    <ul id="messages" aria-live="polite"></ul>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
