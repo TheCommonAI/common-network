@@ -434,6 +434,8 @@ def _error(message: str) -> dict:
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "commonnet-block/0.1"
+    # the stdlib turns TCP_NODELAY on for each accepted connection when this is set (see StreamRequestHandler.setup)
+    disable_nagle_algorithm = True
     sys_version = ""
     # HTTP/1.1 keeps the connection open between requests, so a client pays the TCP and
     # TLS setup (several tunnel round trips) once instead of on every token. Every reply

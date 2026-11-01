@@ -408,6 +408,7 @@ def _classify(error: Exception) -> ApiError:
 def make_handler(backend, *, max_context: int = DEFAULT_MAX_CONTEXT):
     class Handler(BaseHTTPRequestHandler):
         server_version = "commonnet-serve/0.1"
+        disable_nagle_algorithm = True   # stream each token to the reader as soon as it is written
         sys_version = ""
 
         def log_message(self, format, *args):
@@ -575,12 +576,15 @@ def main(argv=None) -> int:
     p.add_argument("--no-draft", action="store_true", help="turn off the default-on speculative decoding (same as COMMONNET_DRAFT=0)")
     p.add_argument("--draft-k", type=int, default=4, help="tokens drafted per round (default 4; shrinks when acceptance is low)")
     p.add_argument("--max-context", type=int, default=DEFAULT_MAX_CONTEXT)
+    p.add_argument("--lan", action="store_true", help="find the nodes on this LAN by multicast and use them (no seed, no tunnel)")
+    p.add_argument("--lan-ip", metavar="IP", help="with --lan: the LAN address to listen on (default: detected)")
     p.add_argument("--cache-dir", help="where to remember peer addresses between runs")
     args = p.parse_args(argv)
     import torch
     from commonnet.netclient import Network, NetworkUnreachable
     try:
-        network = Network.open(args.network, args.bootstrap, cache_dir=args.cache_dir)
+        network = Network.open(args.network, args.bootstrap, cache_dir=args.cache_dir,
+                               lan=(args.lan_ip or True) if args.lan else None)
         network.manifest  # fail now, not on the first request
         backend = NetworkBackend(network, args.checkpoint, fmt=args.client_format, hidden_dtype=torch.float32,
                                  draft=args.draft, draft_k=args.draft_k, auto_draft=not args.no_draft)

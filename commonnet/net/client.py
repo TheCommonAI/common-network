@@ -178,6 +178,8 @@ def _connect_resolved(conn, tls: bool) -> None:
             raise OSError("chain destination is not a public address")
         address = choices[0]
     sock = socket.create_connection((address, conn.port), conn.timeout, conn.source_address)
+    # small request/reply messages must not wait for TCP to batch them (Nagle): each token pays that wait otherwise
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     if tls:
         try:
             sock = conn._context.wrap_socket(sock, server_hostname=conn.host)
