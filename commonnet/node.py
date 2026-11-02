@@ -842,6 +842,11 @@ class Node:
         up locally and is invisible to anyone who joins through the gateway.
         """
         listed = mesh_directory.announce(self.gateway, record)
+        if not listed and "speed" in record:
+            # The deployed gateway predates `speed` (v0.5) and refuses any record with a field it does not know, so
+            # no v0.5 peer could be listed and new peers found nobody. List a copy without it (same seq, re-signed).
+            fields = {k: v for k, v in record.items() if k not in ("v", "peer", "pub", "sig", "speed")}
+            listed = mesh_directory.announce(self.gateway, self.identity.sign_record(fields))
         if listed and self._listed is not True:
             again = " again" if self._listed is False else ""
             self.log(f"listed on the directory{again}: new peers can find this node")
@@ -1172,13 +1177,21 @@ class Node:
             self._tunnel_proc, self.url = proc, url
             from commonnet.net import client as _nc
             _nc.register_local_endpoint(url)
-        deadline = time.monotonic() + TUNNEL_WAIT_SECONDS
+        started = time.monotonic()
+        deadline = started + TUNNEL_WAIT_SECONDS
+        next_note = started + 30.0
         from commonnet.net import tunnel as tunnel_mod
         while time.monotonic() < deadline and not self._stop.is_set():
             if tunnel_mod._probe(url, self.token):
                 return
+            if time.monotonic() >= next_note:   # a silent wait of up to 3 minutes looked like a hang
+                self.log(f"still waiting for the tunnel to answer ({time.monotonic() - started:.0f}s of up to "
+                         f"{TUNNEL_WAIT_SECONDS:.0f}s)...")
+                next_note += 30.0
             self._stop.wait(3.0)
-        self.log("the tunnel is not reachable yet (slow DNS here?); publishing it anyway")
+        self.log("the tunnel is not reachable yet, so other machines may not reach this node; publishing it anyway. "
+                 "If this keeps happening, this network may block cloudflared (outbound port 7844, TCP and UDP): "
+                 "try another network")
 
     def _close_tunnel(self) -> None:
         proc, self._tunnel_proc = self._tunnel_proc, None

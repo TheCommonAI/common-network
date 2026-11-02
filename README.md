@@ -35,9 +35,16 @@ common join                      # serve a slice of the default model
 common ask "What's a good way to learn recursion?"
 ```
 
+`common join` keeps running in its terminal; run `common ask` from a second
+terminal. `common ask` talks to your own node's local API
+(`http://127.0.0.1:11440/v1`), so a machine needs `common join` running before it
+can ask the network anything.
+
 `common join --check` reads this machine's platform, memory, disk and network
 access and says what would stop a join, with the fix, before anything is
-downloaded.
+downloaded. Other peers reach your node through a Cloudflare quick tunnel, which
+needs outbound access to Cloudflare on port 7844 (TCP and UDP); some office,
+school and cloud networks block it, and the node then says so in its log.
 
 `common join` sets itself up on first run (private Python environment, model
 runtime, code), picks the layers the network needs most that fit your memory,

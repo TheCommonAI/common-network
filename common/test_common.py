@@ -841,6 +841,21 @@ for _argv, _force in ((["common", "update"], False),
           _cu.call_args.kwargs["force"], _force)
     check(f"`{' '.join(_argv[1:])}` does not run the silent startup update", _su.called, False)
 
+# `common ask --temperature 0.7 "..."` (as the README writes it): flags after the verb
+# land in REMAINDER, and used to be sent as part of the question and ignored.
+section("ask flags after the verb")
+for _argv, _q, _t, _j in ((["common", "ask", "--temperature", "0.7", "hi there"], "hi there", 0.7, False),
+                          (["common", "ask", "--temperature=0.5", "--json", "hi"], "hi", 0.5, True),
+                          (["common", "ask", "what does --json do?"], "what does --json do?", None, False),
+                          (["common", "--json", "ask", "hi"], "hi", None, True)):
+    with patch.object(sys, "argv", _argv), patch.object(common, "cmd_ask") as _ca, \
+            patch.object(common, "self_update"):
+        common.main()
+    _a = _ca.call_args
+    check(f"`{' '.join(_argv[1:])}` asks {_q!r}", _a.args[1], _q)
+    check(f"`{' '.join(_argv[1:])}` temperature", _a.kwargs.get("temperature"), _t)
+    check(f"`{' '.join(_argv[1:])}` json", _a.args[5], _j)
+
 # Restore originals
 common.UPDATE_URL = _orig_update_url
 common._in_git_work_tree = _orig_in_git

@@ -3495,7 +3495,44 @@ def main() -> None:
         return
 
     if args.verb == "ask":
-        question = " ".join(args.rest)
+        # `rest` is argparse.REMAINDER, so flags typed after the verb (the README's
+        # `common ask --temperature 0.7 "..."`) were sent as part of the question and
+        # silently ignored. Take the ask flags that come before the question; anything
+        # after the first non-flag token is the question, untouched.
+        rest = list(args.rest or [])
+        while rest and rest[0].startswith("-"):
+            flag = rest[0]
+            if flag in ("--temperature", "--model") and len(rest) > 1:
+                if flag == "--temperature":
+                    try:
+                        args.temperature = float(rest[1])
+                    except ValueError:
+                        print(red(f"✗ --temperature needs a number, not '{rest[1]}'"), file=sys.stderr)
+                        sys.exit(1)
+                else:
+                    args.model = rest[1]
+                rest = rest[2:]
+            elif flag.startswith("--temperature=") or flag.startswith("--model="):
+                key, _, value = flag[2:].partition("=")
+                if key == "temperature":
+                    try:
+                        args.temperature = float(value)
+                    except ValueError:
+                        print(red(f"✗ --temperature needs a number, not '{value}'"), file=sys.stderr)
+                        sys.exit(1)
+                else:
+                    args.model = value
+                rest = rest[1:]
+            elif flag in ("--json", "--local", "-q", "--quiet", "-v", "--verbose"):
+                attr = {"-q": "quiet", "-v": "verbose"}.get(flag, flag[2:])
+                setattr(args, attr, True)
+                rest = rest[1:]
+            elif flag == "--":
+                rest = rest[1:]
+                break
+            else:
+                break
+        question = " ".join(rest)
         if not question:
             print(red("✗ ask needs a question: common ask \"...\""), file=sys.stderr)
             sys.exit(1)
