@@ -91,6 +91,9 @@ class JoinDisplay:
         self.percent = 0
         self.api = False
         self.node_up = False
+        self.planned = False
+        self.route_ready = True
+        self.chat_ready = False
         directory = Path(log_dir or HOME_DIR / "logs")
         self.path = None
         self.file = None
@@ -235,9 +238,13 @@ class JoinDisplay:
             elif line.startswith("up at "):
                 self.node_up = True
                 self.shard = None
-                self.update(95 if self.api else 100)
+                self.update(95 if self.api or not self.route_ready else 100)
             elif line == "chat API ready":
-                self.update(100)
+                self.chat_ready = True
+                self.update(100 if self.route_ready else 95)
+            elif line == "network route ready":
+                self.route_ready = True
+                self.update(100 if not self.api or self.chat_ready else 95)
             elif line.startswith("downloading the Common Network code"):
                 self.update(3)
             elif line.startswith(("creating a Python", "preparing pip", "installing torch", "installing the model runtime")):
@@ -245,7 +252,8 @@ class JoinDisplay:
             elif line.lower().startswith(("warning:", "error:")) or "could not" in line.lower() or "download interrupted" in line.lower():
                 self.say(line)
                 if "chat API could not start on port" in line:
-                    self.update(100 if self.node_up else self.percent)
+                    self.api = False
+                    self.update(100 if self.node_up and self.route_ready else self.percent)
                     if "in use" in line.lower():
                         self.say("Your node is still contributing. For chat, stop the other Common instance or join with --api 11441.")
 
@@ -671,7 +679,9 @@ def run(network: str | None, extra: list[str] | None = None, *, dry_run: bool = 
     if display is not None:
         log = display.feed
         run_cmd = display.run_command
-        display.api = "--api" in (extra or [])
+        display.api = any(arg == "--api" or arg.startswith("--api=") for arg in (extra or []))
+        display.planned = any(arg == "--nodes" or arg.startswith("--nodes=") for arg in (extra or []))
+        display.route_ready = not display.planned
     kind = platform_kind(nvidia=nvidia)
     found = checks(env) if checks is not None else preflight(env, nvidia=nvidia)
     if blocking(found):

@@ -79,6 +79,9 @@ class Manifest:
             raise ManifestError(f"boundaries must rise strictly from 0 to num_layers ({layers})")
         if self.min_replicas < 1:
             raise ManifestError("min_replicas must be at least 1")
+        limit = self.model.get("max_window_layers")
+        if limit is not None and (type(limit) is not int or limit < max(b - a for a, b in self.stages())):
+            raise ManifestError("model.max_window_layers must be an integer large enough for every stage")
         for backend, cost in self.io_gib.items():
             if (not isinstance(backend, str) or not backend or type(cost) not in (int, float)
                     or not math.isfinite(cost) or cost < 0):
@@ -117,7 +120,8 @@ class Manifest:
     def windows_fitting(self, gib: float, backend: str) -> list[tuple[int, int]]:
         """Every boundary-aligned window whose weights fit in `gib`, longest first."""
         out = [(a, b) for i, a in enumerate(self.boundaries) for b in self.boundaries[i + 1:]
-               if self.window_gib(a, b, backend) <= gib]
+               if self.window_gib(a, b, backend) <= gib
+               and b - a <= self.model.get("max_window_layers", self.num_layers)]
         out.sort(key=lambda w: (-(w[1] - w[0]), w[0]))
         return out
 

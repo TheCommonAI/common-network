@@ -59,6 +59,8 @@ NETWORK_MODELS = {
     "bonsai-27b": "bonsai-27b.json",
     "bonsai-2-9b": "bonsai-2-9b.json",
     "bonsai-2-27b": "bonsai-2-27b.json",
+    "qwen3.5-35b-a3b": "qwen3.5-35b-a3b.json",
+    "qwen3.5-122b-a10b": "qwen3.5-122b-a10b.json",
 }
 # Seeds change without a release: this file on main lists peers that are normally up.
 SEEDS_URL = "https://raw.githubusercontent.com/TheCommonAI/common-network/main/commonnet/networks/seeds.json"
@@ -437,6 +439,7 @@ class Node:
         self._api: dict | None = None  # {"port": int, "ready": bool} once --api is on
         self._api_server = None
         self._api_error: str | None = None
+        self._route_was_ready = None
         self.window: tuple[int, int] | None = None
         self.url: str | None = None
         self.server: BlockServer | None = None
@@ -580,6 +583,7 @@ class Node:
         self.write_status()
         self.log(preflight.progress(5, f"starting, ready at {self.url}"))
         self.log(f"up at {self.url}")
+        self._log_plan_readiness()
         self._log_direct_capability()
         self.log(f"you are part of the network. A friend can join through you with:  common join --network {self.url}")
         if self._api_port is not None:
@@ -1224,6 +1228,26 @@ class Node:
 
     # -- keeping the record fresh and rebalancing ----------------------------------------------
 
+    def _log_plan_readiness(self):
+        if not self.manifest.model.get("planned_nodes") or self.state != "up":
+            return
+        try:
+            placement.best_route(self.manifest, self.table.live())
+            ready = True
+        except placement.NoRoute:
+            ready = False
+        if ready == self._route_was_ready:
+            return
+        self._route_was_ready = ready
+        if ready:
+            self.log("network route ready")
+        else:
+            missing = [f"{a}-{b}" for (a, b), count in zip(
+                self.manifest.stages(), placement.coverage(self.manifest, self.table.live())) if not count]
+            need = "layers " + ", ".join(missing) if missing else "a complete route"
+            self.log("warning: contributing, waiting for more peers to cover " + need
+                     + f". Join other machines with --{self.manifest.model['planned_nodes']}.")
+
     def _maintain(self) -> None:
         last_move_check = last_tunnel_check = time.monotonic()
         while not self._stop.wait(self.resign_s):
@@ -1234,6 +1258,7 @@ class Node:
                     self.table.merge_many(mesh_directory.fetch(self.gateway, self.manifest.id, now=self.clock()))
                 if self.direct is not None:
                     self._merge_dht()
+                self._log_plan_readiness()
                 if now - last_tunnel_check >= TUNNEL_CHECK_SECONDS:
                     last_tunnel_check = now
                     self._check_tunnel()
@@ -1313,7 +1338,9 @@ def check_backend_supported(manifest: Manifest, hardware: Hardware) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="commonnet.node", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--network", metavar="MODEL|URL|FILE", help=f"model name (qwen3-8b, bonsai-8b, bonsai-27b, bonsai-2-9b, bonsai-2-27b), a seed peer URL, or manifest file (or set {NETWORK_ENV})")
+    from commonnet.presets import add_node_count_flags
+    add_node_count_flags(p)
+    p.add_argument("--network", metavar="MODEL|URL|FILE", help=f"model name ({', '.join(NETWORK_MODELS)}), a seed peer URL, or manifest file (or set {NETWORK_ENV})")
     p.add_argument("--seed", action="append", default=[], metavar="URL", help="another peer to learn from (repeatable)")
     p.add_argument("--port", type=int, default=0, help="port for the block server (default: any free port; loopback only, "
                                                        "or with --direct the public TCP port, listening on all interfaces over TLS)")
@@ -1381,7 +1408,10 @@ def direct_config(args):
 
 
 def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.nodes is not None and args.network is not None:
+        parser.error("--nodes/--1 through --7 selects a model; use it without --network")
     previous = os.environ.get("COMMONNET_RTC")
     if args.no_rtc:
         os.environ["COMMONNET_RTC"] = "0"
@@ -1403,7 +1433,12 @@ def _main(args) -> int:
     status.write(blank_status("starting"))
     try:
         direct = direct_config(args)
-        manifest, seeds = resolve_network(args.network, args.seed)
+        from commonnet.presets import model_for_nodes, placement_manifest
+        selected = model_for_nodes(args.nodes) if args.nodes is not None else args.network
+        manifest, seeds = resolve_network(selected, args.seed)
+        if args.nodes is not None:
+            manifest = placement_manifest(manifest, args.nodes)
+            print(f"node preset {args.nodes}: {manifest.model['name']}; finding online layers and filling gaps", flush=True)
         status.write(blank_status("starting", network=manifest.id, model=manifest.model.get("name", manifest.id)))
         if args.stub:
             hardware = Hardware("stub", args.stage_gib or STUB_GIB, "stub")

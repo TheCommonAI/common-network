@@ -12,6 +12,7 @@ Usage:
     common join                    serve a slice of the shared model on this machine
     common join --check            can this machine join? checks only, installs nothing
     common join --model bonsai-8b  serve a different layer-network model
+    common join --7                join the seven-node Qwen3.5-122B-A10B preset (--1 through --7)
     common ask "<prompt>"          ask the network (needs `common join` running here)
     common peers                   who else is on the network right now
     common status                  this node: health, layers, requests served
@@ -3436,6 +3437,8 @@ def main() -> None:
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--version", action="store_true")
     args = parser.parse_args()
+    if args.verb:
+        args.verb = args.verb.lower()
 
     _ARGS_NO_COLOR[0] = args.no_color
 

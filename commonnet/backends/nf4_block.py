@@ -91,6 +91,44 @@ def _plain_keys(state_keys, quantized) -> list[str]:
     return [k for k in state_keys if not any(k == q or k.startswith(q + ".") for q in quantized)]
 
 
+class QuantizedExperts(nn.Module):
+    """Qwen3.5 routed experts, quantised one expert at a time instead of expanding a layer on the GPU."""
+
+    def __init__(self, gates, ups, downs, act_fn):
+        super().__init__()
+        self.gates, self.ups, self.downs = nn.ModuleList(gates), nn.ModuleList(ups), nn.ModuleList(downs)
+        self.act_fn = act_fn
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        result = torch.zeros_like(hidden_states)
+        for expert in torch.unique(top_k_index).tolist():
+            token, choice = torch.where(top_k_index == expert)
+            x = hidden_states[token]
+            values = self.downs[expert](self.act_fn(self.gates[expert](x)) * self.ups[expert](x))
+            values = values * top_k_weights[token, choice, None]
+            result.index_add_(0, token, values.to(result.dtype))
+        return result
+
+
+def load_experts(reader, prefix, original, make_linear):
+    """Read an expert slice on CPU; `make_linear` installs its packed projection on the target device."""
+    gate_up, down = prefix + ".gate_up_proj", prefix + ".down_proj"
+    gates, ups, downs = [], [], []
+    # SafeTensor slices avoid materialising the multi-GB fused expert tensor.
+    with safe_open(reader.weight_map[gate_up], framework="pt", device="cpu") as first, \
+            safe_open(reader.weight_map[down], framework="pt", device="cpu") as second:
+        for index in range(original.num_experts):
+            g, u = first.get_slice(gate_up)[index].chunk(2, dim=0)
+            gates.append(make_linear(g))
+            ups.append(make_linear(u))
+            del g, u
+            d = second.get_slice(down)[index]
+            downs.append(make_linear(d))
+            del d
+    reader.read_names.extend([gate_up, down])
+    return QuantizedExperts(gates, ups, downs, original.act_fn)
+
+
 @dataclass
 class Nf4BlockRange(BlockRange):
     device: torch.device | str = "cuda"
@@ -146,8 +184,18 @@ class Nf4BlockRange(BlockRange):
             prefix = f"{reader.prefix}layers.{glob}."
             quantized = set()
 
+            if self.arch == "qwen3_5_moe":
+                name = "mlp.experts"
+                original = layer.get_submodule(name)
+                layer.mlp.experts = load_experts(
+                    reader, prefix + name, original,
+                    lambda w: _quantise(bnb, Params4bit, w, w.shape[1], w.shape[0], device, self.dtype))
+                quantized.add(name)
+
             # Replace every Linear with a Linear4bit (pre-quantized NF4 tensors, or quantised from floats on load).
             for name, mod in list(layer.named_modules()):
+                if any(name == q or name.startswith(q + ".") for q in quantized):
+                    continue
                 if not isinstance(mod, nn.Linear):
                     continue
                 wname = prefix + name + ".weight"

@@ -1,0 +1,43 @@
+{
+  "id": "common-qwen3-5-122b-a10b-v1",
+  "version": 1,
+  "model": {
+    "name": "Qwen3.5-122B-A10B",
+    "num_layers": 48,
+    "repos": {
+      "mlx": "mlx-community/Qwen3.5-122B-A10B-4bit",
+      "nf4": "Qwen/Qwen3.5-122B-A10B",
+      "cpu": "Qwen/Qwen3.5-122B-A10B"
+    },
+    "client_repo": "mlx-community/Qwen3.5-122B-A10B-4bit",
+    "dtype": {
+      "nf4": "bfloat16",
+      "cpu": "bfloat16"
+    },
+    "max_window_layers": 7,
+    "no_speculation": "Qwen3.5 MoE uses hybrid recurrent attention; speculative cache rollback is not supported"
+  },
+  "boundaries": [
+    0,
+    7,
+    14,
+    21,
+    28,
+    35,
+    42,
+    48
+  ],
+  "gib_per_layer": {
+    "mlx": 1.35,
+    "nf4": 1.5,
+    "cpu": 5
+  },
+  "fixed_gib": 0.6,
+  "io_gib": {
+    "mlx": 0.45,
+    "nf4": 1.6,
+    "cpu": 1.6
+  },
+  "min_replicas": 2,
+  "seeds": []
+}

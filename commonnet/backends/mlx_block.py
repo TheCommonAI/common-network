@@ -112,7 +112,7 @@ class MlxBlockRange:
             lp = "model."
             make_block = lambda glob: TransformerBlock(args)
         # A checkpoint is pre-quantized if it stores .scales next to the layer weights.
-        prequantized = f"{lp}layers.{self.start}.mlp.up_proj.scales" in files
+        prequantized = any(n.startswith(f"{lp}layers.{self.start}.") and n.endswith(".scales") for n in files)
         qcfg = wrapper.get("quantization") or cfg.get("quantization") or {}
         if self.hadamard and not prequantized:
             raise ValueError("a Hadamard pack stores 2-bit weights; this checkpoint has none for these layers")
@@ -127,11 +127,22 @@ class MlxBlockRange:
         hf_layout = False
         if self.qwen35 and not prequantized:
             # HF layout has conv1d (C, 1, K) and (1 + w) norms; MLX conversions have conv1d (C, K, 1).
-            first_lin = self.layer_is_linear.index(True)
-            hf_layout = mx.load(files[f"{lp}layers.{first_lin}.linear_attn.conv1d.weight"])[
-                f"{lp}layers.{first_lin}.linear_attn.conv1d.weight"].shape[-1] != 1
+            first_lin = next(i for i in range(self.start, self.end) if self.layer_is_linear[i]) if any(
+                self.layer_is_linear[self.start:self.end]) else None
+            hf_layout = lp != "language_model.model."
+            if first_lin is not None:
+                hf_layout = mx.load(files[f"{lp}layers.{first_lin}.linear_attn.conv1d.weight"])[
+                    f"{lp}layers.{first_lin}.linear_attn.conv1d.weight"].shape[-1] != 1
 
         def tensor(name: str) -> mx.array:
+            if name not in files and ".mlp.switch_mlp." in name:
+                base, projection = name.split(".switch_mlp.")
+                source = base + (".experts.down_proj" if projection == "down_proj.weight" else ".experts.gate_up_proj")
+                weights = tensor(source)
+                if projection == "down_proj.weight":
+                    return weights
+                mid = weights.shape[-2] // 2
+                return weights[..., :mid, :] if projection == "gate_proj.weight" else weights[..., mid:, :]
             path = files[name]
             if path not in cache_files:
                 cache_files[path] = mx.load(path)

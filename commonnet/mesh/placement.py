@@ -76,6 +76,9 @@ def choose_window(manifest: Manifest, live, gib: float, backend: str, me: str | 
     window has some, finishing what is on disk comes first: a window that covers a stage nobody serves still beats
     one that does not, and among those the most cached wins; with no uncovered stage the most cached wins, then
     the old order. With nothing cached the old order applies unchanged.
+
+    A planned split (`max_window_layers`) first builds a boundary-aligned route. After that, it prefers exact
+    replicas with the fewest holders, so short end stages also get a second copy.
     """
     others = [r for r in live if r.get("peer") != me]
     cov = coverage(manifest, others)
@@ -88,14 +91,40 @@ def choose_window(manifest: Manifest, live, gib: float, backend: str, me: str | 
     cached = cached or {}
     use_cache = any(v > 0 for v in cached.values())
     uncovered = {s for s in manifest.stages() if cov[stage_index[s]] == 0}
+    starts, ends = {0}, {manifest.num_layers}
+    planned = bool(manifest.model.get("max_window_layers"))
+    serving = _serving(manifest, others) if planned else []
+    for _ in range(len(serving)):
+        for record in serving:
+            a, b = _window(record)
+            if a in starts:
+                starts.add(b)
+            if b in ends:
+                ends.add(a)
+    repeatable = []
+    if planned and manifest.num_layers in starts:
+        repeatable = [w for w in candidates if replicas.get(w, 0)]
+        if repeatable:
+            candidates = repeatable  # extra planned peers provide immediately usable failover replicas
+
+    def chain_rank(w):
+        # A stage can be "covered" by overlapping windows that cannot form a chain.
+        # Planned splits first bridge a usable prefix/suffix, then extend the prefix.
+        if not planned or manifest.num_layers in starts:
+            return ()
+        a, b = w
+        gap = 0 if not uncovered or any(a <= x and y <= b for x, y in uncovered) else 1
+        extends = a in starts and b > max(starts)
+        return (gap, 0 if a in starts and b in ends else 1, 0 if extends else 1, -b if extends else 0)
 
     def key(w):
         score = sum(Fraction(1, 1 + cov[stage_index[s]]) for s in manifest.stages() if w[0] <= s[0] and s[1] <= w[1])
         existing = replicas.get(w, 0)
+        replica_rank = (existing,) if repeatable else ()
         if use_cache:
             gap = 0 if any(w[0] <= s[0] and s[1] <= w[1] for s in uncovered) or not uncovered else 1
-            return (gap, -cached.get(w, 0), -score, -(w[1] - w[0]), 0 if existing else 1, existing, w[0])
-        return (-score, -(w[1] - w[0]), 0 if existing else 1, existing, w[0])
+            return chain_rank(w) + replica_rank + (gap, -cached.get(w, 0), -score, -(w[1] - w[0]), 0 if existing else 1, existing, w[0])
+        return chain_rank(w) + replica_rank + (-score, -(w[1] - w[0]), 0 if existing else 1, existing, w[0])
 
     return min(candidates, key=key)
 
