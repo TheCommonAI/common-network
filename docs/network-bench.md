@@ -41,8 +41,8 @@ knobs: `compute` should be near layers x `--layer-ms`, and `network` near hops x
 ## Results (this Mac, 2026-10-24)
 
 Apple silicon laptop, loopback, Python 3.14, 12 layers, `--layer-ms 3` (so 36 ms of nominal compute per token), hidden 256
-unless stated, 16 prompt tokens, 20 new tokens, 1 warm-up + 2 measured generations. Raw data:
-`bench-results/sweep-2026-10-24.json`. All times in ms.
+unless stated, 16 prompt tokens, 20 new tokens, 1 warm-up + 2 measured generations. The raw output is not
+committed (it is written to `bench-results/`, which is gitignored); rerun the sweep below to get your own. All times in ms.
 
 Stages x RTT (the formula `time/token = compute + network + client`):
 
@@ -121,7 +121,7 @@ Reading the table:
 ## Reproduce
 
 ```
-python3 -m commonnet.bench --sweep --out bench-results/sweep-2026-10-24.json    # about 5 minutes
+python3 -m commonnet.bench --sweep    # about 5 minutes, writes bench-results/
 python3 -m commonnet.bench --stages 2 --layer-ms 40 --rtt-ms 50                  # one scenario
 python3 -m commonnet.bench --stages 3 --rtt-ms 50 --jitter-ms 20 --loss 0.02 --hidden 4096
 python3 -m commonnet.bench --stages 4 --rtt-ms 100 --no-keepalive

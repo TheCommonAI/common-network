@@ -3,13 +3,16 @@ __pycache__/
 *.pyc
 .env
 *.log
+.DS_Store
 
-# Internal planning and school-deployment documents. These describe a specific
-# lab, its constraints and the thesis being tested there -- useful to us,
-# nobody else's business, and they date fast. Kept locally, not published.
-PROJECT-THESIS.md
-SCHOOL-LAB-THESIS-RUNBOOK.md
-SCHOOL-NETWORK-REQUIREMENTS.md
+# Internal material stays in private/: runbooks for specific people and
+# machines, testing logs, planning and thesis documents, and benchmark output.
+# It is kept on disk for the team and never committed.
+private/
+
+# Benchmark output written by `python -m commonnet.bench` and friends. It names
+# machines and hosts, so it is generated locally, not committed.
+bench-results/
 
 # Editor and merge leftovers. A stale copy of a source file must never be
 # committed by accident -- one nearly was (common/common.py.prefusion.bak).

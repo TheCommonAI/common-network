@@ -137,11 +137,22 @@ catalogue) has been retired. `gateway/` is now a small signpost service: `/healt
 typed address. Everything else returns 410 Gone. Details:
 [docs/layer-network.md](docs/layer-network.md#gateway-directory-rendezvous).
 
+## For developers
+
+New to the code? [docs/README.md](docs/README.md) maps the repository and the docs. The layer-network library
+is in `commonnet/`, and its [README](commonnet/README.md) is a module map. Start with `node.py`, the peer that
+`common join` runs.
+
+Run the unit tests from the folder they live in:
+
 ```bash
-cd join && python test_join.py
-cd common && python test_common.py
-cd gateway && python -m unittest discover tests
+cd join && python3 test_join.py
+cd common && python3 test_common.py
+cd gateway && python3 -m unittest discover tests        # needs requirements.txt
+python3 -m unittest discover -s commonnet/tests -t .    # from the repo root; many tests need torch or MLX
 ```
+
+Checks that run real models by hand are in [e2e/](e2e/README.md).
 
 ## Security
 

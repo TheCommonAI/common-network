@@ -1,5 +1,9 @@
 # Security review: prompt privacy
 
+> **Archived.** This review is from 2026-10-18 and describes the v0.1 whole-model gateway, which has since been
+> retired. The code paths it cites (`gateway/app/registry.py`, `gateway/app/upstream.py` and others) no longer exist.
+> It is kept as history. For the current network, see [SECURITY.md](../../SECURITY.md).
+
 **Date:** 2026-10-18  
 **Scope:** Query confidentiality in the Common Network Alpha gateway and node
 transport.

@@ -87,7 +87,7 @@ def _quantise(bnb, Params4bit, w: torch.Tensor, n_in: int, n_out: int, device, d
 def _plain_keys(state_keys, quantized) -> list[str]:
     """The state-dict keys to read as plain tensors: everything except a quantised Linear's weight AND the
     statistics bitsandbytes hangs under it (weight.absmax, weight.quant_map, weight.quant_state.*). A checkpoint
-    quantised on load has no such tensors, so asking for them raised KeyError (Patrick's first Bonsai start)."""
+    quantised on load has no such tensors, so asking for them raised KeyError (the first Bonsai run on an NVIDIA card)."""
     return [k for k in state_keys if not any(k == q or k.startswith(q + ".") for q in quantized)]
 
 

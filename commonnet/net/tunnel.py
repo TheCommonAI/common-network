@@ -216,9 +216,9 @@ def run(server_args: list, out_path: Path, *, token: str | None = None,
             log(UNVERIFIED_WARNING)
         _publish(out_path, url, layers, device, verified=verified)
         log(f"published to {out_path}" + ("" if verified else " (unverified)"))
-        log(f"READY. Send Miles this URL: {url}")
+        log(f"READY. Send this URL to whoever runs the coordinator: {url}")
         if not verified:
-            log("(unverified: this PC could not reach it yet; leave this window open, Miles will check it)")
+            log("(unverified: this machine could not reach it yet; leave this window open and the coordinator will check it)")
 
         healthy_at = time.monotonic()
         while not stop.wait(health_interval):

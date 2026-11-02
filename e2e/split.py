@@ -1,7 +1,8 @@
 """Split run: two local block servers (real HTTP, real client) vs reference.json."""
 import json, os, secrets, subprocess, sys, time, tempfile
 import torch
-sys.path.insert(0, "/Users/mileshedrick/commonnet-run"); sys.path.insert(0, ".")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO); sys.path.insert(0, ".")
 from commonnet.client import BlockEndpoint
 from commonnet.client4 import Client4
 from commonnet.net.transport import HttpTransport
@@ -17,7 +18,7 @@ env = dict(os.environ, COMMONNET_BACKEND="mlx", COMMONNET_CHECKPOINT=ck)
 if MODE == "bf16": env["COMMONNET_DTYPE"] = "bfloat16"
 spans = [(0, cut, 18811)] + ([(cut, n, 18812)] if cut < n else [])
 procs = [subprocess.Popen([sys.executable, "-u", "-m", "commonnet.net.server", "--port", str(p), "--layers", str(a), str(b),
-         "--block", "commonnet.net.factory:FACTORY", "--token-file", tokfile], env=env, cwd="/Users/mileshedrick/commonnet-run",
+         "--block", "commonnet.net.factory:FACTORY", "--token-file", tokfile], env=env, cwd=REPO,
          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for a, b, p in spans]
 try:
     token = auth.load_token(tokfile)

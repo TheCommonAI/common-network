@@ -69,9 +69,9 @@ python -m commonnet.net.nat   # on machine A: shows STUN public IP, NAT kind and
 **Hairpin NAT:** from the Mac itself, the router often will not connect to its own public address. That is fine: a node
 talks to itself over loopback. To test through the public address, use machine B or a phone hotspot.
 
-## 2. Machine B: Patrick's Windows PC (RTX 4060)
+## 2. Machine B: a second Windows PC
 
-On Patrick's router do the same forward for his PC's LAN IP (`ipconfig` shows it): **TCP 7471** and **UDP 7472**.
+On that machine's router do the same forward for the PC's LAN IP (`ipconfig` shows it): **TCP 7471** and **UDP 7472**.
 Allow them through Windows Defender Firewall (PowerShell as Administrator):
 
 ```
@@ -79,19 +79,19 @@ netsh advfirewall firewall add rule name="Common block server" dir=in action=all
 netsh advfirewall firewall add rule name="Common DHT" dir=in action=allow protocol=UDP localport=7472
 ```
 
-Patrick's public IP: `(Invoke-WebRequest https://api.ipify.org).Content`. Then, with `A.PUB.IP` from step 1a:
+The PC's public IP: `(Invoke-WebRequest https://api.ipify.org).Content`. Then, with `A.PUB.IP` from step 1a:
 
 ```
 common join --direct --bootstrap A.PUB.IP:7472 --direct-port 7471 --external-port 7471 --public-ip B.PUB.IP --dht-port 7472
 ```
 
-If his router has UPnP, you can omit `--public-ip/--external-port` and let it map and verify automatically; the log says
+If the router has UPnP, you can omit `--public-ip/--external-port` and let it map and verify automatically; the log says
 `the router mapped TCP ...` or `no automatic port mapping`.
 
 Success: `direct address decision: manual B.PUB.IP:7471` **without** "unverified" (A dialled back), then `up at https://B.PUB.IP:7471`.
 Step 4 shows A, B and C together.
 
-## 3. Machine C: the school laptop (probably no inbound at all)
+## 3. Machine C: a laptop on a restricted network (probably no inbound at all)
 
 Nothing to forward. Run:
 
