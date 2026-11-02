@@ -1,6 +1,6 @@
 # `common` — the CLI
 
-The Common Network CLI (v0.5): join the layer network as a peer, ask it
+The Common Network CLI (v0.4): join the layer network as a peer, ask it
 questions, and inspect it.
 
 ```bash

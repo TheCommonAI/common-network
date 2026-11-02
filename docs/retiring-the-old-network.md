@@ -14,7 +14,7 @@ inference server. Peers gossip signed records, clients build routes themselves,
 and a dropped peer is replaced mid-generation. See
 [layer-network.md](layer-network.md).
 
-## What shipped in its place (v0.4–v0.5)
+## What shipped in its place (v0.4)
 
 - A plain `common join` is the layer network. `--legacy`, `--lan`, and a
   `--model` that is not a layer-network name still *parse*, then tell you the

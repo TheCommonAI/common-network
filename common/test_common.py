@@ -84,7 +84,7 @@ def _version_assignment(path: Path) -> str:
 
 
 section("user-facing version numbers agree")
-check("this CLI is 0.5.0", common.VERSION, "0.5.0")
+check("this CLI is 0.4.0", common.VERSION, "0.4.0")
 check("join.py is the same version", _version_assignment(ROOT / "join" / "join.py"), common.VERSION)
 check("chat.py is the same version", _version_assignment(ROOT / "chat" / "chat.py"), common.VERSION)
 check("the README names that version", f"**v{common.VERSION.rsplit('.', 1)[0]}**" in (ROOT / "README.md").read_text(), True)

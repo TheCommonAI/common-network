@@ -843,8 +843,8 @@ class Node:
         """
         listed = mesh_directory.announce(self.gateway, record)
         if not listed and "speed" in record:
-            # The deployed gateway predates `speed` (v0.5) and refuses any record with a field it does not know, so
-            # no v0.5 peer could be listed and new peers found nobody. List a copy without it (same seq, re-signed).
+            # The deployed gateway predates `speed` and refuses any record with a field it does not know, so
+            # no peer that signs `speed` could be listed and new peers found nobody. List a copy without it (same seq, re-signed).
             fields = {k: v for k, v in record.items() if k not in ("v", "peer", "pub", "sig", "speed")}
             listed = mesh_directory.announce(self.gateway, self.identity.sign_record(fields))
         if listed and self._listed is not True:

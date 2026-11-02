@@ -60,7 +60,7 @@ def section(title: str) -> None:
 # --- addresses and timeouts -------------------------------------------------
 
 section("version matches the CLI")
-check("join.py is 0.5.0", join.VERSION, "0.5.0")
+check("join.py is 0.4.0", join.VERSION, "0.4.0")
 
 
 section("IPv4 addresses (Windows localhost resolves to IPv6, breaking tunnels)")

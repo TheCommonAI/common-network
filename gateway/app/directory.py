@@ -37,7 +37,7 @@ CHECK_PER_MIN = 10
 CHECK_TIMEOUT = 3.0
 STATES = ("loading", "up", "leaving")
 SIGNED = ("v", "network", "peer", "pub", "url", "token", "window", "backend", "state", "gib", "seq", "ts")
-OPTIONAL = ("fp", "fpsig", "dht", "speed")   # speed: measured GFLOP/s, added in v0.5
+OPTIONAL = ("fp", "fpsig", "dht", "speed")   # speed: measured GFLOP/s; unknown fields must not be refused
 BIND = b"commonnet-tls-cert-v1\n"
 
 router = APIRouter()

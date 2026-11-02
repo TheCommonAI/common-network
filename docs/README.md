@@ -2,7 +2,7 @@
 
 Start with **layer-network.md**. It describes how the network works today and how to use it.
 
-The product version is **v0.5**. User-facing scripts (`common`, `join`, `chat`) and the
+The product version is **v0.4**. User-facing scripts (`common`, `join`, `chat`) and the
 installers all report that same number.
 
 ## Using the network

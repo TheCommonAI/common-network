@@ -186,7 +186,7 @@ class DirectoryListing(NodeCase):
         self.assertIn("could not list this node", logs[2])
 
     def test_a_gateway_that_refuses_speed_still_lists_the_node_without_it(self):
-        # The deployed gateway predates `speed` and answered every v0.5 record with "unknown field".
+        # The deployed gateway predates `speed` and answered every record that included it with "unknown field".
         from commonnet.mesh import records as rec
         logs, sent = [], []
         n = self._node(18977, logs)
