@@ -2,7 +2,7 @@
 
 ![Common.](assets/common-banner.png)
 
-**v0.4**
+**v0.5**
 
 Common Network is a distributed LLM inference network. It splits one large
 model's layers across volunteer machines, in the style of
@@ -146,9 +146,9 @@ typed address. Everything else returns 410 Gone. Details:
 
 ## For developers
 
-New to the code? [docs/README.md](docs/README.md) maps the repository and the docs. The layer-network library
-is in `commonnet/`, and its [README](commonnet/README.md) is a module map. Start with `node.py`, the peer that
-`common join` runs.
+New to the code? [docs/README.md](docs/README.md) maps the repository and the docs. User-facing
+scripts and installers all report **v0.5**. The layer-network library is in `commonnet/`, and its
+[README](commonnet/README.md) is a module map. Start with `node.py`, the peer that `common join` runs.
 
 Run the unit tests from the folder they live in:
 

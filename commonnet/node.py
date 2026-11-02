@@ -1,4 +1,4 @@
-"""A peer of the decentralised layer network: what `common join --network` runs. See commonnet/NETWORK.md.
+"""A peer of the decentralised layer network: what `common join --network` runs. See docs/network-contract.md.
 
     python -m commonnet.node --network https://SEED-URL        # learn the manifest from a seed peer
     python -m commonnet.node --network manifest.json --seed https://SEED-URL
@@ -783,7 +783,7 @@ class Node:
                 from commonnet.net import client as _nc
                 _nc.register_local_endpoint(self.url)
 
-    # -- direct mode (experimental; see commonnet/direct.py and commonnet/net/DIRECT.md) -------------
+    # -- direct mode (experimental; see commonnet/direct.py and docs/direct-mode.md) -------------
 
     def _start_dht(self) -> None:
         from commonnet.dht import DhtNode, load_bootstrap

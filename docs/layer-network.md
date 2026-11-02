@@ -5,9 +5,10 @@ Each peer holds a few layers; only the small activations travel between peers (a
 There is no central server: peers find each other by gossip, build their own routes, and replace a peer
 that drops out in the middle of a generation.
 
-`common join` joins this network by default. The original whole-model gateway node is still there as
-`common join --legacy` (and anything that only makes sense for it, such as `--lan`, or a `--model` that is not a
-network name, implies it). A background service keeps the mode it was installed with.
+`common join` joins this network. `--model NAME` for a layer-network name (`qwen3-8b`, `bonsai-8b`,
+`bonsai-27b`, `bonsai-2-9b`, `bonsai-2-27b`) is the same as `--network NAME`. The old whole-model
+gateway (`--legacy`, `--lan`, or a `--model` that is not one of those names) has been retired: those
+flags still parse, then say so and exit.
 
 ## Join (Apple silicon, NVIDIA, or any machine with enough RAM)
 
@@ -24,7 +25,6 @@ common join --model bonsai-8b            # the same as --network bonsai-8b, name
 common join --layers 27-36       # serve exactly this window (a stage boundary pair) instead of the one the network picks
 common join --check              # can this machine join? reads only: nothing is installed, downloaded or started
 common join --permanent          # keep serving after reboots (records the mode)
-common join --legacy             # the original whole-model gateway node instead
 ```
 
 ### Switching the model
@@ -38,7 +38,7 @@ The model a machine serves is the network it joins. Name a different one with `-
   stops. On Linux this is `systemctl --user restart`; on macOS launchd reloads the agent. Windows (Task Scheduler) has
   not been checked for an in-place switch: run `common leave` first, then the command with `--permanent`.
 - `--model` takes a layer-network name (`qwen3-8b`, `bonsai-8b`, `bonsai-27b`, `bonsai-2-9b`, `bonsai-2-27b`). Any other
-  value is a catalogue id for the retired whole-model gateway and goes to `--legacy`.
+  value was a catalogue id for the retired whole-model gateway and now exits with that explanation.
 
 The first run sets itself up: it makes a private Python environment, installs the model runtime, fetches
 the code, picks the layers the network needs most that fit your memory, downloads only those layers, opens a
@@ -166,7 +166,7 @@ python -m commonnet.coordinator --network URL --plan    # JSON: the chain, every
 The plan covers every layer exactly once (the chain), puts the other peers on windows as replicas, and changes as few
 peers' windows as it can when one joins or drops. If no chain of live peers covers the model it exits 1 and names the
 layers nobody reaches. Peers report their memory (`gib`), device (`backend`) and a measured rough `speed` in their signed
-record. See [NETWORK.md](../commonnet/NETWORK.md).
+record. See [network-contract.md](network-contract.md).
 
 ## Start a network (be a seed)
 
@@ -205,7 +205,7 @@ python -m commonnet.bench --live --bootstrap BOOT.HOST:7480                     
 - **Not built:** relaying for unreachable peers (they use the tunnel), IPv6, automatic switch from direct to tunnel if a
   working address stops working later (the node logs a warning), and any of this verified over the real Internet.
 
-How to test it on real machines: `docs/direct-test.md`. Design and security notes: `commonnet/net/DIRECT.md`.
+How to test it on real machines: [direct-test.md](direct-test.md). Design notes: [direct-mode.md](direct-mode.md).
 
 ## Link compression (hidden states between peers)
 
@@ -247,7 +247,7 @@ drift slightly because their 4-bit weights differ.
 - The first peer of a stage needs enough memory for its window; the network tells you how much if you
   have too little.
 
-Design details: `commonnet/NETWORK.md`.
+Design details: [network-contract.md](network-contract.md).
 
 ## Gateway directory (rendezvous)
 

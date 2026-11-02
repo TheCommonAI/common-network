@@ -1,6 +1,7 @@
 # Direct connectivity (no Cloudflare tunnel)
 
-Status: wired in behind `--direct` (experimental, off by default). `commonnet/direct.py` decides the address,
+Status: wired in behind `--direct` (experimental). A plain `common join` already tries a direct WebRTC
+path and falls back to a tunnel; `--direct` forces a public TLS listener. `commonnet/direct.py` decides the address,
 `commonnet/node.py` serves and announces, `commonnet/netclient.py` discovers and pins. Everything below marked
 "not built" is not built. Verified so far: loopback processes in CI (`commonnet/tests/test_direct_e2e.py`) and unit
 tests with fakes; never over a real WAN. The `ssl_context` / `pin` parameters still default to `None`.

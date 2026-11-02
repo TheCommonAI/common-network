@@ -1,5 +1,5 @@
 # Install the Common Network CLI tools (Windows).
-# The Common Network Alpha (v0.1.13).
+# The Common Network (v0.5).
 #
 #   irm https://commonai.com.au/install.ps1 | iex
 #
@@ -7,17 +7,9 @@
 # single source of truth. The long form works too:
 #   irm https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.ps1 | iex )
 #
-# Installs `common-chat` (talk to the network — needs nothing but Python) and
-# `common-join` (contribute a node), installing cloudflared automatically if
-# needed.
-#
-# There used to be a condition on this: common-join was only installed if Ollama
-# was already on the machine, because join.py drove Ollama and there was nothing
-# it could do without it. That made contributing a machine into installing a
-# second product first. join.py now fetches its own model runtime (a ~12MB
-# llama.cpp build, see join/runtime.py) and its own weights, so the only thing
-# left that a contributor has to have is Python — and cloudflared, which this
-# script installs for them.
+# Installs `common` (ask / join / status / …), `common-chat`, and `common-join`,
+# plus cloudflared if it is missing (other peers reach this machine through a
+# Cloudflare quick tunnel). Python 3.10+ is the only other requirement.
 #
 # The wrappers run python with -u (unbuffered). Windows block-buffers Python's
 # stdout when it goes through a .cmd wrapper, which puts printed output out of
@@ -31,7 +23,7 @@ $InstallDir = "$env:USERPROFILE\.common-network"
 $BinDir = "$InstallDir\bin"
 $Raw = "https://raw.githubusercontent.com/$Repo/main"
 
-Write-Host "Installing the Common Network Alpha (v0.1.13)..."
+Write-Host "Installing the Common Network (v0.5)..."
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
 # --- python ---
@@ -135,17 +127,17 @@ if ($userPath -notlike "*$BinDir*") {
 Write-Host ""
 Write-Host "Done! Open a new terminal, then try:"
 Write-Host ""
-Write-Host "    common peers         # see the machines on the network"
+Write-Host "    common join --check  # can this machine join? checks only"
 if ($joinInstalled) {
-    Write-Host "    common join          # contribute a machine -- then asking works"
+    Write-Host "    common join          # serve a slice of the shared model"
+    Write-Host "    common ask `"...`"     # ask the network (needs join running)"
     Write-Host ""
-    Write-Host "(The first 'common join' downloads a ~15MB model runtime and then the"
-    Write-Host " model's weights -- 1.3GB for the smallest in the catalogue, around 4GB"
-    Write-Host " for a 7B. Once, then it starts from disk.)"
+    Write-Host "(The first join sets up a private Python environment and downloads"
+    Write-Host " only the layers this machine will serve.)"
 } else {
     Write-Host "    (common-join was skipped because cloudflared could not be installed."
     Write-Host "     Install it from https://developers.cloudflare.com/cloudflare-one/"
-    Write-Host "     connections/connect-networks/downloads/ and re-run this installer"
-    Write-Host "     to contribute a machine, which is also how asking works.)"
+    Write-Host "     connections/connect-networks/downloads/ and re-run this installer:"
+    Write-Host "     other peers reach this machine through a Cloudflare tunnel.)"
 }
 Write-Host ""

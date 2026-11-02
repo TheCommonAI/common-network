@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the Common Network CLI tools (macOS / Linux).
-# The Common Network Alpha (v0.1.13).
+# The Common Network (v0.5).
 #
 #   curl -fsSL https://commonai.com.au/install.sh | sh
 #
@@ -8,17 +8,9 @@
 # single source of truth. The long form works too:
 #   curl -fsSL https://raw.githubusercontent.com/TheCommonAI/common-network/main/install.sh | sh )
 #
-# Installs `common-chat` (talk to the network — needs nothing but Python) and
-# `common-join` (contribute a node), installing cloudflared automatically if
-# needed.
-#
-# There used to be a condition on this: common-join was only installed if Ollama
-# was already on the machine, because join.py drove Ollama and there was nothing
-# it could do without it. That made contributing a machine into installing a
-# second product first. join.py now fetches its own model runtime (a ~12MB
-# llama.cpp build, see join/runtime.py) and its own weights, so the only thing
-# left that a contributor has to have is Python — and cloudflared, which this
-# script installs for them.
+# Installs `common` (ask / join / status / …), `common-chat`, and `common-join`,
+# plus cloudflared if it is missing (other peers reach this machine through a
+# Cloudflare quick tunnel). Python 3.10+ is the only other requirement.
 set -euo pipefail
 
 REPO="TheCommonAI/common-network"
@@ -26,7 +18,7 @@ INSTALL_DIR="$HOME/.common-network"
 BIN_DIR="$INSTALL_DIR/bin"
 RAW="https://raw.githubusercontent.com/$REPO/main"
 
-echo "Installing the Common Network Alpha (v0.1.13)..."
+echo "Installing the Common Network (v0.5)..."
 mkdir -p "$BIN_DIR"
 
 OS="$(uname -s)"
@@ -111,7 +103,7 @@ chmod +x "$INSTALL_DIR/chat.py"
 
 write_wrapper "$INSTALL_DIR/chat.py" "$BIN_DIR/common-chat"
 
-# --- common (the unified CLI: ask/join/serve/leave/status/demand/peers/...) ---
+# --- common (the unified CLI: ask/join/status/peers/...) ---
 echo "Downloading the common CLI..."
 curl -fsSL "$RAW/common/common.py" -o "$INSTALL_DIR/common.py"
 chmod +x "$INSTALL_DIR/common.py"
@@ -185,20 +177,20 @@ fi
 echo ""
 echo "Done! Open a new terminal, then try:"
 echo ""
-echo "    common peers         # see the machines on the network"
+echo "    common join --check  # can this machine join? checks only"
 if [ "$JOIN_INSTALLED" = "1" ]; then
-  echo "    common join          # contribute a machine -- then asking works"
+  echo "    common join          # serve a slice of the shared model"
+  echo "    common ask \"...\"     # ask the network (needs join running)"
   echo ""
-  echo "(The first 'common join' downloads a ~15MB model runtime and then the"
-  echo " model's weights -- 1.3GB for the smallest in the catalogue, around 4GB"
-  echo " for a 7B. Once, then it starts from disk.)"
+  echo "(The first join sets up a private Python environment and downloads"
+  echo " only the layers this machine will serve.)"
 else
   echo "    (common-join was skipped because cloudflared could not be installed."
-  echo "     Install it from the URL above and re-run this installer to"
-  echo "     contribute a machine, which is also how asking works.)"
+  echo "     Install it from the URL above and re-run this installer: other"
+  echo "     peers reach this machine through a Cloudflare tunnel.)"
 fi
 echo ""
-echo "(common-chat / common-join still work directly too, if you're used to them)"
+echo "(common-chat / common-join still work if you already use those names)"
 echo ""
 if [ "${ADDED_TO_RC:-0}" = "1" ]; then
   echo "(Restart your terminal first, or run: export PATH=\"$BIN_DIR:\$PATH\")"

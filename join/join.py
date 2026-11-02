@@ -1,45 +1,29 @@
 #!/usr/bin/env python3
-"""Join the Common Network as a node operator.
+"""Join the Common Network as a peer.
 
-The Common Network Alpha (v0.2.0-dev).
+The Common Network (v0.5).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
 ABSOLUTELY NO WARRANTY.
 
-Runs a local model as a contributing node: fetches llama.cpp, fetches the
-weights, opens a Cloudflare quick tunnel to it, registers the node with the
-shared gateway, and keeps running until you press Ctrl+C (at which point it
-deregisters cleanly). No account or signup needed for the tunnel.
-
-Requires: Python 3.8+, cloudflared
-(https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
-Nothing else -- this script fetches its own model runtime (see runtime.py) and
-its own weights. It used to require Ollama to be installed and running first,
-which made donating a machine into installing a second product: a ~1GB
-installer, a daemon with its own updater, and a private model store.
+Serves a slice of the shared model's layers on this machine. First run sets
+up a private Python environment, picks the layers the network needs most that
+fit your memory, downloads only those layers, and starts serving. Ctrl+C
+leaves cleanly. `common ask` in another terminal talks to this node's local
+API at http://127.0.0.1:11440/v1.
 
 Usage:
-    python3 join.py
-    python3 join.py --permanent   # run as a background service
-    python3 join.py --remove-permanent                   # undo the above
+    python3 join.py                      # serve a slice of the default model
+    python3 join.py --check              # can this machine join? installs nothing
+    python3 join.py --model bonsai-8b    # a different layer-network model
+    python3 join.py --permanent          # keep serving after reboots
+    python3 join.py --remove-permanent   # undo the above
 
-Joining is permissionless -- no shared password needed, anyone can
-contribute a node (see README "Scope"). The gateway hands back a
-per-node token on registration, used only to deregister that node later;
-it's held in memory for the life of this process, never typed by you.
-
-Joins the default shared Common Network gateway unless --gateway overrides
-it. It checks GitHub for a newer version of itself on startup, and again
-every 30 minutes while running — if one is found it deregisters, stops
-the tunnel, updates, and restarts cleanly (pass --no-update to disable
-both checks).
-
---permanent installs this as a real background service (LaunchAgent on
-macOS, systemd --user on Linux, a Scheduled Task on Windows) that starts
-at login and restarts automatically if it crashes — for servers or
-computers you don't want to babysit with an open terminal. Everything
-else has a sensible default — see --help.
+Joining is permissionless -- no account. Other peers reach this node through
+a Cloudflare quick tunnel (cloudflared) unless a direct path is available.
+The script checks GitHub for a newer version of itself on startup and every
+30 minutes while running (pass --no-update to skip).
 """
 from __future__ import annotations
 
@@ -133,8 +117,8 @@ TUNNEL_RATE_LIMITED_PATTERN = re.compile(r"\b1015\b|\b429\b|too many requests", 
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.4.0"
-RELEASE = "The Common Network Alpha"
+VERSION = "0.5.0"
+RELEASE = "The Common Network"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
 
@@ -1744,8 +1728,8 @@ def choose_mode(args: argparse.Namespace, supported=None) -> str:
     return "network" if (supported or layer_network_supported)() else "legacy"
 
 
-LAYER_FIRST_NOTICE = ("`common join` now joins the decentralised layer network. "
-                      "To run this machine as a whole-model gateway node like before, use `common join --legacy`.")
+LAYER_FIRST_NOTICE = ("`common join` serves a slice of the shared model on this machine. "
+                      "Leave this terminal running, then ask from another with `common ask`.")
 
 
 def announce_layer_first(marker: Path | None = None, printer=print) -> bool:
@@ -1804,14 +1788,14 @@ def main() -> None:
     parser.add_argument("--api", nargs="?", const=11440, default=None, type=int, metavar="PORT", help="With --network: also serve an OpenAI-compatible chat API on 127.0.0.1:PORT (default 11440) from the same process, so a desktop app or any OpenAI-style client can chat with the network. The client part of the model (about 1 GB for Qwen3-8B) loads in the background")
     parser.add_argument("--no-direct", action="store_true", help="With the layer network: tunnel only, never try a direct connection (peers are still found through the gateway directory)")
     parser.add_argument("--auto-direct", action="store_true", help=argparse.SUPPRESS)  # old installed services
-    parser.add_argument("--direct", action="store_true", help="With the layer network (experimental): serve over TLS on a public address and be found through a DHT, with no Cloudflare tunnel unless this machine proves unreachable. Default off; see docs/layer-network.md")
+    parser.add_argument("--direct", action="store_true", help="With the layer network (experimental): force serving over TLS on a public address, found through a DHT. A plain join already tries a direct WebRTC path and falls back to a tunnel; --no-direct skips that. See docs/layer-network.md")
     parser.add_argument("--bootstrap", action="append", default=[], metavar="HOST:PORT", help="With --direct: a DHT node to join through (repeatable)")
     parser.add_argument("--direct-port", type=int, default=None, metavar="N", help="With --direct: the TCP port to serve on (default: any free port; set it when you forward a port by hand)")
     parser.add_argument("--public-ip", metavar="IP", help="With --direct: your public IPv4, for a port you forwarded by hand")
     parser.add_argument("--external-port", type=int, metavar="N", help="With --direct: the TCP port the internet uses to reach --direct-port (default: the same)")
     parser.add_argument("--dht-port", type=int, default=None, metavar="N", help="With --direct: UDP port for the DHT (default: any)")
     parser.add_argument("--no-tunnel-fallback", action="store_true", help="With --direct: refuse to start rather than use a tunnel when this machine is not reachable")
-    parser.add_argument("--legacy", action="store_true", help="Run as a whole-model gateway node (the original network) instead of the default layer network")
+    parser.add_argument("--legacy", action="store_true", help="Retired: the old whole-model gateway. This flag no longer joins anything; run `common join` with no flags")
     parser.add_argument("--auto", action="store_true", help="Accept the network's recommended model automatically, no confirmation prompt")
     parser.add_argument("--list-catalogue", action="store_true", help="List catalogue models this machine can run, then exit")
     # The name and operator are published to the whole network (`GET /nodes`

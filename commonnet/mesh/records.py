@@ -27,7 +27,7 @@ MAX_URL_CHARS = 512
 SIGNED_FIELDS = ("v", "network", "peer", "pub", "url", "token", "window", "backend", "state", "gib", "seq", "ts")
 # Optional fields of a directly reachable peer (https://IP:PORT): `fp` is the sha256 of its TLS certificate and
 # `fpsig` the identity's signature binding it (commonnet.net.secure). canonical() already signs every key but
-# `sig`, so they are covered by the record signature; a peer that does not know them ignores them (see DIRECT.md).
+# `sig`, so they are covered by the record signature; a peer that does not know them ignores them (see docs/direct-mode.md).
 # `dht` is the UDP port of the peer's DHT node (a directly reachable peer only; the host is the one in `url`).
 # `speed` is the rough compute the peer measured at join (GFLOP/s); absent or 0 means not measured.
 OPTIONAL_FIELDS = ("fp", "fpsig", "dht", "speed")

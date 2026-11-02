@@ -1,69 +1,40 @@
 #!/usr/bin/env python3
 """COMMON. — the commons, belonging to everyone and no one.
 
-The Common Network Alpha (v0.2.0-dev).
+The Common Network (v0.5).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
 ABSOLUTELY NO WARRANTY.
 
 Usage:
-    common                         open the interactive session
-    common ask "<prompt>"          route one question through the network
-    common join                    put this machine on the commons as a node
+    common                         interactive session (type a question, or a /command)
+    common join                    serve a slice of the shared model on this machine
+    common join --check            can this machine join? checks only, installs nothing
     common join --model bonsai-8b  serve a different layer-network model
-    common serve <model>           contribute a specific model
-    common leave                   take this machine off the commons
-    common status                  this node: health, position, requests served
-    common demand                  live domain coverage gaps
-    common recommend               what specialist the network needs next
-    common recommend --machines 20 plan a whole computer lab at once
-    common peers                   connected nodes and their coverage
-    common peers --all             include machines that have left
-    common contrib                 your contribution ledger
-    common whoami                  your node identity
+    common ask "<prompt>"          ask the network (needs `common join` running here)
+    common peers                   who else is on the network right now
+    common status                  this node: health, layers, requests served
+    common leave                   take this machine off the network
     common privacy                 what the network keeps, and what it doesn't
-    common config                  settings (all local, all editable)
-    common report [note]           report a bad answer from the network
-    common reports                 reports saved on this machine, and send them
-    common test                    benchmark every node + routing, log to jsonl
-    common update                  check for and install CLI updates (--force-update: even from a git checkout)
-    common help [verb]             help, per verb
+    common report [note]           an answer was bad: send the evidence (only after you approve it)
+    common update                  check for and install CLI updates
+    common help                    this text
 
-A question is answered by the best available donated machine — `common ask`
-shows you which machine answered, and why it was chosen. Composition (several
-specialists answering at once, combined into one reply) is built but **off by
-default in Alpha**: the network is a donation platform first and does not claim
-to compose a better answer until testing/compose-test has proven it against
-live models. `--compose` opts a single request in; `-v` explains the routing
-either way.
+`common join` keeps running in its terminal. `common ask` talks to that node's
+local API at http://127.0.0.1:11440/v1, so a machine needs join running before
+it can ask. Greedy asks (`temperature` 0, the default) use Common Flash
+speculative decoding.
 
-`common test` sweeps every healthy node with a fixed probe set, measures
-time-to-first-token / total latency / approximate tok-s per node, checks
-whether routing lands each domain on a node tagged for it, and writes every
-measurement to ~/.common-network/tests/<run>.jsonl. Run it on each machine
-and merge the files -- each records its own client-side view of the network.
-Flags: --full (3 repeats), --repeats N, --nodes-only, --routing-only, --out.
+This CLI checks GitHub for a newer version of itself on every run and updates
+in place (pass --no-update to skip). It never overwrites a copy that lives in
+a git checkout -- a clone updates with `git pull`. Pass --force-update (or
+COMMON_FORCE_UPDATE=1) to override. An installed copy keeps a .bak of the
+version it replaced.
 
-This CLI checks GitHub for a newer version of itself on
-every run and updates in place (pass --no-update to skip). It never overwrites
-a copy that lives in a git checkout -- a clone updates with `git pull`, and
-clobbering someone's working tree is not this function's job. Pass
---force-update (or COMMON_FORCE_UPDATE=1) to override, which discards local
-changes. An installed copy keeps a .bak of the version it replaced.
-
-When an answer is wrong, `common report` says so. It attaches the question and
-the answer you just had, plus the routing the gateway recorded (which node
-answered, the topology, the timings) and the decision id, so an operator can
-open the report against the exact request. `--reason` picks from a closed list
-(made-up, wrong, off-topic, truncated, refused, format, slow, other); a note is
-optional but one of the two is required. Nothing is sent until you have seen a
-full preview naming the gateway -- that preview, and the confirmation, are the
-whole of the privacy story: you are sending your own words to the gateway, whose
-operator becomes a second reader of a question the answering machine could
-already read. Reports are saved locally first and sent second, so a gateway that
-is unreachable loses nothing; `common reports --retry` finishes the job, and
-`common reports` lists what is on this machine.
+Retired commands from the old whole-model gateway (`demand`, `recommend`,
+`contrib`, `serve`, `test`, `--legacy`, `--compose`) still parse so old scripts
+get a clear message rather than a crash. They are not how the network works.
 """
 import argparse
 import json
@@ -109,8 +80,8 @@ except ImportError:  # pragma: no cover - Windows
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
-VERSION = "0.4.0"
-RELEASE = "The Common Network Alpha"
+VERSION = "0.5.0"
+RELEASE = "The Common Network"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/common/common.py"
@@ -2677,7 +2648,7 @@ def cmd_whoami(as_json: bool) -> None:
     print(dim(f"node id   {identity['node_id']}"))
     print()
     print(comment("this is a name-based identity, not a cryptographic keypair yet."))
-    print(comment("no account, nothing to log into -- see TODO(v0.4) in the design doc."))
+    print(comment("no account, nothing to log into. Identity is this machine's local node file."))
 
 
 def _cmd_contrib_gateway(gateway: str, as_json: bool) -> None:
@@ -3312,8 +3283,8 @@ def _repl_args(line: str) -> list[str]:
 
 def build_repl_help() -> str:
     return dim(
-        "/ask (implicit: just type)  /join  /serve  /leave  /status  /update\n"
-        "/demand  /recommend  /peers  /contrib  /whoami  /privacy  /config  /test  /model  /local  /report  /reports  /help  /exit"
+        "/ask (implicit: just type)  /status  /peers  /privacy  /whoami  /report  /reports\n"
+        "/update  /help  /exit     (join and leave belong in their own terminal: `common join`)"
     )
 
 
@@ -3420,7 +3391,7 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="join: a layer-network model to serve (qwen3-8b, bonsai-8b, bonsai-27b, bonsai-2-9b, bonsai-2-27b), same as --network NAME")
     parser.add_argument("--auto", action="store_true")
     parser.add_argument("--local", action="store_true")
-    parser.add_argument("--legacy", action="store_true", help="ask/status/peers/recommend/demand/contrib/leave: use the old gateway instead of the layer network (same as COMMON_LEGACY_GATEWAY=1)")
+    parser.add_argument("--legacy", action="store_true", help="Retired: talk to the old whole-model gateway (same as COMMON_LEGACY_GATEWAY=1). That gateway is gone; omit this flag")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")

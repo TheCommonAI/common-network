@@ -9,7 +9,7 @@ certificate, so trust comes from the peer's signed record instead:
   {fp, fp_sig}. A client that has already verified the record's own signature (records.verify_record)
   calls verify_binding() to learn that the holder of the identity key vouches for this certificate.
   (The proposed SIGNED_FIELDS change, which would put fp inside the record's own signature, is in
-  DIRECT.md. Until then fp_sig carries the binding by itself.)
+  docs/direct-mode.md. Until then fp_sig carries the binding by itself.)
 - client_ssl_context(fp) refuses any server whose certificate does not hash to fp. No CA, no hostname
   check, no expiry check: the pin is the whole decision. A mismatch raises PinMismatch.
 - server_ssl_context(cert, key) is the matching server side (TLS 1.2 or newer).

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Chat with the Common Network from your terminal.
 
-The Common Network Alpha (v0.1.13).
+The Common Network (v0.5).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -11,10 +11,9 @@ Usage:
     common-chat                    # interactive chat
     common-chat "your question"    # one-shot
 
-Every reply is followed by a line showing which node answered and where the
-time went — routing, first token, total, kept as three numbers because they
-answer different questions — plus what was actually retained. Transparency is
-a feature of the commons, not an afterthought.
+Needs `common join` running on this machine. Talks to that node's local API
+at http://127.0.0.1:11440/v1, not to a central gateway. Every reply is
+followed by a line showing which peers answered and where the time went.
 
 On every run it checks GitHub for a newer version of itself and updates
 in place (pass --no-update to skip).
@@ -32,8 +31,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-VERSION = "0.1.13"
-RELEASE = "The Common Network Alpha"
+VERSION = "0.5.0"
+RELEASE = "The Common Network"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/chat/chat.py"

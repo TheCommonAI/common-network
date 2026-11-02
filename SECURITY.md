@@ -1,12 +1,51 @@
-# Security notes — The Common Network Alpha (v0.1.13)
+# Security notes — Common Network v0.5
 
-Common is **permissionless by design**: anyone can register a node, and
-anyone can send requests. That is the thesis — but it means the security
-model has to be stated, not assumed. This document says what an unauthenticated
-stranger can and cannot do, what an operator of a *publicly reachable* gateway
-should do, and what is deliberately out of scope for Alpha.
+Common is **permissionless by design**: anyone can join as a peer, and anyone
+with a running node can ask the network. That is the thesis — but it means the
+security model has to be stated, not assumed.
 
-## What a stranger can do (by design)
+## The layer network (current)
+
+- **Join is open.** `common join` makes this machine a peer. There is no
+  account, no allowlist, and no contribution gate on the layer network.
+- **The production gateway does not route prompts.** `gateway/` is a signpost:
+  `/manifest`, `/seeds`, and a rendezvous directory (`POST /announce`,
+  `GET /directory`, `POST /check`). Readers verify every record's signature, so
+  the directory does not have to be trusted. Everything else returns 410 Gone.
+- **A peer's block-server token is published** in its signed gossip record.
+  Anyone who can see the mesh can send that peer work.
+- **Peers see activations** (hidden states). Those reveal a lot about the
+  text. Do not send private prompts on a public network. `--local-front` keeps
+  prompt *tokens* on your machine; peers still receive hidden states, which are
+  not encrypted.
+- **Nothing proves a peer computed honestly.** Treat the network as
+  cooperative, like early Petals.
+- **`common ask` talks to this machine.** The local API is
+  `http://127.0.0.1:11440/v1`. The prompt then travels across the peer chain as
+  token IDs (or as hidden states with `--local-front`). Direct/WebRTC links use
+  DTLS and the Cloudflare tunnel is HTTPS; neither hides activations from the
+  peers that process them.
+
+Full honest limits are also in the [README](README.md). How a request is
+shaped: [docs/token-id-chain.md](docs/token-id-chain.md). Direct-mode TLS
+pinning: [docs/direct-mode.md](docs/direct-mode.md).
+
+## Reporting a problem
+
+Open a private GitHub security advisory on this repository (Security tab →
+"Report a vulnerability") rather than a public issue. If you can't, a plain
+issue titled "security" with no reproduction details works — we'll follow up
+for the details privately.
+
+## Retired v0.1 gateway (historical)
+
+The notes below describe the **whole-model-per-node gateway** (registry,
+specialist routing, contribution gate, admin dashboard). That system has been
+retired; those endpoints return 410 Gone. The findings and fixes are kept so
+the history is not lost. See
+[docs/retiring-the-old-network.md](docs/retiring-the-old-network.md).
+
+### What a stranger could do (by design)
 
 - Register a node (it must be reachable, and it will be health-checked).
 - Send `POST /v1/chat/completions` requests and use the network's compute.
@@ -32,7 +71,7 @@ they do not have.
   passive access to every request; it applies when routing selects their node
   (including panel or fallback use).
 
-## What a stranger cannot do
+### What a stranger could not do
 
 Android and iOS contributors use an authenticated outbound WebSocket, not a
 public endpoint. The node token is sent in the upgrade header and remains
@@ -89,7 +128,7 @@ current model formats are described in [docs/bonsai-networks.md](docs/bonsai-net
   first. Reports expire after 90 days and the endpoint is capped at 100 rows
   per read. Telemetry is a separate route and remains conversation-free.
 
-## Running a public gateway
+### Running a public v0.1 gateway
 
 The shipped defaults are the public posture: contribution-gated
 (`REQUIRE_CONTRIBUTION=true`) and rate-limited
@@ -122,7 +161,7 @@ to a public deployment**. On a public gateway:
    repo stays the single source of truth and the domain can never serve
    something the repo doesn't contain.
 
-## Known limits, stated rather than papered over
+### Known limits of the v0.1 gateway
 
 - **A contributor's endpoint is a bearer-authenticated worker — not the model
   runtime.** Two separate ports, and the distinction is the whole of this
@@ -181,14 +220,7 @@ to a public deployment**. On a public gateway:
   not a control panel to hand around. It is read-only: nothing on it changes
   the network.
 
-## Reporting a problem
-
-Open a private GitHub security advisory on this repository (Security tab →
-"Report a vulnerability") rather than a public issue. If you can't, a plain
-issue titled "security" with no reproduction details works — we'll follow up
-for the details privately.
-
-## History
+## History of the v0.1 gateway
 
 - 2026-10-17: `POST /client/reports` began accepting an `exchange` — the
   question and answer a user reports — and `GET /admin/client-reports`
