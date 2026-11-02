@@ -64,6 +64,13 @@ class Announce(unittest.TestCase):
         self.assertEqual([r["peer"] for r in got], [a.peer])
         self.assertEqual(self.c.get("/directory", params={"network": "nope"}).json(), [])
 
+    def test_a_v05_record_with_measured_speed_is_listed(self):
+        # v0.5 peers sign a `speed` field; a gateway that refused it listed no v0.5 peer at all.
+        p = Peer()
+        self.assertEqual(self.post(p.record(speed=946.67)).json(), {"ok": True})
+        self.assertEqual(self.post(Peer().record(speed=-1)).status_code, 400)
+        self.assertEqual(self.post(Peer().record(speed="fast")).status_code, 400)
+
     def test_bad_signature_and_tampering_are_rejected(self):
         p = Peer()
         rec = p.record()

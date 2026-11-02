@@ -37,7 +37,7 @@ CHECK_PER_MIN = 10
 CHECK_TIMEOUT = 3.0
 STATES = ("loading", "up", "leaving")
 SIGNED = ("v", "network", "peer", "pub", "url", "token", "window", "backend", "state", "gib", "seq", "ts")
-OPTIONAL = ("fp", "fpsig", "dht")
+OPTIONAL = ("fp", "fpsig", "dht", "speed")   # speed: measured GFLOP/s, added in v0.5
 BIND = b"commonnet-tls-cert-v1\n"
 
 router = APIRouter()
@@ -118,6 +118,9 @@ def verify(rec) -> str | None:
             return "malformed"
         if "dht" in rec and (type(rec["dht"]) is not int or not 1 <= rec["dht"] <= 65535):
             return "bad dht"
+        if "speed" in rec and (isinstance(rec["speed"], bool) or not isinstance(rec["speed"], (int, float))
+                               or not 0 <= rec["speed"] < float("inf")):
+            return "bad speed"
         pub = _b64d(rec["pub"])
         if len(pub) != 32 or hashlib.sha256(pub).hexdigest()[:32] != rec["peer"]:
             return "peer does not match key"

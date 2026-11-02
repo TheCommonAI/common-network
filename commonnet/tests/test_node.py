@@ -185,6 +185,23 @@ class DirectoryListing(NodeCase):
         self.assertEqual(logs[1], "listed on the directory again: new peers can find this node")
         self.assertIn("could not list this node", logs[2])
 
+    def test_a_gateway_that_refuses_speed_still_lists_the_node_without_it(self):
+        # The deployed gateway predates `speed` and answered every v0.5 record with "unknown field".
+        from commonnet.mesh import records as rec
+        logs, sent = [], []
+        n = self._node(18977, logs)
+        full = n.identity.sign_record({"network": "net", "url": "http://x", "token": "t", "window": [0, 4],
+                                       "backend": "stub", "state": "up", "gib": 1.0, "speed": 12.5})
+        with mock.patch.object(node.mesh_directory, "announce",
+                               side_effect=lambda gw, r: sent.append(r) or "speed" not in r):
+            n._announce_to_directory(full)
+        self.assertEqual(len(sent), 2)
+        self.assertNotIn("speed", sent[1])
+        self.assertEqual({k: v for k, v in sent[1].items() if k != "sig"},
+                         {k: v for k, v in full.items() if k not in ("sig", "speed")})
+        self.assertTrue(rec.verify_record(sent[1]))
+        self.assertEqual(logs, ["listed on the directory: new peers can find this node"])
+
     def test_a_node_with_no_directory_says_nothing_about_one(self):
         logs = []
         n = self._node(18976, logs, gateway=None)
