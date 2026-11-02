@@ -183,6 +183,8 @@ async def announce(request: Request):
             if sum(1 for v in _records.values() if v["src"] == ip) >= MAX_PER_SOURCE:
                 return JSONResponse({"error": "too many peers from one address"}, status_code=429)
         _records[key] = {"rec": rec, "at": now, "src": ip}
+    from .dashboard import remember_directory
+    remember_directory(rec, now)
     return {"ok": True}
 
 

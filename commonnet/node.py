@@ -440,6 +440,9 @@ class Node:
         self._api_server = None
         self._api_error: str | None = None
         self._route_was_ready = None
+        from commonnet.metrics import Metrics
+        self.metrics = Metrics()
+        self._dashboard = None
         self.window: tuple[int, int] | None = None
         self.url: str | None = None
         self.server: BlockServer | None = None
@@ -553,6 +556,10 @@ class Node:
     # -- life cycle ----------------------------------------------------------------------------
 
     def start(self) -> "Node":
+        if self.gateway and os.environ.get("COMMONNET_TELEMETRY", "1").lower() not in ("0", "false", "off", "no"):
+            from commonnet.metrics import Reporter
+            self._dashboard = Reporter(self.identity, self.gateway, self._dashboard_snapshot, self.metrics)
+            self._dashboard.start()
         self.log(f"peer {self.identity.peer}: {self.hw.name}, offering {self.hw.gib:.1f} GiB on {self.hw.backend}")
         if self._api_port is not None:
             self._api = {"port": self._api_port, "ready": False}
@@ -600,6 +607,8 @@ class Node:
             if self.phase != "error":
                 self.phase = "leaving"
         self.write_status()
+        if self._dashboard is not None:
+            self._dashboard.stop()
         try:
             self._announce(self.publish())
             self._push_to_peers()
@@ -622,6 +631,12 @@ class Node:
 
     def request_leave(self) -> None:
         self._leave.set()
+
+    def _dashboard_snapshot(self):
+        with self._lock:
+            return {"network": self.manifest.id, "phase": self.phase, "backend": self.hw.backend,
+                    "gib": self.hw.gib, "layers": list(self.window) if self.state == "up" and self.window else None,
+                    "assigned_layers": list(self._status_window) if self._status_window else None}
 
     def wait(self) -> None:
         self._leave.wait()
@@ -1109,7 +1124,7 @@ class Node:
                               exchange=lambda table, url, timeout: None, now=self.clock)
         lazy = serve.LazyBackend(network)
         try:
-            server = serve.make_server(lazy, self._api_port)
+            server = serve.make_server(lazy, self._api_port, metrics=self.metrics)
         except OSError as e:
             self._api_error = friendly(f"the chat API could not start on port {self._api_port} ({e.strerror or e})")
             self.log(self._api_error)

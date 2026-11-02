@@ -123,6 +123,13 @@ class Identity:
         record["sig"] = _b64e(self._key.sign(canonical(record)))
         return record
 
+    def sign_dashboard(self, fields: dict) -> dict:
+        """Sign text-free telemetry under a separate domain from peer-discovery records."""
+        from commonnet.metrics import BIND
+        record = {**fields, "peer": self.peer, "pub": self.pub_b64}
+        record["sig"] = _b64e(self._key.sign(BIND + canonical(record)))
+        return record
+
 
 def check_shape(record: dict) -> None:
     """Raises RecordError unless every field has the right type and size. Does not check the signature."""

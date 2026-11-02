@@ -20,6 +20,11 @@ security model has to be stated, not assumed.
   not encrypted.
 - **Nothing proves a peer computed honestly.** Treat the network as
   cooperative, like early Petals.
+- **Public dashboard reports contain numeric observations.** Updated nodes send signed state and
+  aggregate chat timings to the directory gateway. No prompt or answer text is sent in those reports.
+  The website API strips connection tokens, URLs, keys, and IP addresses. Signatures identify the
+  reporting peer; they do not attest to its performance claims. Set `COMMONNET_TELEMETRY=0` to disable
+  this reporting. See [the dashboard API](docs/network-dashboard.md) for sampling and retention.
 - **`common ask` talks to this machine.** The local API is
   `http://127.0.0.1:11440/v1`. The prompt then travels across the peer chain as
   token IDs (or as hidden states with `--local-front`). Direct/WebRTC links use
