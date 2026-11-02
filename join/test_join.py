@@ -285,7 +285,7 @@ class _Body:
 
 def _fake_fetch(bodies):
     def urlopen(url, timeout=None):
-        body = bodies[url.rsplit("/", 1)[-1]]
+        body = bodies[url.split("?")[0].rsplit("/", 1)[-1]]
         if isinstance(body, Exception):
             raise body
         return _Body(body)

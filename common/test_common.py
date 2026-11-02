@@ -30,6 +30,7 @@ import importlib.util
 import io
 import json
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -760,6 +761,18 @@ check("and so are the modules it imports",
 section("cmd_update")
 
 # Test: already up to date (remote == local)
+def _update_archive(common_source=None):
+    data = io.BytesIO()
+    root = Path(__file__).resolve().parents[1]
+    with tarfile.open(fileobj=data, mode="w:gz") as archive:
+        for name, source in common.LAUNCHER_FILES.items():
+            body = common_source if name == "common.py" and common_source is not None else (root / source).read_bytes()
+            info = tarfile.TarInfo("common-network-main/" + source)
+            info.size = len(body)
+            archive.addfile(info, io.BytesIO(body))
+    return data.getvalue()
+
+
 def _make_update_server(content: bytes, status: int = 200):
     class _Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -776,18 +789,22 @@ def _make_update_server(content: bytes, status: int = 200):
     return server
 
 # Save originals
-_orig_update_url = common.UPDATE_URL
+_orig_update_url = common.UPDATE_BUNDLE_URL
 _orig_in_git = common._in_git_work_tree
 
 # Test already up to date
-_update_server = _make_update_server(Path(__file__).parent.joinpath("common.py").read_bytes())
-common.UPDATE_URL = f"http://127.0.0.1:{_update_server.server_address[1]}/common.py"
+_update_server = _make_update_server(_update_archive())
+_update_home = _SANDBOX / "complete-install"
+_update_home.mkdir()
+for _name, _source in common.LAUNCHER_FILES.items():
+    (_update_home / _name).write_bytes((Path(__file__).resolve().parents[1] / _source).read_bytes())
+common.UPDATE_BUNDLE_URL = f"http://127.0.0.1:{_update_server.server_address[1]}/common.py"
 common._in_git_work_tree = lambda path: False
 
 _update_out = io.StringIO()
 _update_exit = None
 try:
-    with contextlib.redirect_stdout(_update_out), contextlib.redirect_stderr(io.StringIO()):
+    with patch.object(common, "__file__", str(_update_home / "common.py")), contextlib.redirect_stdout(_update_out), contextlib.redirect_stderr(io.StringIO()):
         common.cmd_update(force=False)
 except SystemExit as e:
     _update_exit = e.code
@@ -815,7 +832,7 @@ check("cmd_update does not exit with error for git checkout", _update_exit2, Non
 
 # Test network error
 _error_server = _make_update_server(b"", status=404)
-common.UPDATE_URL = f"http://127.0.0.1:{_error_server.server_address[1]}/common.py"
+common.UPDATE_BUNDLE_URL = f"http://127.0.0.1:{_error_server.server_address[1]}/common.py"
 common._in_git_work_tree = lambda path: False
 
 _update_out3 = io.StringIO()
@@ -832,8 +849,8 @@ check("cmd_update exits nonzero on HTTP error", _update_exit3, 1)
 
 # A real update: the installed copy is replaced and the old one is kept as .bak.
 _new_source = b'VERSION = "9.9.9"\n'
-_update_server = _make_update_server(_new_source)
-common.UPDATE_URL = f"http://127.0.0.1:{_update_server.server_address[1]}/common.py"
+_update_server = _make_update_server(_update_archive(_new_source))
+common.UPDATE_BUNDLE_URL = f"http://127.0.0.1:{_update_server.server_address[1]}/common.py"
 common._in_git_work_tree = lambda path: False
 _installed = _SANDBOX / "installed-common.py"
 _installed.write_bytes(b'VERSION = "0.0.1"\n')
@@ -876,7 +893,8 @@ for _argv, _q, _t, _j in ((["common", "ask", "--temperature", "0.7", "hi there"]
     check(f"`{' '.join(_argv[1:])}` json", _a.args[5], _j)
 
 # Restore originals
-common.UPDATE_URL = _orig_update_url
+common.UPDATE_BUNDLE_URL = _orig_update_url
+common._LAUNCHER_CURRENT = False
 common._in_git_work_tree = _orig_in_git
 
 

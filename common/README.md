@@ -23,6 +23,13 @@ default) use Common Flash speculative decoding.
 
 Short alias: `cmn` does the same thing as `common`.
 
+Installed copies check the complete launcher on startup. `common update` checks the same files
+explicitly, even when the version number has not changed, and reports a build ID. Downloads are
+validated before any files are replaced; failed installs restore the previous files. Restart
+`common join` after updating a running node. Its original shaded Common ASCII banner appears above
+the overall progress percentage, with setup details behind **d**. Model and network code are fetched
+when joining; `COMMONNET_SRC` and `COMMONNET_REF` still select a custom checkout or pinned network.
+
 This folder is fetched by path from `main` by installed clients, so it stays
 here.
 

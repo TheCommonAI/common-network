@@ -26,8 +26,8 @@ local API at http://127.0.0.1:11440/v1, so a machine needs join running before
 it can ask. Greedy asks (`temperature` 0, the default) use Common Flash
 speculative decoding.
 
-This CLI checks GitHub for a newer version of itself on every run and updates
-in place (pass --no-update to skip). It never overwrites a copy that lives in
+This CLI checks GitHub for newer launcher files on every run and updates
+them together (pass --no-update to skip). It never overwrites a copy that lives in
 a git checkout -- a clone updates with `git pull`. Pass --force-update (or
 COMMON_FORCE_UPDATE=1) to override. An installed copy keeps a .bak of the
 version it replaced.
@@ -37,6 +37,10 @@ Retired commands from the old whole-model gateway (`demand`, `recommend`,
 get a clear message rather than a crash. They are not how the network works.
 """
 import argparse
+import hashlib
+import http.client
+import importlib.util
+import io
 import json
 import os
 import platform
@@ -49,6 +53,7 @@ import socket
 import statistics
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -364,137 +369,149 @@ def _in_git_work_tree(path: str) -> bool:
     return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
+# One archive supplies a consistent launcher, even when only join.py or layers.py changed.
+UPDATE_BUNDLE_URL = f"https://codeload.github.com/{REPO}/tar.gz/refs/heads/main"
+LAUNCHER_FILES = {
+    "common.py": "common/common.py",
+    "join.py": "join/join.py",
+    "worker.py": "join/worker.py",
+    "runtime.py": "join/runtime.py",
+    "layers.py": "join/layers.py",
+    "chat.py": "chat/chat.py",
+}
+_LAUNCHER_CURRENT = False
+
+
+def _fetch_update_bundle() -> dict[str, bytes]:
+    # Branch URLs can remain cached after a merge. A unique query bypasses that cache.
+    separator = "&" if "?" in UPDATE_BUNDLE_URL else "?"
+    request = urllib.request.Request(
+        f"{UPDATE_BUNDLE_URL}{separator}common_update={time.time_ns()}",
+        headers={"Cache-Control": "no-cache", "User-Agent": "common-update"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            archive = response.read()
+    except http.client.HTTPException as error:
+        raise ValueError(f"interrupted launcher download: {error}") from error
+    wanted = {source: name for name, source in LAUNCHER_FILES.items()}
+    bundle = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+            for member in tar.getmembers():
+                # Only read the six named regular files; never extract archive paths.
+                source = member.name.partition("/")[2]
+                if source not in wanted or not member.isfile():
+                    continue
+                data = tar.extractfile(member).read()
+                if not data.strip():
+                    raise ValueError(f"empty update file: {source}")
+                compile(data, source, "exec")
+                bundle[wanted[source]] = data
+    except (tarfile.TarError, SyntaxError) as error:
+        raise ValueError(f"invalid launcher update: {error}") from error
+    missing = set(LAUNCHER_FILES) - bundle.keys()
+    if missing:
+        raise ValueError("incomplete launcher update: missing " + ", ".join(sorted(missing)))
+    return bundle
+
+
+def _install_update_bundle(bundle: dict[str, bytes]) -> list[str]:
+    """Stage every changed file first, then replace; restore originals on a failed swap."""
+    current = Path(__file__).resolve()
+    checkout = current.parent.parent
+    if (checkout / ".git").exists() and current.parent.name == "common":
+        targets = {name: checkout / LAUNCHER_FILES[name] for name in bundle}
+    else:
+        targets = {name: current if name == "common.py" else current.parent / name for name in bundle}
+    changes = [name for name, path in targets.items() if not path.exists() or path.read_bytes() != bundle[name]]
+    if not changes:
+        return []
+    with tempfile.TemporaryDirectory(prefix=".launcher-update-", dir=current.parent) as tmp:
+        stage = Path(tmp)
+        for name in changes:
+            new = stage / name
+            new.write_bytes(bundle[name])
+            if targets[name].exists():
+                os.chmod(new, targets[name].stat().st_mode & 0o777)
+        replaced = []
+        try:
+            for name in changes:
+                path = targets[name]
+                original = stage / (name + ".old")
+                if path.exists():
+                    os.replace(path, original)
+                replaced.append(name)
+                os.replace(stage / name, path)
+        except OSError:
+            for name in reversed(replaced):
+                path = targets[name]
+                original = stage / (name + ".old")
+                if original.exists():
+                    os.replace(original, path)
+                elif path.exists():
+                    path.unlink()
+            raise
+        for name in changes:
+            original = stage / (name + ".old")
+            if original.exists():
+                try:
+                    os.replace(original, str(targets[name]) + ".bak")
+                except OSError:
+                    pass
+            try:
+                Path(importlib.util.cache_from_source(str(targets[name]))).unlink(missing_ok=True)
+            except (OSError, NotImplementedError):
+                pass
+    return changes
+
+
+def _bundle_label(bundle: dict[str, bytes]) -> str:
+    version = re.search(rb'^VERSION = "([^"\n]+)"', bundle["common.py"], re.MULTILINE)
+    version = version[1].decode() if version else VERSION
+    digest = hashlib.sha256()
+    for name, data in sorted(bundle.items()):
+        digest.update(name.encode() + b"\0" + data)
+    return f"v{version}, build {digest.hexdigest()[:12]}"
+
+
 def self_update(force: bool = False) -> None:
-    try:
-        with urllib.request.urlopen(UPDATE_URL, timeout=5) as resp:
-            remote = resp.read()
-    except urllib.error.HTTPError as e:
-        # Being offline is normal and stays silent. A 401/403/404 is not
-        # transient: the update channel itself is broken -- the repo is
-        # private, was renamed, or the path moved -- and every machine running
-        # this CLI is frozen at whatever version it installed.
-        #
-        # This used to be swallowed. HTTPError is a subclass of URLError, so
-        # the single `except (URLError, socket.timeout): return` below caught
-        # 404s too and returned silently, which made a permanently broken
-        # update channel indistinguishable from a working one. That is exactly
-        # how it went unnoticed on every installed copy at once.
-        if e.code in (401, 403, 404):
-            print(dim(f"note: updates unreachable ({e.code}) — running the installed version."),
-                  file=sys.stderr)
-            print(comment(f"source: {UPDATE_URL}"), file=sys.stderr)
-        return
-    except (urllib.error.URLError, socket.timeout):
-        return  # offline — carry on quietly with the version already here
-    if not remote.strip():
-        return
+    global _LAUNCHER_CURRENT
     local_path = os.path.abspath(__file__)
-    try:
-        with open(local_path, "rb") as f:
-            local = f.read()
-    except OSError:
-        return
-    if remote == local:
-        return
-
-    # Never overwrite a checkout. This is the case that lost eight edits in one
-    # run: a local copy that differed from upstream was replaced silently, with
-    # no warning and no backup, the first time the CLI was run from the source
-    # tree. A checkout is managed by git -- `git pull` is how it updates -- and
-    # this function's job is to keep *deployed* copies current.
     if _in_git_work_tree(local_path) and not force:
-        print(dim("note: this is a git checkout, not an installed copy — not "
-                  "self-updating."), file=sys.stderr)
-        print(comment("your working tree differs from the published version. "
-                      "update it with `git pull`."), file=sys.stderr)
-        print(comment("to update anyway (discarding local changes): "
-                      "COMMON_FORCE_UPDATE=1"), file=sys.stderr)
         return
-
-    print(dim("updating common to the latest version..."))
-    # Keep the outgoing copy. The guard above covers the checkout case, but an
-    # *installed* copy can still be hand-edited by the person who installed it,
-    # and a deployment that silently eats a local fix is the same bug in a
-    # different directory.
-    backup_path = local_path + ".bak"
     try:
-        with open(backup_path, "wb") as f:
-            f.write(local)
-    except OSError:
-        pass  # a failed backup must not block the update
-    try:
-        _write_bytes_safely(Path(local_path), remote)
-    except OSError as e:
-        print(dim(f"warning: couldn't self-update ({e}); the disk may be full. Continuing with the installed copy."))
+        bundle = _fetch_update_bundle()
+        changed = _install_update_bundle(bundle)
+    except (OSError, ValueError) as error:
+        print(dim(f"note: couldn't check or install launcher updates ({error}); using the installed copy."), file=sys.stderr)
         return
-    _exec([sys.executable, local_path] + sys.argv[1:])
+    _LAUNCHER_CURRENT = True
+    if "common.py" in changed:
+        _exec([sys.executable, local_path] + sys.argv[1:])
 
 
 def cmd_update(force: bool = False) -> None:
-    """Explicit update command: check for and apply CLI updates with user feedback."""
+    """Refresh all launcher files, including same-version join and UI changes."""
+    global _LAUNCHER_CURRENT
     local_path = os.path.abspath(__file__)
-
     if _in_git_work_tree(local_path) and not force:
         print(dim("This is a git checkout, not an installed copy."))
         print(dim("Update with `git pull`, or pass --force-update to override."))
         return
-
-    print(dim("Checking for updates..."))
+    print(dim("Checking for launcher updates..."))
     try:
-        with urllib.request.urlopen(UPDATE_URL, timeout=10) as resp:
-            remote = resp.read()
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403, 404):
-            print(red(f"✗ Update channel unreachable ({e.code})"))
-            print(comment(f"source: {UPDATE_URL}"))
-        else:
-            print(red(f"✗ HTTP error: {e.code}"))
+        bundle = _fetch_update_bundle()
+        changed = _install_update_bundle(bundle)
+    except (OSError, ValueError) as error:
+        print(red(f"✗ Could not update the launcher: {error}"), file=sys.stderr)
         sys.exit(1)
-    except (urllib.error.URLError, socket.timeout):
-        print(red("✗ Could not reach update server (offline?)"))
-        sys.exit(1)
-
-    if not remote.strip():
-        print(red("✗ Empty response from update server"))
-        sys.exit(1)
-
-    try:
-        with open(local_path, "rb") as f:
-            local = f.read()
-    except OSError as e:
-        print(red(f"✗ Could not read local file: {e}"))
-        sys.exit(1)
-
-    if remote == local:
-        print(blue("✓") + f" Already up to date (v{VERSION})")
-        return
-
-    remote_version = None
-    for line in remote.decode("utf-8", errors="replace").splitlines():
-        if line.startswith("VERSION = "):
-            try:
-                remote_version = line.split('"')[1]
-            except (IndexError, ValueError):
-                pass
-            break
-
-    print(dim(f"Updating from v{VERSION} to v{remote_version or 'latest'}..."))
-    backup_path = local_path + ".bak"
-    try:
-        with open(backup_path, "wb") as f:
-            f.write(local)
-        print(dim(f"Backup saved to {backup_path}"))
-    except OSError:
-        pass
-
-    try:
-        with open(local_path, "wb") as f:
-            f.write(remote)
-    except OSError as e:
-        print(red(f"✗ Could not write update: {e}"))
-        sys.exit(1)
-
-    print(blue("✓") + f" Updated to v{remote_version or 'latest'}")
+    _LAUNCHER_CURRENT = True
+    label = _bundle_label(bundle)
+    if changed:
+        print(blue("✓") + f" Updated launcher ({label}): " + ", ".join(changed))
+        print(dim("Run `common join` again to use the update. Running nodes keep their current code."))
+    else:
+        print(blue("✓") + f" Launcher already up to date ({label})")
 
 
 # --- Identity ------------------------------------------------------------
@@ -2750,35 +2767,21 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
                 sys.exit(1)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((bundle / name).read_bytes())
-    else:
-        # Always fetch the current version before delegating -- a stale local
-        # copy's own self-update runs *after* argparse, so a new flag this CLI
-        # relies on (e.g. --auto) would crash before join.py ever got the chance
-        # to update itself. Found exactly this bug in testing.
+    elif not _LAUNCHER_CURRENT:
         try:
-            with urllib.request.urlopen(JOIN_SCRIPT_URL, timeout=10) as resp:
-                remote = resp.read()
-            join_py.parent.mkdir(parents=True, exist_ok=True)
-            _write_bytes_safely(join_py, remote)
-        except (urllib.error.URLError, socket.timeout) as e:
+            _install_update_bundle(_fetch_update_bundle())
+        except (OSError, ValueError) as error:
             if not join_py.exists():
-                print(red(f"✗ couldn't fetch the join script: {e}"), file=sys.stderr)
+                print(red(f"✗ couldn't install the join launcher: {error}"), file=sys.stderr)
                 sys.exit(1)
-            # Offline but we already have a copy -- use it as-is.
-        except OSError as e:
-            # disk full or read-only: keep the installed copy rather than a traceback
-            print(dim(f"warning: couldn't update the join script ({e}); the disk may be full. "
-                      f"Using the installed copy. Free some space on this drive to get updates."), file=sys.stderr)
-            if not join_py.exists():
-                print(red("✗ and there is no installed copy to use. Free some disk space and run the command again."), file=sys.stderr)
-                sys.exit(1)
+            print(dim(f"warning: couldn't refresh the join launcher ({error}); using the installed copy."), file=sys.stderr)
 
     if verb == "serve":
         print(dim(f"putting {extra_model} out to graze on the commons.\n"))
 
     argv = [sys.executable, str(join_py)]
     argv += ["--gateway", gateway]
-    if args.no_update or join_py == checkout_join:
+    if args.no_update or _LAUNCHER_CURRENT or join_py == checkout_join:
         argv += ["--no-update"]
     if extra_model:
         argv += ["--model", extra_model, "--auto"]
