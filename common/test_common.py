@@ -73,6 +73,25 @@ common.LAST_EXCHANGE_PATH = _SANDBOX / "last-exchange.json"
 
 DEAD_GATEWAY = "http://127.0.0.1:1"  # refuses instantly; no timeout to wait on
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _version_assignment(path: Path) -> str:
+    for line in path.read_text().splitlines():
+        if line.startswith("VERSION = "):
+            return line.split("=", 1)[1].strip().strip('"')
+    raise AssertionError(f"no VERSION in {path}")
+
+
+section("user-facing version numbers agree")
+check("this CLI is 0.4.0", common.VERSION, "0.4.0")
+check("join.py is the same version", _version_assignment(ROOT / "join" / "join.py"), common.VERSION)
+check("chat.py is the same version", _version_assignment(ROOT / "chat" / "chat.py"), common.VERSION)
+check("the README names that version", f"**v{common.VERSION.rsplit('.', 1)[0]}**" in (ROOT / "README.md").read_text(), True)
+check("install.sh names that version", f"(v{common.VERSION.rsplit('.', 1)[0]})" in (ROOT / "install.sh").read_text(), True)
+check("install.ps1 names that version", f"(v{common.VERSION.rsplit('.', 1)[0]})" in (ROOT / "install.ps1").read_text(), True)
+check("help names that version", f"(v{common.VERSION.rsplit('.', 1)[0]})" in common.__doc__, True)
+
 STASH = {
     "schema": 1,
     "created_unix": int(time.time()),

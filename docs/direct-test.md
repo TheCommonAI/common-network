@@ -2,7 +2,7 @@
 
 Status: **never run over a real WAN.** Everything below is what to run to find out. The loopback end-to-end test
 (`commonnet/tests/test_direct_e2e.py`) shows the code path works; it cannot show that your router, your ISP or
-Windows' firewall let it through. Expect to find at least one surprise. Design: `commonnet/net/DIRECT.md`;
+Windows' firewall let it through. Expect to find at least one surprise. Design: [direct-mode.md](direct-mode.md);
 short user doc: "Direct mode (experimental)" in `docs/layer-network.md`.
 
 Ports used here (chosen to stay clear of 7460 and 11437): **TCP 7471** block server, **UDP 7472** the peer's DHT port,

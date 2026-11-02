@@ -1,4 +1,4 @@
-"""`common join` defaults to the layer network; the whole-model gateway node is --legacy; services keep their mode."""
+"""`common join` defaults to the layer network; --legacy still parses for old services; they keep their recorded mode."""
 import argparse
 import ast
 import json
@@ -120,7 +120,7 @@ class Notice(unittest.TestCase):
             self.assertTrue(join.announce_layer_first(marker, lines.append))
             self.assertFalse(join.announce_layer_first(marker, lines.append))
             self.assertEqual(len(lines), 1)
-            self.assertIn("--legacy", lines[0])
+            self.assertIn("common ask", lines[0])
 
 
 HARNESS = textwrap.dedent('''

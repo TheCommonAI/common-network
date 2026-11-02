@@ -1,8 +1,8 @@
 # commonnet: the layer network library
 
 This is the code behind the layer network: a model's decoder layers are split across peers, and the peers pass
-small activations to each other. Start with [NETWORK.md](NETWORK.md) (the design contract), then
-[../docs/layer-network.md](../docs/layer-network.md) (how it is used).
+small activations to each other. Start with [docs/network-contract.md](../docs/network-contract.md) (the design
+contract), then [docs/layer-network.md](../docs/layer-network.md) (how it is used).
 
 The `common` and `common join` commands in `common/` and `join/` run this library. You rarely need to run
 these modules by hand.
@@ -37,7 +37,7 @@ these modules by hand.
 | `weights.py` | Reads only the named tensors from a Hugging Face safetensors checkpoint. |
 | `hub.py` | Downloads only the tensors a machine needs from Hugging Face. |
 | `wire.py` | How hidden states are encoded on the wire. |
-| `net/` | Transport: the block server, the HTTP client, tunnels, NAT and TLS, WebRTC links. See [net/DIRECT.md](net/DIRECT.md). |
+| `net/` | Transport: the block server, the HTTP client, tunnels, NAT and TLS, WebRTC links. See [docs/direct-mode.md](../docs/direct-mode.md). |
 | `mesh/` | Discovery: signed peer records, gossip, the manifest, placement, layer assignment, and the rendezvous directory client. |
 | `dht/` | Seedless peer discovery (experimental). See [dht/README.md](dht/README.md). |
 

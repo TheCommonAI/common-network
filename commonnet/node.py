@@ -1,4 +1,4 @@
-"""A peer of the decentralised layer network: what `common join --network` runs. See commonnet/NETWORK.md.
+"""A peer of the decentralised layer network: what `common join --network` runs. See docs/network-contract.md.
 
     python -m commonnet.node --network https://SEED-URL        # learn the manifest from a seed peer
     python -m commonnet.node --network manifest.json --seed https://SEED-URL
@@ -785,7 +785,7 @@ class Node:
                 from commonnet.net import client as _nc
                 _nc.register_local_endpoint(self.url)
 
-    # -- direct mode (experimental; see commonnet/direct.py and commonnet/net/DIRECT.md) -------------
+    # -- direct mode (experimental; see commonnet/direct.py and docs/direct-mode.md) -------------
 
     def _start_dht(self) -> None:
         from commonnet.dht import DhtNode, load_bootstrap
@@ -845,8 +845,8 @@ class Node:
         """
         listed = mesh_directory.announce(self.gateway, record)
         if not listed and "speed" in record:
-            # The deployed gateway predates `speed` (v0.5) and refuses any record with a field it does not know, so
-            # no v0.5 peer could be listed and new peers found nobody. List a copy without it (same seq, re-signed).
+            # The deployed gateway predates `speed` and refuses any record with a field it does not know, so
+            # no peer that signs `speed` could be listed and new peers found nobody. List a copy without it (same seq, re-signed).
             fields = {k: v for k, v in record.items() if k not in ("v", "peer", "pub", "sig", "speed")}
             listed = mesh_directory.announce(self.gateway, self.identity.sign_record(fields))
         if listed and self._listed is not True:

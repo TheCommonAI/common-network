@@ -59,6 +59,10 @@ def section(title: str) -> None:
 
 # --- addresses and timeouts -------------------------------------------------
 
+section("version matches the CLI")
+check("join.py is 0.4.0", join.VERSION, "0.4.0")
+
+
 section("IPv4 addresses (Windows localhost resolves to IPv6, breaking tunnels)")
 check("LLAMA_URL uses 127.0.0.1, not localhost",
       "127.0.0.1" in join.LLAMA_URL and "localhost" not in join.LLAMA_URL, True)

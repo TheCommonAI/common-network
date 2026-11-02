@@ -1,8 +1,8 @@
 # commonnet.dht: seedless peer discovery
 
 A small Kademlia DHT over UDP (stdlib + `cryptography`). It stores the existing ed25519-signed peer
-records from `commonnet/mesh/records.py`, so a peer can find the others with no seed URL. Nothing
-imports it yet: it is off until an integration step constructs a `DhtNode`.
+records from `commonnet/mesh/records.py`, so a peer can find the others with no seed URL. Used by
+`--direct` and by the automatic direct path in `common join`.
 
 ```python
 node = DhtNode(identity, bind=("0.0.0.0", 0), bootstrap=load_bootstrap(), network_id="common-main-8b-v1")

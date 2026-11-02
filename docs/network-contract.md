@@ -1,8 +1,9 @@
 # Decentralised layer network (design contract)
 
 Goal: `common join` turns any machine into a peer that serves a slice of one shared model. No central
-server: peers find each other by gossip, build routes themselves, and a dropped peer is replaced
-mid-generation. The old v0.1 whole-model-per-node + gateway-composition system is NOT touched here.
+inference server: peers find each other by gossip, build routes themselves, and a dropped peer is replaced
+mid-generation. The v0.1 whole-model-per-node gateway has been retired; this document is the contract for
+the layer network that replaced it.
 
 ## Terms
 - **manifest**: JSON naming the model and its fixed *stage boundaries*. Every peer serves a window that is a
