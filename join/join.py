@@ -1007,7 +1007,7 @@ def print_catalogue(gateway: str, hw: dict) -> None:
         # from RAM and GPU alone, so an entry this tool cannot install at all
         # (an `api:` or `graph:` source, which resolve_model rejects outright)
         # displayed as "runnable" whenever its min_ram_gb was low -- and the
-        # old api:cgla-legal entry declared 0GB, so it showed as the ONE
+        # an old retired `api:` entry declared 0GB, so it showed as the ONE
         # runnable option on a machine where nothing else fit. Advertising a
         # model and then refusing to install it is worse than not listing it.
         provisionable = is_installable(m["source"])

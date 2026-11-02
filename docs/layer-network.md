@@ -218,7 +218,7 @@ down from the one asked for (int4, then int8, then float), so older peers keep w
 Quality (Bonsai 8B at the layer-27 boundary, greedy 40-token outputs on 12 prompts): int8 matched the uncompressed text on
 11 and the top token 99.7% of the time; int4 matched on 7 and 96.6%. Neither changes per-token decode time (the payload is
 a few KB); the saving is on long-prompt prefill. int8 is the default for that reason; int4 is for people who want the
-smaller payload and accept the quality cost. See `docs/24-oct-p&m-testing.md` sections 12, 17, 19 and 20.
+smaller payload and accept the quality cost.
 
 ## What survives a dropout
 

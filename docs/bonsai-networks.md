@@ -141,7 +141,7 @@ NVIDIA pipeline. NF4 on Bonsai 2 is exact on W' only if bitsandbytes matches the
 
 The Mac was busy (other peers running, swap nearly full), so treat all timings as rough upper bounds.
 
-- **Correctness**: `correctness/bonsai_split.py`, greedy 24 tokens on 3 chat prompts, bfloat16 compute, float32 hidden
+- **Correctness**: `e2e/bonsai_split.py`, greedy 24 tokens on 3 chat prompts, bfloat16 compute, float32 hidden
   state, a 2-stage split (8B cut at 18, 9B cut at 16) against a single block holding every layer: identical tokens on
   3/3 prompts for both models, and the text is coherent. For Bonsai 2 the first two answers were also compared with the
   pack's own loader (mlx-vlm, `vision_artifact.load_vl_model`): the same text for the 24 tokens checked.

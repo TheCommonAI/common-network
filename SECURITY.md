@@ -40,9 +40,8 @@ scoped to the node. The gateway pins jobs to the registered catalogue model,
 limits mobile concurrency and payload sizes, and provides no arbitrary proxy route.
 Connection health is lease-based. Runtime capabilities are self-reported, not
 attested; the gateway validates them against explicit catalogue requirements
-but cannot prove which weights or inference engine are actually loaded. See
-[gateway/MOBILE-NODES.md](gateway/MOBILE-NODES.md) for the framing and current
-Bonsai format requirements.
+but cannot prove which weights or inference engine are actually loaded. The
+current model formats are described in [docs/bonsai-networks.md](docs/bonsai-networks.md).
 
 - **Use the network without contributing to it.** With
   `REQUIRE_CONTRIBUTION=true` (the shipped default), a request to

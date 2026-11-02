@@ -1,6 +1,6 @@
 """Greedy tokens through a 2-stage local split vs a single block, on a real Bonsai pack (Apple silicon).
 
-    python correctness/bonsai_split.py CHECKPOINT_DIR [CUT] [NEW_TOKENS]
+    python e2e/bonsai_split.py CHECKPOINT_DIR [CUT] [NEW_TOKENS]
 
 The checkpoint is a full pack directory (for example the Hugging Face snapshot of
 prism-ml/Ternary-Bonsai-8B-mlx-2bit). Both runs use the node's settings: bfloat16 compute, float32 hidden state

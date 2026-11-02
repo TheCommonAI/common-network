@@ -1,7 +1,8 @@
 """Kill the second-half member mid-generation; a replica takes over. Output must equal an unbroken run."""
 import json, os, secrets, signal, subprocess, sys, time, tempfile
 import torch
-sys.path.insert(0, "/Users/mileshedrick/commonnet-run")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
 from commonnet.client import BlockEndpoint
 from commonnet.client4 import Client4
 from commonnet.net.transport import HttpTransport
@@ -14,7 +15,7 @@ tokfile = os.path.join(tempfile.mkdtemp(), "t"); open(tokfile, "w").write(secret
 env = dict(os.environ, COMMONNET_BACKEND="mlx", COMMONNET_CHECKPOINT=ck, COMMONNET_DTYPE="bfloat16")
 spans = {"A": (0, cut, 18831), "B1": (cut, n, 18832), "B2": (cut, n, 18833)}
 procs = {k: subprocess.Popen([sys.executable, "-u", "-m", "commonnet.net.server", "--port", str(p), "--layers", str(a), str(b),
-         "--block", "commonnet.net.factory:FACTORY", "--token-file", tokfile], env=env, cwd="/Users/mileshedrick/commonnet-run",
+         "--block", "commonnet.net.factory:FACTORY", "--token-file", tokfile], env=env, cwd=REPO,
          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for k, (a, b, p) in spans.items()}
 url = lambda k: f"http://127.0.0.1:{spans[k][2]}"
 try:

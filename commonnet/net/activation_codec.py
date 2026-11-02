@@ -107,7 +107,7 @@ def decode_int8_group(obj) -> protocol.Tensor:
 
 # ---- int4, group 32, float16 scales: two codes per byte. About 2.3 KB for a 4,096-wide position (float32: 16 KB,
 # int8 above: 4.3 KB). Lossy: on Bonsai 8B at the layer-27 boundary it matched the unquantised greedy text on 7 of
-# 12 prompts (int8: 11 of 12) and the top token 96.6% of the time (docs/24-oct-p&m-testing.md, sections 19-20).
+# 12 prompts (int8: 11 of 12) and the top token 96.6% of the time (a 24 Oct 2026 test run; raw notes are not published).
 _FIELDS4 = _FIELDS
 _F16_MIN = np.float32(6.103515625e-05)   # smallest normal float16: a smaller scale would lose its precision
 _F16_MAX = np.float32(65504.0)
