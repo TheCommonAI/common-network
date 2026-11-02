@@ -405,7 +405,7 @@ def _classify(error: Exception) -> ApiError:
     return ApiError(500, f"{type(error).__name__}: {error}", "server_error")
 
 
-def make_handler(backend, *, max_context: int = DEFAULT_MAX_CONTEXT):
+def make_handler(backend, *, max_context: int = DEFAULT_MAX_CONTEXT, metrics=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "commonnet-serve/0.1"
         disable_nagle_algorithm = True   # stream each token to the reader as soon as it is written
@@ -437,6 +437,7 @@ def make_handler(backend, *, max_context: int = DEFAULT_MAX_CONTEXT):
                 self._json(404, ApiError(404, f"no endpoint {path}", "not_found").body())
 
         def do_POST(self):
+            started = time.monotonic()
             path = self.path.split("?", 1)[0]
             if path not in ("/v1/chat/completions", "/chat/completions"):
                 self._json(404, ApiError(404, f"no endpoint {path}", "not_found").body())
@@ -462,24 +463,28 @@ def make_handler(backend, *, max_context: int = DEFAULT_MAX_CONTEXT):
                     raise ApiError(400, f"prompt ({len(prompt_ids)} tokens) plus max_tokens ({req['max_tokens']}) is over "
                                         f"this server's context limit of {max_context}", code="context_length_exceeded")
                 stream = backend.stream(prompt_ids, req["max_tokens"], req["temperature"], req["top_p"], req["seed"])
+                if metrics is not None:
+                    from commonnet.metrics import MeasuredStream
+                    stream = MeasuredStream(stream, metrics, started)
             except Exception as e:
                 err = _classify(e)
                 self._json(err.status, err.body())
                 return
             model = body.get("model") if isinstance(body.get("model"), str) else backend.model_name
-            if req["stream"]:
-                # Read the first token before sending any headers: a missing route or a dead peer at the start
-                # is then a proper HTTP error, not an error event inside a 200 stream.
-                try:
-                    first = next(stream, _END)
-                except Exception as e:
-                    stream.close()
-                    err = _classify(e)
-                    self._json(err.status, err.body())
-                    return
-                self._stream_reply(stream, first, prompt_ids, req, model)
-            else:
-                self._plain_reply(stream, prompt_ids, req, model)
+            try:
+                if req["stream"]:
+                    # Read the first token before headers, so initial route failures are real HTTP errors.
+                    try:
+                        first = next(stream, _END)
+                    except Exception as e:
+                        err = _classify(e)
+                        self._json(err.status, err.body())
+                        return
+                    self._stream_reply(stream, first, prompt_ids, req, model)
+                else:
+                    self._plain_reply(stream, prompt_ids, req, model)
+            finally:
+                stream.close()
 
         def _finish(self, count: int, req: dict, stopped: bool) -> str:
             return "length" if (count >= req["max_tokens"] and not stopped) else "stop"
@@ -552,8 +557,8 @@ def make_handler(backend, *, max_context: int = DEFAULT_MAX_CONTEXT):
     return Handler
 
 
-def make_server(backend, port: int = DEFAULT_PORT, *, max_context: int = DEFAULT_MAX_CONTEXT) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(backend, max_context=max_context))
+def make_server(backend, port: int = DEFAULT_PORT, *, max_context: int = DEFAULT_MAX_CONTEXT, metrics=None) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(backend, max_context=max_context, metrics=metrics))
     server.daemon_threads = True
     return server
 

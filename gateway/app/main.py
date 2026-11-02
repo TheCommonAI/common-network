@@ -7,6 +7,7 @@ transport) now happens inside the layer network, with no central server. What is
   GET /manifest    the default network's manifest
   GET /seeds       peers that are normally up (same list `common join` fetches from the repository)
   POST /announce, GET /directory, POST /check   a tiny rendezvous so `common join` needs no typed address (directory.py)
+  GET /api/network-stats, POST /api/network-report   public status and signed numeric telemetry
   GET /            a short page saying where things went
   anything else    410 Gone with a plain sentence, so an old node or app version learns why it stopped working
 """
@@ -17,16 +18,40 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from . import directory
+from . import directory, dashboard
 
 NETWORKS = Path(os.environ.get("COMMON_NETWORKS_DIR", Path(__file__).resolve().parent.parent / "networks"))
+if not NETWORKS.exists() and "COMMON_NETWORKS_DIR" not in os.environ:
+    NETWORKS = Path(__file__).resolve().parents[2] / "commonnet" / "networks"
 MOVED = ("The Common gateway has been retired. The network now runs peer to peer: install or update the "
          "`common` command and run `common join`. See https://github.com/TheCommonAI/common-network")
 
 app = FastAPI(title="Common gateway (retired)", docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(directory.router)
+
+
+@app.middleware("http")
+async def dashboard_cors(request, call_next):
+    if request.url.path != "/api/network-stats":
+        return await call_next(request)
+    response = Response(status_code=204) if request.method == "OPTIONS" else await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Accept, Content-Type"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/network-stats")
+def network_stats(network: str | None = None):
+    return dashboard.snapshot(NETWORKS, network)
+
+
+@app.post("/api/network-report")
+async def network_report(request: Request):
+    return await dashboard.report(request)
 
 
 def _load(name: str) -> dict:
