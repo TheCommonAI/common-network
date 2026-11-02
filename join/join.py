@@ -1762,7 +1762,7 @@ def announce_layer_first(marker: Path | None = None, printer=print) -> bool:
     return True
 
 
-def run_network_member(network: str | None, node_args: list[str] | None = None) -> None:
+def run_network_member(network: str | None, node_args: list[str] | None = None, *, debug: bool = False) -> None:
     """Join the decentralised layer network: set up a runtime, then serve a slice of the shared model.
 
     layers.py (beside this file) does the work; a copy of join.py that predates it fetches it
@@ -1774,7 +1774,8 @@ def run_network_member(network: str | None, node_args: list[str] | None = None) 
                      f"join.py needs layers.py beside it to join the layer network. Fetch it from\n"
                      f"  https://github.com/{REPO}/tree/main/join")
     try:
-        code = layers.run(network or None, node_args or [])
+        with layers.JoinDisplay(debug=debug) as display:
+            code = layers.run(network or None, node_args or [], display=display)
     except layers.LayersError as e:
         die(str(e))
     except KeyboardInterrupt:
@@ -1827,6 +1828,7 @@ def main() -> None:
     parser.add_argument("--cost", type=float, default=0, help="Declared cost per 1k tokens (default: 0, it's free)")
     parser.add_argument("--capability", default=None, help="Override the auto-generated capability description")
     parser.add_argument("--no-update", action="store_true", default=bool(os.environ.get("COMMON_NO_UPDATE")), help="Skip the self-update check (useful when hacking on this script locally)")
+    parser.add_argument("--debug", action="store_true", help="Show full join logs from the start (press d while joining to toggle)")
     parser.add_argument("--lan", action="store_true", help="Use a LAN worker address instead of a Cloudflare tunnel; still registers with --gateway (production by default).")
     parser.add_argument("--permanent", action="store_true", help="Install as a background service that starts at login/boot and restarts if it crashes, then exit")
     parser.add_argument("--check", action="store_true", help="Check that this machine can join the layer network (reads only: nothing is installed, downloaded or started), then exit")
@@ -1893,15 +1895,14 @@ def main() -> None:
             print(f"{GLYPH_WORK} {dim('updating to the latest version...')}")
             apply_update_and_restart(remote)
 
-    print(paper(BANNER, bold=True))
+    if mode != "network":
+        print(paper(BANNER, bold=True))
 
     if args.remove_permanent:
         remove_permanent()
         return
 
     if args.network is not None:
-        if defaulted:
-            announce_layer_first()
         if args.permanent:
             install_permanent(args)
             return
@@ -1916,7 +1917,7 @@ def main() -> None:
             node_args += ["--local-front", args.local_front]
         node_args += _direct_flags(args)
         # Direct mode with no network named: the built-in manifest and the DHT, no seed URL (name one with --network URL)
-        run_network_member(args.network or ("dht" if args.direct else None), node_args)
+        run_network_member(args.network or ("dht" if args.direct else None), node_args, debug=args.debug)
         return
     if fell_back:
         die("this machine cannot join the Common network: it needs macOS, Windows or Linux with Python 3.10+ "

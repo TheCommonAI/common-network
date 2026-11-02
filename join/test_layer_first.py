@@ -130,7 +130,7 @@ HARNESS = textwrap.dedent('''
     calls = []
     join.layer_network_supported = lambda: {supported}
     join.announce_layer_first = lambda *a, **k: calls.append("notice")
-    join.run_network_member = lambda network, *a: calls.append(("network", network))
+    join.run_network_member = lambda network, *a, **k: calls.append(("network", network))
     join.install_permanent = lambda args: calls.append(("service", args.network))
     class Legacy(Exception): pass
     def legacy(*a, **k): raise Legacy()
@@ -152,8 +152,8 @@ def dispatch(argv, supported=True):
 
 
 class Dispatch(unittest.TestCase):
-    def test_plain_join_goes_to_the_layer_network_and_says_so_once(self):
-        self.assertEqual(dispatch([]), ["notice", ["network", None]])
+    def test_plain_join_goes_to_the_layer_network_quietly(self):
+        self.assertEqual(dispatch([]), [["network", None]])
 
     def test_legacy_flag_goes_to_the_gateway_path(self):
         self.assertEqual(dispatch(["--legacy"]), ["legacy"])
@@ -181,7 +181,7 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(dispatch(["--network", "https://x.example"]), [["network", "https://x.example"]])
 
     def test_permanent_installs_a_service_in_the_mode_it_would_run(self):
-        self.assertEqual(dispatch(["--permanent"]), ["notice", ["service", ""]])
+        self.assertEqual(dispatch(["--permanent"]), [["service", ""]])
         self.assertEqual(dispatch(["--permanent", "--legacy"]), ["legacy"])  # legacy path installs after resolving a model
 
 

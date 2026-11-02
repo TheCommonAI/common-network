@@ -751,6 +751,8 @@ class Node:
         except Exception as e:
             raise NodeError(f"the download failed ({e}); join again to resume") from None
         set_phase("loading")
+        if not quiet:
+            self.log("loading model...")
         # Qwen activations pass float16's range on some prompts (NaN logits), so the MLX block computes in
         # bfloat16 and the hidden state between peers is float32. An explicit COMMONNET_DTYPE wins, then the
         # manifest's per-backend dtype. COMMONNET_MLX_CACHE_MB is left to the environment untouched.
