@@ -430,16 +430,19 @@ class JoinFlag(unittest.TestCase):
     def test_help_lists_the_option(self):
         self.assertIn("--network", self._run("--help").stdout)
 
-    def test_debug_is_forwarded_without_the_old_banner(self):
+    def test_network_join_keeps_banner_above_progress_and_forwards_debug(self):
         output = io.StringIO()
         output.reconfigure = lambda **kwargs: None
-        with mock.patch.object(join, "run_network_member") as run, \
+        def start_network(*args, **kwargs):
+            self.assertIn(join.BANNER, output.getvalue())
+
+        with mock.patch.object(join, "run_network_member", side_effect=start_network) as run, \
                 mock.patch.object(join, "choose_mode", return_value="network"), \
                 mock.patch.object(sys, "stdout", output), \
                 mock.patch.object(sys, "argv", ["join.py", "--no-update", "--debug"]):
             join.main()
         run.assert_called_once_with(None, ["--api", "11440", "--auto-direct"], debug=True)
-        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(output.getvalue().count(join.BANNER), 1)
 
     def test_api_is_only_valid_with_the_layer_network(self):
         for other in (["--model", "m"], ["--legacy"], ["--lan"], ["--remove-permanent"]):
