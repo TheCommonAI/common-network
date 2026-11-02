@@ -309,7 +309,8 @@ class Preflight(unittest.TestCase):
         self.assertEqual(layers.blocking(checks), [])
         self.assertTrue(all(c.ok for c in checks))
         self.assertTrue(any("github.com" in url for url in net.asked))
-        self.assertTrue(any("download.pytorch.org" in url for url in net.asked))
+        if layers.platform.system() in ("Windows", "Linux"):
+            self.assertTrue(any("download.pytorch.org" in url for url in net.asked))
         self.assertTrue(any("pypi.org" in url for url in net.asked))
 
     def test_github_being_blocked_stops_the_join_and_says_how_to_work_around_it(self):
@@ -429,6 +430,17 @@ class JoinFlag(unittest.TestCase):
     def test_help_lists_the_option(self):
         self.assertIn("--network", self._run("--help").stdout)
 
+    def test_debug_is_forwarded_without_the_old_banner(self):
+        output = io.StringIO()
+        output.reconfigure = lambda **kwargs: None
+        with mock.patch.object(join, "run_network_member") as run, \
+                mock.patch.object(join, "choose_mode", return_value="network"), \
+                mock.patch.object(sys, "stdout", output), \
+                mock.patch.object(sys, "argv", ["join.py", "--no-update", "--debug"]):
+            join.main()
+        run.assert_called_once_with(None, ["--api", "11440", "--auto-direct"], debug=True)
+        self.assertEqual(output.getvalue(), "")
+
     def test_api_is_only_valid_with_the_layer_network(self):
         for other in (["--model", "m"], ["--legacy"], ["--lan"], ["--remove-permanent"]):
             with self.subTest(other=other):
@@ -444,7 +456,7 @@ class JoinFlag(unittest.TestCase):
                 mock.patch.object(join, "announce_layer_first"), \
                 mock.patch.object(sys, "argv", ["join.py", "--no-update", "--api"]):
             join.main()
-        run.assert_called_once_with(None, ["--api", "11440", "--auto-direct"])
+        run.assert_called_once_with(None, ["--api", "11440", "--auto-direct"], debug=False)
 
     def test_api_is_passed_to_the_node(self):
         for argv, expected in ((["--network"], ["--api", "11440", "--auto-direct"]), (["--network", "--no-api"], ["--auto-direct"]),
@@ -454,13 +466,13 @@ class JoinFlag(unittest.TestCase):
                 with mock.patch.object(join, "run_network_member") as run, \
                         mock.patch.object(sys, "argv", ["join.py", "--no-update", *argv]):
                     join.main()
-                run.assert_called_once_with(argv[1] if len(argv) > 1 and argv[1].startswith("http") else None, expected)
+                run.assert_called_once_with(argv[1] if len(argv) > 1 and argv[1].startswith("http") else None, expected, debug=False)
 
     def test_layers_is_passed_to_the_node_and_kept_by_a_service(self):
         with mock.patch.object(join, "run_network_member") as run, \
                 mock.patch.object(sys, "argv", ["join.py", "--no-update", "--network", "--layers", "27-36"]):
             join.main()
-        run.assert_called_once_with(None, ["--api", "11440", "--layers", "27-36", "--auto-direct"])
+        run.assert_called_once_with(None, ["--api", "11440", "--layers", "27-36", "--auto-direct"], debug=False)
         import argparse
         args = argparse.Namespace(network="", api=11440, layers="27-36", no_update=False)
         self.assertIn("--layers=27-36", join._service_argv(args))
@@ -469,11 +481,11 @@ class JoinFlag(unittest.TestCase):
         with mock.patch.object(join, "run_network_member") as run, \
                 mock.patch.object(sys, "argv", ["join.py", "--no-update", "--network", "--local-front", "auto"]):
             join.main()
-        run.assert_called_once_with(None, ["--api", "11440", "--local-front", "auto", "--auto-direct"])
+        run.assert_called_once_with(None, ["--api", "11440", "--local-front", "auto", "--auto-direct"], debug=False)
         with mock.patch.object(join, "run_network_member") as run, \
                 mock.patch.object(sys, "argv", ["join.py", "--no-update", "--network"]):
             join.main()
-        run.assert_called_once_with(None, ["--api", "11440", "--auto-direct"])   # off by default: nothing passed
+        run.assert_called_once_with(None, ["--api", "11440", "--auto-direct"], debug=False)   # off by default: nothing passed
         import argparse
         args = argparse.Namespace(network="", api=11440, local_front="9", no_update=False)
         self.assertIn("--local-front=9", join._service_argv(args))

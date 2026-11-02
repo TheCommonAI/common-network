@@ -32,7 +32,7 @@ class DirectFlags(unittest.TestCase):
         with mock.patch.object(sys, "argv", ["join.py", "--no-update", "--auto-direct", "--network"]), \
                 mock.patch.object(join, "run_network_member") as run:
             join.main()
-        run.assert_called_once_with(None, ["--api", "11440", "--auto-direct"])
+        run.assert_called_once_with(None, ["--api", "11440", "--auto-direct"], debug=False)
 
     def test_tunnel_only_service_restart_reaches_the_node_flag(self):
         off = argparse.Namespace(network="", no_update=True, api=None, layers=None,
@@ -41,7 +41,7 @@ class DirectFlags(unittest.TestCase):
         with mock.patch.object(sys, "argv", [service[1], *service[2:]]), \
                 mock.patch.object(join, "run_network_member") as run:
             join.main()
-        run.assert_called_once_with(None, ["--api", "11440", "--no-rtc"])
+        run.assert_called_once_with(None, ["--api", "11440", "--no-rtc"], debug=False)
 
     def test_service_argv_carries_every_direct_option(self):
         on = argparse.Namespace(network="", no_update=True, api=11440, layers=None, direct=True,

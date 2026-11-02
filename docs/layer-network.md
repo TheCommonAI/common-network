@@ -23,9 +23,16 @@ common join --network qwen3-8b           # default model
 common join --model bonsai-8b            # the same as --network bonsai-8b, named as a model
 common join --layers 27-36       # serve exactly this window (a stage boundary pair) instead of the one the network picks
 common join --check              # can this machine join? reads only: nothing is installed, downloaded or started
+common join --debug              # show the full setup logs from the start
 common join --permanent          # keep serving after reboots (records the mode)
 common join --legacy             # the original whole-model gateway node instead
 ```
+
+Joining shows one overall percentage for setup, model downloads, and connecting. The setup stages are
+weighted estimates; download progress uses the bytes received. Press **d** (no Enter needed) to reveal
+the recent setup details and live logs, then **d** again to return to the percentage. Warnings and errors
+stay visible. Full logs are saved under `~/.common-network/logs/`; when output is redirected, use
+`--debug` for details. Ctrl+C leaves the network.
 
 ### Switching the model
 
