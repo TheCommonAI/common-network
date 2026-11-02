@@ -1486,6 +1486,8 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
     if getattr(args, "network", None) is not None:
         # A layer-network service: the spec goes last, as --network=SPEC, so it can never swallow another flag.
         argv = [sys.executable, os.path.abspath(__file__)]
+        if getattr(args, "nodes", None) is not None:
+            argv += [f"--nodes={args.nodes}"]
         if args.no_update:
             argv += ["--no-update"]
         if getattr(args, "api", None) is not None:
@@ -1502,6 +1504,8 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
             argv.append("--no-direct")
         elif getattr(args, "direct", False):
             argv += _direct_flags(args)
+        if getattr(args, "nodes", None) is not None:
+            return argv
         return argv + ([f"--network={args.network}"] if args.network else ["--network"])
     argv = [
         sys.executable, os.path.abspath(__file__),
@@ -1696,7 +1700,8 @@ def layer_network_supported() -> bool:
 
 
 # The layer-network models, by name. Must match NETWORK_MODELS in commonnet/node.py (a test checks it).
-NETWORK_MODEL_NAMES = ("qwen3-8b", "bonsai-8b", "bonsai-27b", "bonsai-2-9b", "bonsai-2-27b")
+NETWORK_MODEL_NAMES = ("qwen3-8b", "bonsai-8b", "bonsai-27b", "bonsai-2-9b", "bonsai-2-27b",
+                       "qwen3.5-35b-a3b", "qwen3.5-122b-a10b")
 
 
 def model_names_a_network(args: argparse.Namespace) -> None:
@@ -1772,6 +1777,12 @@ def main() -> None:
     sys.stdout.reconfigure(line_buffering=True)
     _enable_windows_ansi()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    counts = parser.add_mutually_exclusive_group()
+    counts.add_argument("--nodes", type=int, choices=range(1, 8), metavar="1-7",
+                        help="planned nodes: 1-2 Qwen3-8B, 3-6 Qwen3.5-35B-A3B, 7 Qwen3.5-122B-A10B")
+    for count in range(1, 8):
+        counts.add_argument(f"--{count}", dest="nodes", action="store_const", const=count,
+                            help=f"same as --nodes {count}")
     parser.add_argument("--gateway", default=os.environ.get("COMMON_GATEWAY_URL", DEFAULT_GATEWAY), help="Gateway base URL (default: the shared Common Network gateway)")
     parser.add_argument("--model", default=None, help=f"A layer-network model by name ({', '.join(NETWORK_MODEL_NAMES)}), the same as --network NAME. Any other value is a catalogue id or raw model tag for the retired whole-model gateway (see --auto, --list-catalogue)")
     # The v0.2 RPC-group prototype was removed; the layer network (--network) replaced it. These stay
@@ -1818,6 +1829,10 @@ def main() -> None:
     parser.add_argument("--check", action="store_true", help="Check that this machine can join the layer network (reads only: nothing is installed, downloaded or started), then exit")
     parser.add_argument("--remove-permanent", action="store_true", help="Remove the background service installed by --permanent, then exit")
     args = parser.parse_args()
+    if args.nodes is not None:
+        if args.network is not None or args.model or args.legacy or args.lan or args.list_catalogue or args.remove_permanent:
+            parser.error("--nodes/--1 through --7 selects a model; do not combine it with --network, --model, or legacy options")
+        args.network = ""  # select the layer-network path; commonnet resolves the preset
     try:
         model_names_a_network(args)
     except ValueError as e:
@@ -1828,6 +1843,8 @@ def main() -> None:
         if layers is None:
             die("layers.py is missing: join.py needs it beside it to check the layer network. "
                 "Re-run the installer to fetch it.")
+        if args.nodes is not None:
+            print(f"Node preset {args.nodes}: this checks the machine; model-specific memory is checked when joining.")
         sys.exit(layers.report(layers.preflight()))
 
     # Before updates, catalogue lookup, identity reads, tunnel creation or any
@@ -1890,6 +1907,8 @@ def main() -> None:
             install_permanent(args)
             return
         node_args = [] if args.api is None else ["--api", str(args.api)]
+        if args.nodes is not None:
+            node_args += ["--nodes", str(args.nodes)]
         if args.no_draft:
             node_args += ["--no-draft"]
         if args.layers:
@@ -1900,7 +1919,7 @@ def main() -> None:
             node_args += ["--local-front", args.local_front]
         node_args += _direct_flags(args)
         # Direct mode with no network named: the built-in manifest and the DHT, no seed URL (name one with --network URL)
-        run_network_member(args.network or ("dht" if args.direct else None), node_args, debug=args.debug)
+        run_network_member(args.network or ("dht" if args.direct and args.nodes is None else None), node_args, debug=args.debug)
         return
     if fell_back:
         die("this machine cannot join the Common network: it needs macOS, Windows or Linux with Python 3.10+ "

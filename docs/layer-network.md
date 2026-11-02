@@ -12,6 +12,49 @@ flags still parse, then say so and exit.
 
 ## Join (Apple silicon, NVIDIA, or any machine with enough RAM)
 
+### Node-count presets
+
+Run the same preset on each participating machine:
+
+```bash
+common join --1                  # Qwen3-8B, one-node milestone
+common join --2                  # Qwen3-8B, slices capped at half the model
+common join --3                  # Qwen3.5-35B-A3B, up to 16 layers per peer
+common join --4                  # same 35B network, add capacity and replicas
+common join --5                  # same 35B network
+common join --6                  # same 35B network
+common join --7                  # Qwen3.5-122B-A10B, up to 7 layers per peer
+common join --nodes 7            # long form of --7
+common join --7 --permanent      # preserve the preset after a reboot
+```
+
+The count is the planned deployment size, not a peer number. Every machine uses the same command;
+there is no manual assignment of node 1, node 2, or layers. The joiner checks the directory and gossip
+for online peers on that model, then chooses a missing slice that fits its memory. Once a complete
+route exists, extra peers prefer exact replicas of existing slices for failover. Presets 1/2 share
+the default 8B network; presets 3–6 share the 35B network. The 122B model has its own network. Models
+are not switched automatically when peers arrive or leave.
+
+All expected layers must be hosted before chat can work. The progress view waits for both a complete
+route and the local chat API; debug logs identify missing layers and show which model was selected.
+If two machines choose the same slice while joining concurrently, normal gossip and rebalancing can
+move a redundant peer into a gap. Peers with `--layers` explicitly set remain pinned.
+
+Capacity still depends on the hardware. Seven arbitrary machines do not guarantee enough memory
+for 122B. Placement uses conservative per-backend estimates, including endpoint tables and runtime
+headroom, and refuses a machine that cannot hold even one stage before downloading weights.
+Apple silicon uses the MLX 4-bit checkpoint. NVIDIA downloads only its assigned BF16 tensors and
+quantises projections and routed experts to NF4 on load, so its disk download/cache is larger than
+its GPU weight footprint. CPU peers use BF16 weights and need considerably more RAM. The manifest
+memory estimates are planning estimates, not measured full-model benchmarks.
+
+The Qwen3.5 presets serve text, with speculative decoding disabled because their recurrent attention
+cache cannot be rolled back. Tiny real MoE checkpoints are checked against Transformers, including
+seven local HTTP servers and the packed MLX format. Full-size 35B/122B deployment and CUDA throughput
+still require testing on the intended machines. `--check` is a general machine check; model-specific
+memory checks happen during join. Presets cannot be combined with `--network` or `--model`; use a
+model name directly for a custom deployment.
+
 ```bash
 common join                      # the built-in network (same as --network)
 common join --network URL        # a network a friend runs: any peer's URL

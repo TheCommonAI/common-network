@@ -32,6 +32,7 @@ Open a new terminal, then:
 ```bash
 common join --check              # can this machine join? checks only, installs nothing
 common join                      # serve a slice of the default model
+common join --7                  # seven-node target: Qwen3.5-122B-A10B (same command on every machine)
 common ask "What's a good way to learn recursion?"
 ```
 
@@ -57,6 +58,12 @@ been verified on real hardware; see the status notes in
 [docs/layer-network.md](docs/layer-network.md).
 
 ### Choosing a network
+
+Node-count presets select the stepping-stone model and fill gaps among online peers:
+`--1`/`--2` use Qwen3-8B, `--3`–`--6` use Qwen3.5-35B-A3B, and `--7` uses
+Qwen3.5-122B-A10B. The long form is `common join --nodes 7`. Each peer still needs enough memory for
+its slice; the count is a deployment plan, not proof of capacity. See
+[node-count presets](docs/layer-network.md#node-count-presets) for memory and backend details.
 
 ```bash
 common join --network bonsai-8b        # also: bonsai-2-9b, bonsai-27b, bonsai-2-27b, qwen3-8b

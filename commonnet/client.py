@@ -21,7 +21,7 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 def make_norm(arch, hidden, eps, prefix="model."):
     """Final norm module. qwen3_5 HF checkpoints use (1 + weight) scaling, plain Qwen3 uses weight.
     MLX conversions (prefix "language_model.model.") store the norm already as 1 + weight."""
-    if arch == "qwen3_5" and prefix != "language_model.model.":
+    if arch.startswith("qwen3_5") and prefix != "language_model.model.":
         from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5RMSNorm
         return Qwen3_5RMSNorm(hidden, eps=eps)
     return Qwen3RMSNorm(hidden, eps=eps)

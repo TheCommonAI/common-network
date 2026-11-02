@@ -23,12 +23,17 @@ from commonnet.weights import CheckpointReader, build_module
 
 def layer_classes(arch: str):
     """(decoder layer class, rotary class) for an architecture name."""
-    if arch == "qwen3_5":
+    if arch.startswith("qwen3_5"):
         import transformers
         if not transformers.__version__.startswith("5.8."):
             raise RuntimeError(
-                f"Qwen3.6 support is tested with transformers 5.8.x, found {transformers.__version__}. "
+                f"Qwen3.5-family support is tested with transformers 5.8.x, found {transformers.__version__}. "
                 'Run: pip install "transformers==5.8.0"')
+        if arch == "qwen3_5_moe":
+            from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+                Qwen3_5MoeDecoderLayer, Qwen3_5MoeTextRotaryEmbedding,
+            )
+            return Qwen3_5MoeDecoderLayer, Qwen3_5MoeTextRotaryEmbedding
         from transformers.models.qwen3_5.modeling_qwen3_5 import (
             Qwen3_5DecoderLayer,
             Qwen3_5TextRotaryEmbedding,
@@ -186,7 +191,7 @@ class BlockRange:
 
         position_ids = torch.arange(start_pos, start_pos + q_len, device=self.device).unsqueeze(0)
         # qwen3_5 uses 3-axis (t, h, w) rope; for text all three axes are the same position.
-        rope_ids = position_ids[None].expand(3, -1, -1) if self.arch == "qwen3_5" else position_ids
+        rope_ids = position_ids[None].expand(3, -1, -1) if self.arch.startswith("qwen3_5") else position_ids
         position_embeddings = self.rotary_emb(hidden, rope_ids)
         mask = self._causal_mask(start_pos, q_len, hidden.dtype)
 
@@ -209,7 +214,7 @@ class BlockRange:
             raise KeyError(f"unknown session {session_id!r}")
         if length >= session.length:
             return
-        if self.arch == "qwen3_5":
+        if self.arch.startswith("qwen3_5"):
             raise NotImplementedError("this block has non-attention layers; its cache cannot be truncated")
         cache = session.cache
         for i in range(len(cache.keys)):

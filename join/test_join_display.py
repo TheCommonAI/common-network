@@ -69,6 +69,31 @@ class JoinDisplayTests(unittest.TestCase):
         self.assertIn("low disk space", self.output.getvalue())
         self.assertIn("--api 11441", self.output.getvalue())
 
+    def test_planned_network_waits_for_api_and_a_complete_route(self):
+        for api_first in (True, False):
+            with self.subTest(api_first=api_first), self.display() as display:
+                display.api = True
+                display.route_ready = False
+                display.feed("up at https://peer")
+                self.assertEqual(display.percent, 95)
+                events = ["chat API ready", "network route ready"]
+                if not api_first:
+                    events.reverse()
+                display.feed(events[0])
+                self.assertEqual(display.percent, 95)
+                display.feed(events[1])
+                self.assertEqual(display.percent, 100)
+
+    def test_busy_api_port_does_not_mark_an_incomplete_planned_network_ready(self):
+        with self.display() as display:
+            display.api = True
+            display.route_ready = False
+            display.feed("up at https://peer")
+            display.feed("The chat API could not start on port 11440 (Address already in use)")
+            self.assertEqual(display.percent, 95)
+            display.feed("network route ready")
+            self.assertEqual(display.percent, 100)
+
     def test_real_failed_child_exposes_error_tail_and_writes_log(self):
         with self.display() as display:
             result = display.run_command([sys.executable, "-c",
