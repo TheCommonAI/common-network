@@ -28,8 +28,8 @@ common join --permanent          # keep serving after reboots (records the mode)
 common join --legacy             # the original whole-model gateway node instead
 ```
 
-Joining shows one overall percentage for setup, model downloads, and connecting. The setup stages are
-weighted estimates; download progress uses the bytes received. Press **d** (no Enter needed) to reveal
+Joining shows the Common ASCII banner above one overall percentage for setup, model downloads, and
+connecting. The setup stages are weighted estimates; download progress uses the bytes received. Press **d** (no Enter needed) to reveal
 the recent setup details and live logs, then **d** again to return to the percentage. Warnings and errors
 stay visible. Full logs are saved under `~/.common-network/logs/`; when output is redirected, use
 `--debug` for details. Ctrl+C leaves the network.

@@ -1895,8 +1895,7 @@ def main() -> None:
             print(f"{GLYPH_WORK} {dim('updating to the latest version...')}")
             apply_update_and_restart(remote)
 
-    if mode != "network":
-        print(paper(BANNER, bold=True))
+    print(paper(BANNER, bold=True))
 
     if args.remove_permanent:
         remove_permanent()
