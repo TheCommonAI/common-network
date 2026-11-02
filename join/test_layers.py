@@ -199,7 +199,7 @@ class Run(unittest.TestCase):
                     # Same-size update also exercises invalidation of cached bytecode.
                     replacement = launcher.read_bytes().replace(b"'old'", b"'new'")
                     def fetch(url, timeout):
-                        return io.BytesIO(replacement if url.endswith("layers.py") else b"# sibling\n")
+                        return io.BytesIO(replacement if url.split("?")[0].endswith("layers.py") else b"# sibling\n")
                     with mock.patch.object(join.urllib.request, "urlopen", side_effect=fetch):
                         self.assertTrue(join.refresh_siblings())
                     self.assertEqual(launcher.read_bytes(), replacement)

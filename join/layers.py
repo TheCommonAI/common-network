@@ -575,6 +575,8 @@ def ensure_source(env=None, ref: str | None = None, dest: Path = SOURCE_DIR, url
         log(f"would download {url} into {dest}")
         return dest
     log(f"downloading the Common Network code ({ref})...")
+    # A moving branch must not reuse the CDN's archive from before the latest merge.
+    url += ("&" if "?" in url else "?") + f"common_update={time.time_ns()}"
     try:
         with urlopen(url, timeout=60) as resp:
             blob = resp.read()

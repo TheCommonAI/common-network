@@ -512,7 +512,7 @@ UPDATE_CHECK_INTERVAL_SECONDS = 1800  # re-check every 30 min while a node sits 
 def fetch_update() -> bytes | None:
     """Return the latest join.py source from GitHub if it differs from the local copy, else None."""
     try:
-        with urllib.request.urlopen(UPDATE_URL, timeout=5) as resp:
+        with urllib.request.urlopen(UPDATE_URL + f"?common_update={time.time_ns()}", timeout=5) as resp:
             remote = resp.read()
     except urllib.error.HTTPError as e:
         # See the matching note in common/common.py. Offline is normal and
@@ -568,7 +568,7 @@ def refresh_siblings() -> bool:
     current = True
     for name in SIBLING_MODULES:
         try:
-            with urllib.request.urlopen(SIBLING_UPDATE_URL.format(name), timeout=5) as resp:
+            with urllib.request.urlopen(SIBLING_UPDATE_URL.format(name) + f"?common_update={time.time_ns()}", timeout=5) as resp:
                 remote = resp.read()
             if not remote.strip():
                 current = False
