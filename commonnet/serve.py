@@ -165,6 +165,9 @@ class NetworkBackend:
         self.stop_ids = self._stop_ids()
         self._dtype = hidden_dtype or torch.float32
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="commonnet-client")
+        self._route_transport = None
+        self._route_signature = None
+        self._closed = False
 
         def load():
             from commonnet.client4 import Client4
@@ -212,25 +215,72 @@ class NetworkBackend:
         return _WorkerStream(self._worker, self._generate, (prompt_ids, max_tokens, temperature, top_p, seed))
 
     def _generate(self, prompt_ids, max_tokens, temperature, top_p, seed):
-        endpoints, transport = self.network.plan()
+        endpoints, planned_transport = self.network.plan()
+        signature = self._transport_signature(endpoints, planned_transport)
+        if self._route_transport is not None and signature == self._route_signature:
+            # plan() creates a fresh transport to reflect current membership.
+            # When the route is unchanged, keep the established peer clients
+            # and their direct links, and discard only the unused wrapper.
+            planned_transport.shutdown()
+            transport = self._route_transport
+            self.network._last_transport = transport
+        else:
+            if self._route_transport is not None:
+                self._route_transport.shutdown()
+            transport = planned_transport
+            self._route_transport = transport
+            self._route_signature = signature
         self.client.transport = transport
         self.last_spec, self.last_reason, self.last_k = None, None, 0
-        try:
-            drafter = self.drafter if self.drafter is not None else self._lazy_drafter(endpoints, transport, temperature)
-            if drafter is None:
-                if self.last_reason is None:
-                    self.last_reason = self.draft_note
-                yield from self.client.generate_stream(endpoints, prompt_ids, max_tokens, temperature=temperature,
-                                                       top_p=top_p, seed=seed, stop_ids=self.stop_ids)
-                return
-            from commonnet import speculative
-            stats = speculative.SpecStats()
-            self.last_spec, self.last_k = stats, self.draft_k
-            yield from speculative.generate_stream(self.client, endpoints, prompt_ids, max_tokens, drafter=drafter,
-                                                   k=self.draft_k, temperature=temperature, top_p=top_p, seed=seed,
-                                                   stop_ids=self.stop_ids, stats=stats)
-        finally:
-            transport.shutdown()
+        drafter = self.drafter if self.drafter is not None else self._lazy_drafter(endpoints, transport, temperature)
+        if drafter is None:
+            if self.last_reason is None:
+                self.last_reason = self.draft_note
+            yield from self.client.generate_stream(endpoints, prompt_ids, max_tokens, temperature=temperature,
+                                                   top_p=top_p, seed=seed, stop_ids=self.stop_ids)
+            return
+        from commonnet import speculative
+        stats = speculative.SpecStats()
+        self.last_spec, self.last_k = stats, self.draft_k
+        yield from speculative.generate_stream(self.client, endpoints, prompt_ids, max_tokens, drafter=drafter,
+                                               k=self.draft_k, temperature=temperature, top_p=top_p, seed=seed,
+                                               stop_ids=self.stop_ids, stats=stats)
+
+    @staticmethod
+    def _transport_signature(endpoints, transport):
+        """Values that make reusing peer connections safe across requests."""
+        def freeze(value):
+            if isinstance(value, dict):
+                return tuple(sorted((freeze(k), freeze(v)) for k, v in value.items()))
+            if isinstance(value, (list, tuple)):
+                return tuple(freeze(item) for item in value)
+            if isinstance(value, set):
+                return tuple(sorted(freeze(item) for item in value))
+            if value is None or isinstance(value, (str, int, float, bool, bytes)):
+                return value
+            return repr(value)
+
+        return (
+            tuple((ep.name, ep.start, ep.end) for ep in endpoints),
+            freeze(transport.urls), freeze(transport._tokens),
+            freeze(transport._default_token), freeze(transport._replicas),
+            freeze(transport._local_urls), freeze(transport._kw),
+            transport._activation_codec,
+        )
+
+    def close(self) -> None:
+        """Close warm peer connections and the generation worker at node shutdown."""
+        if self._closed:
+            return
+        def close_transport():
+            if self._route_transport is not None:
+                self._route_transport.shutdown()
+                self._route_transport = None
+                self._route_signature = None
+
+        self._worker.submit(close_transport).result()
+        self._worker.shutdown(wait=True)
+        self._closed = True
 
     def _lazy_drafter(self, endpoints, transport, temperature):
         """The default-on drafter, or None for plain decoding. Never raises: any doubt means plain decoding.
@@ -341,6 +391,11 @@ class LazyBackend:
         if self._backend is not None and hasattr(self._backend, "speculation"):
             status["speculation"] = self._backend.speculation()
         return status
+
+    def close(self) -> None:
+        backend = self._backend
+        if backend is not None and hasattr(backend, "close"):
+            backend.close()
 
 
 class _NoTransport:
