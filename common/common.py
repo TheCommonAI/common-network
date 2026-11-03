@@ -14,6 +14,7 @@ Usage:
     common join --model bonsai-8b  serve a different layer-network model
     common join --7                join the seven-node Qwen3.5-122B-A10B preset (--1 through --7)
     common ask "<prompt>"          ask the network (needs `common join` running here)
+    common                         then type /benchmark to send ten measured prompts in sequence
     common peers                   who else is on the network right now
     common status                  this node: health, layers, requests served
     common leave                   take this machine off the network
@@ -3287,9 +3288,109 @@ def _repl_args(line: str) -> list[str]:
 
 def build_repl_help() -> str:
     return dim(
-        "/ask (implicit: just type)  /status  /peers  /privacy  /whoami  /report  /reports\n"
+        "/ask (implicit: just type)  /benchmark  /status  /peers  /privacy  /whoami  /report  /reports\n"
         "/update  /help  /exit     (join and leave belong in their own terminal: `common join`)"
     )
+
+
+_BENCHMARK_PROMPTS = (
+    "What is photosynthesis? Answer in one concise sentence.",
+    "Why do metal objects feel colder than wooden objects in the same room? Answer in one concise sentence.",
+    "Explain how a bicycle stays upright while moving, including the role of steering and balance. Answer in two sentences.",
+    "A small town wants to reduce summer water use without restricting essential household needs. Suggest practical changes for gardens, public spaces, and leaky infrastructure, and explain which should come first. Answer in two sentences.",
+    "A community library has a limited budget and wants to make its collection more useful to teenagers. Describe how it could learn what local teens need, choose materials and activities, involve teens in decisions, and tell whether the changes are helping. Answer in two sentences.",
+    "A coastal city is planning for heavier rainfall over the next twenty years. Compare the benefits and drawbacks of restoring wetlands, enlarging drains, adding permeable pavement, and limiting construction in flood-prone areas. Recommend a balanced order for taking action. Answer in three sentences.",
+    "A school is considering replacing some printed textbooks with shared tablets. Discuss accessibility, repair and replacement costs, student privacy, internet access, teacher workload, and the environmental effects of both options. Give a practical recommendation for a first-year trial and say what evidence should guide the decision to continue. Answer in three sentences.",
+    "A neighborhood has several vacant lots, hot summer afternoons, and residents with different mobility needs. Propose a small public garden plan that accounts for shade, paths, seating, water use, maintenance, and ways for residents to choose what is planted. Explain how to start with a low-cost pilot and evaluate it. Answer in three sentences.",
+    "How can a team make a useful meeting agenda? Answer in one concise sentence.",
+    "A family is choosing between repairing an older appliance and buying a more efficient replacement. Explain what information about repair cost, expected lifespan, energy use, reliability, and disposal would help them make a fair comparison. Give a simple decision rule. Answer in two sentences.",
+)
+
+
+def cmd_benchmark(model: str | None, *, local: bool = False) -> None:
+    """Run ten sequential greedy prompts through this node's measured layer API."""
+    if _use_gateway() or local:
+        print(red("✗ /benchmark measures the joined layer network, not legacy gateway or local-only mode."))
+        return
+    status, health = _read_layer_status()
+    base = _layer_api_base(status)
+    if health != "up":
+        _say_no_local_peer(health, status)
+        return
+    try:
+        api_health = _get_json(base + "/health", timeout=5)
+    except (OSError, ValueError, AttributeError) as e:
+        print(red("✗ can't reach this node's chat API."))
+        print(comment(str(e)))
+        return
+    if not api_health.get("ready", True):
+        print(red("✗ the local model is still loading; try /benchmark again when `common status` says up."))
+        return
+
+    print(f"{GLYPH_WORK} running 10 sequential greedy requests (max 96 output tokens each)")
+    print(dim("Each request is recorded by the network API; the first may include cold-start delay."))
+    print()
+    completed = failed = 0
+    drafted = accepted = 0
+    for index, prompt in enumerate(_BENCHMARK_PROMPTS, 1):
+        body = {"model": model or "auto", "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 96, "temperature": 0, "stream": True}
+        request = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+        started = time.monotonic()
+        ttft_ms = None
+        done = False
+        failure = None
+        try:
+            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                for raw in response:
+                    line = raw.decode("utf-8", errors="ignore").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[len("data:"):].strip()
+                    if payload == "[DONE]":
+                        done = True
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    if chunk.get("error"):
+                        failure = str((chunk["error"] or {}).get("message") or chunk["error"])
+                        break
+                    delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+                    if delta and ttft_ms is None:
+                        ttft_ms = int((time.monotonic() - started) * 1000)
+            if not done and failure is None:
+                failure = "stream ended before completion"
+        except urllib.error.HTTPError as e:
+            failure = f"HTTP {e.code}: {e.read().decode(errors='ignore')[:180]}"
+        except (urllib.error.URLError, socket.timeout, OSError) as e:
+            failure = f"request failed: {e}"
+
+        word_count = len(prompt.split())
+        if failure:
+            failed += 1
+            print(red(f"  {index:>2}/10  failed ({word_count} prompt words): {failure}"))
+            continue
+
+        completed += 1
+        try:
+            last = (_get_json(base + "/health", timeout=3).get("speculation") or {}).get("last_request") or {}
+        except (OSError, ValueError, AttributeError):
+            last = {}
+        proposed, kept = last.get("proposed") or 0, last.get("accepted") or 0
+        drafted += proposed
+        accepted += kept
+        spec = f"drafts {kept}/{proposed}" if proposed else f"no drafts ({last.get('reason') or 'not reported'})"
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        print(f"  {index:>2}/10  {word_count:>3} prompt words · TTFT {_fmt_ms(ttft_ms)} · total {_fmt_ms(elapsed_ms)} · {spec}")
+
+    print()
+    print(f"{GLYPH_DONE} benchmark finished: {completed} completed, {failed} failed")
+    print(dim(f"local speculation: {accepted}/{drafted} accepted draft tokens" if drafted
+              else "no draft tokens were reported during this run"))
+    print(dim("Public API metrics refresh on the next node heartbeat, usually within 15 seconds."))
 
 
 def interactive_session(gateway: str, args: argparse.Namespace) -> None:
@@ -3316,6 +3417,9 @@ def interactive_session(gateway: str, args: argparse.Namespace) -> None:
             continue
         if line == "/status":
             cmd_status(gateway, False)
+            continue
+        if line == "/benchmark":
+            cmd_benchmark(session_model, local=session_local)
             continue
         if line == "/peers" or line.startswith("/peers "):
             rest = line.split()[1:]

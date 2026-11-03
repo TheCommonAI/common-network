@@ -7,6 +7,7 @@ questions, and inspect it.
 common join --check
 common join
 common ask "What's a good way to learn recursion?"
+common                         # then type /benchmark for ten sequential sample requests
 common peers
 common status
 common help
@@ -29,6 +30,13 @@ validated before any files are replaced; failed installs restore the previous fi
 `common join` after updating a running node. Its original shaded Common ASCII banner appears above
 the overall progress percentage, with setup details behind **d**. Model and network code are fetched
 when joining; `COMMONNET_SRC` and `COMMONNET_REF` still select a custom checkout or pinned network.
+
+In the interactive session, `/benchmark` sends ten varied-length prompts one at a time through this
+machine's joined layer network. It uses greedy decoding so speculative decoding can run, caps each
+answer at 96 tokens, and reports per-request TTFT and local draft acceptance when available. Each
+completed request is recorded by the normal chat metrics reporter; refresh the public stats API after
+the next heartbeat (usually within 15 seconds) to see the rolling aggregate. The first request may
+include cold-start delay.
 
 This folder is fetched by path from `main` by installed clients, so it stays
 here.
