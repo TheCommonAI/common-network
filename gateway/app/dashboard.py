@@ -30,7 +30,8 @@ MAX_PER_SOURCE = 200
 BIND = b"commonnet-dashboard-v1\n"
 COUNTERS_V1 = ("requests", "completed", "failed", "cancelled", "output_tokens", "decode_tokens", "decode_ms",
                "ttft_count", "ttft_ms", "total_ms")
-COUNTERS = (*COUNTERS_V1, "stage_count", "stage_ms", "network_count", "network_ms")
+COUNTERS_V2 = (*COUNTERS_V1, "stage_count", "stage_ms", "network_count", "network_ms")
+COUNTERS = (*COUNTERS_V2, "speculative_drafted_tokens", "speculative_accepted_tokens")
 TIME_COUNTERS = {"decode_ms", "ttft_ms", "total_ms", "stage_ms", "network_ms"}
 PHASES = {"starting", "downloading", "loading", "up", "moving", "leaving", "stopped", "error"}
 _lock = threading.Lock()
@@ -89,7 +90,7 @@ def validate(body, now):
     required = {"v", "network", "peer", "pub", "sig", "session", "seq", "ts", "phase", "backend", "gib",
                 "layers", "assigned_layers", "buckets"}
     try:
-        if not isinstance(body, dict) or set(body) != required or type(body["v"]) is not int or body["v"] not in (1, 2):
+        if not isinstance(body, dict) or set(body) != required or type(body["v"]) is not int or body["v"] not in (1, 2, 3):
             return "malformed report"
         if not isinstance(body["network"], str) or not 1 <= len(body["network"]) <= 128:
             return "bad network"
@@ -110,7 +111,7 @@ def validate(body, now):
         if not isinstance(body["buckets"], list) or len(body["buckets"]) > WINDOW_SECONDS // BUCKET_SECONDS + 1:
             return "too many metric buckets"
         stamps = set()
-        counters = COUNTERS if body["v"] == 2 else COUNTERS_V1
+        counters = COUNTERS if body["v"] == 3 else COUNTERS_V2 if body["v"] == 2 else COUNTERS_V1
         for bucket in body["buckets"]:
             if not isinstance(bucket, dict) or set(bucket) != {"ts", *counters}:
                 return "bad metrics"
@@ -127,6 +128,8 @@ def validate(body, now):
                     or bucket["ttft_count"] > bucket["completed"]
                     or bucket["decode_tokens"] != bucket["output_tokens"] - bucket["ttft_count"]):
                 return "inconsistent metric counters"
+            if body["v"] == 3 and bucket["speculative_accepted_tokens"] > bucket["speculative_drafted_tokens"]:
+                return "inconsistent speculative counters"
         pub = base64.b64decode(body["pub"], validate=True)
         sig = base64.b64decode(body["sig"], validate=True)
         if len(pub) != 32 or hashlib.sha256(pub).hexdigest()[:32] != body["peer"]:
@@ -190,7 +193,12 @@ def _summary(buckets):
             "avg_ms_per_token": round(counts["decode_ms"] / decode, 3) if decode and counts["decode_ms"] else None,
             "avg_time_to_first_token_ms": round(counts["ttft_ms"] / ttft, 3) if ttft else None,
             "avg_stage_ms": round(counts["stage_ms"] / counts["stage_count"], 3) if counts["stage_count"] else None,
-            "avg_network_ms": round(counts["network_ms"] / counts["network_count"], 3) if counts["network_count"] else None}
+            "avg_network_ms": round(counts["network_ms"] / counts["network_count"], 3) if counts["network_count"] else None,
+            "speculative_drafted_tokens": counts["speculative_drafted_tokens"],
+            "speculative_accepted_tokens": counts["speculative_accepted_tokens"],
+            "speculative_acceptance_rate": (
+                round(counts["speculative_accepted_tokens"] / counts["speculative_drafted_tokens"], 4)
+                if counts["speculative_drafted_tokens"] else None)}
 
 
 def snapshot(networks_path, network=None):

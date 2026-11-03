@@ -29,6 +29,8 @@ until their manifest is installed on the gateway.
 | `serving_nodes` | Online peers advertising an active layer slice |
 | `reporting_nodes` | Online peers sending the new telemetry; older directory-only nodes still appear |
 | `metrics` | Weighted timing summary across the selected model(s) |
+| `metrics.speculative_acceptance_rate` | Accepted draft tokens divided by proposed draft tokens (`0`–`1`, or `null` when unavailable) |
+| `metrics.speculative_accepted_tokens`, `metrics.speculative_drafted_tokens` | Five-minute window totals used to compute the acceptance rate |
 | `models[]` | Model summaries, coverage, timings, and their nodes |
 | `models[].network`, `.model`, `.num_layers` | Network ID, model name, and decoder-layer count |
 | `models[].route_ready` | Online advertised slices form a continuous route from layer 0 to the final layer |
@@ -69,7 +71,10 @@ announcements, not an active inference probe or a guarantee that every peer comp
   "avg_tokens_per_second": null,
   "avg_ms_per_token": null,
   "avg_time_to_first_token_ms": null,
-  "avg_network_ms": null
+  "avg_network_ms": null,
+  "speculative_acceptance_rate": null,
+  "speculative_accepted_tokens": 0,
+  "speculative_drafted_tokens": 0
 }
 ```
 
@@ -79,6 +84,12 @@ announcements, not an active inference probe or a guarantee that every peer comp
   excluded from both. A generation of N tokens contributes N−1 decode intervals.
 - `avg_time_to_first_token_ms` is the mean time from the local API receiving a request to observing its
   first token, including local queueing and prompt processing. It excludes browser-to-node network time.
+- `speculative_acceptance_rate` is the accepted draft-token count divided by the proposed draft-token
+  count across the five-minute window (a ratio from `0` to `1`). The matching
+  `speculative_accepted_tokens` and `speculative_drafted_tokens` fields are included for context.
+  It is `null` until at least one draft token has been proposed. These values are populated only by
+  nodes whose local chat API is generating with speculative decoding enabled; plain generation adds
+  no speculative samples.
 - `avg_network_ms` is the total reported transit time across the participating peer links, averaged over
   completed model requests. Per-link transit is estimated from each successful RPC's elapsed time minus
   the server-reported compute time. A null means no updated peer has reported a usable sample yet.
@@ -97,8 +108,9 @@ observations, not independently attested benchmarks. `reporting_nodes` indicates
 coverage. External clients that bypass updated nodes' chat APIs are not measured. Historical speed
 samples can remain visible for five minutes after their source node goes offline.
 
-Dashboard report schema v2 adds the stage and network counters. The gateway continues to accept v1 reports;
-their new timing fields remain null until v2 telemetry arrives. An older peer that does not accept the
+Dashboard report schema v2 adds the stage and network counters. Schema v3 adds speculative draft and
+acceptance counters. The gateway continues to accept v1 and v2 reports; fields absent from older schemas
+remain null until newer telemetry arrives. An older peer that does not accept the
 optional timing value on session close still receives the original close request as a compatibility fallback.
 
 The public endpoint never returns bearer tokens, peer URLs, IP addresses, keys, prompts, or answers.

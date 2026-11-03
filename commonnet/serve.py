@@ -212,9 +212,13 @@ class NetworkBackend:
 
     def stream(self, prompt_ids, max_tokens, temperature, top_p, seed):
         """An iterator of token ids with .close(). The route and transport are built on the worker thread."""
-        return _WorkerStream(self._worker, self._generate, (prompt_ids, max_tokens, temperature, top_p, seed))
+        tracking = {}
+        stream = _WorkerStream(self._worker, self._generate,
+                               (prompt_ids, max_tokens, temperature, top_p, seed, tracking))
+        stream.speculative_stats = tracking
+        return stream
 
-    def _generate(self, prompt_ids, max_tokens, temperature, top_p, seed):
+    def _generate(self, prompt_ids, max_tokens, temperature, top_p, seed, tracking=None):
         endpoints, planned_transport = self.network.plan()
         signature = self._transport_signature(endpoints, planned_transport)
         if self._route_transport is not None and signature == self._route_signature:
@@ -242,6 +246,8 @@ class NetworkBackend:
         from commonnet import speculative
         stats = speculative.SpecStats()
         self.last_spec, self.last_k = stats, self.draft_k
+        if tracking is not None:
+            tracking["stats"] = stats
         yield from speculative.generate_stream(self.client, endpoints, prompt_ids, max_tokens, drafter=drafter,
                                                k=self.draft_k, temperature=temperature, top_p=top_p, seed=seed,
                                                stop_ids=self.stop_ids, stats=stats)
@@ -520,7 +526,9 @@ def make_handler(backend, *, max_context: int = DEFAULT_MAX_CONTEXT, metrics=Non
                 stream = backend.stream(prompt_ids, req["max_tokens"], req["temperature"], req["top_p"], req["seed"])
                 if metrics is not None:
                     from commonnet.metrics import MeasuredStream
-                    stream = MeasuredStream(stream, metrics, started)
+                    tracking = getattr(stream, "speculative_stats", None)
+                    stream = MeasuredStream(stream, metrics, started,
+                                            speculative_stats=(lambda: tracking.get("stats")) if tracking is not None else None)
             except Exception as e:
                 err = _classify(e)
                 self._json(err.status, err.body())

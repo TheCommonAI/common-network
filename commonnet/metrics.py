@@ -11,7 +11,8 @@ WINDOW_SECONDS = 300
 BUCKET_SECONDS = 10
 BIND = b"commonnet-dashboard-v1\n"
 COUNTERS = ("requests", "completed", "failed", "cancelled", "output_tokens", "decode_tokens", "decode_ms",
-            "ttft_count", "ttft_ms", "total_ms", "stage_count", "stage_ms", "network_count", "network_ms")
+            "ttft_count", "ttft_ms", "total_ms", "stage_count", "stage_ms", "network_count", "network_ms",
+            "speculative_drafted_tokens", "speculative_accepted_tokens")
 
 
 class Metrics:
@@ -25,7 +26,8 @@ class Metrics:
             if stamp < now - WINDOW_SECONDS:
                 del self._buckets[stamp]
 
-    def record(self, *, outcome, count, first, last, started, ended):
+    def record(self, *, outcome, count, first, last, started, ended,
+               speculative_drafted_tokens=0, speculative_accepted_tokens=0):
         now = self.clock()
         with self._lock:
             self._expire(now)
@@ -42,6 +44,10 @@ class Metrics:
                 if count > 1:
                     bucket["decode_tokens"] += count - 1
                     bucket["decode_ms"] += max(0, last - first) * 1000
+            if (type(speculative_drafted_tokens) is int and type(speculative_accepted_tokens) is int
+                    and 0 <= speculative_accepted_tokens <= speculative_drafted_tokens):
+                bucket["speculative_drafted_tokens"] += speculative_drafted_tokens
+                bucket["speculative_accepted_tokens"] += speculative_accepted_tokens
 
     def record_stage(self, stage_ms, network_ms=None):
         """Record this node's compute and transit for one distributed model session."""
@@ -69,8 +75,9 @@ class Metrics:
 
 class MeasuredStream:
     """Observe tokens at the local chat API, including queueing in time to first token."""
-    def __init__(self, stream, metrics, started, clock=time.monotonic):
+    def __init__(self, stream, metrics, started, clock=time.monotonic, speculative_stats=None):
         self.stream, self.metrics, self.started, self.clock = stream, metrics, started, clock
+        self.speculative_stats = speculative_stats
         self.count, self.first, self.last, self.finished = 0, None, None, False
 
     def __iter__(self):
@@ -79,8 +86,11 @@ class MeasuredStream:
     def _finish(self, outcome):
         if not self.finished:
             self.finished = True
+            stats = self.speculative_stats() if self.speculative_stats else None
             self.metrics.record(outcome=outcome, count=self.count, first=self.first, last=self.last,
-                                started=self.started, ended=self.clock())
+                                started=self.started, ended=self.clock(),
+                                speculative_drafted_tokens=getattr(stats, "drafted", 0),
+                                speculative_accepted_tokens=getattr(stats, "accepted", 0))
 
     def __next__(self):
         try:
@@ -115,7 +125,7 @@ class Reporter:
 
     def payload(self):
         self.seq += 1
-        return self.identity.sign_dashboard({"v": 2, **self.snapshot(), "session": self.session,
+        return self.identity.sign_dashboard({"v": 3, **self.snapshot(), "session": self.session,
                                              "seq": self.seq, "ts": self.clock(), "buckets": self.metrics.snapshot()})
 
     def _post(self, payload):
