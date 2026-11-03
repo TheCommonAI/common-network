@@ -803,7 +803,8 @@ class Node:
         block = self._make_block(window) if block is None else block
         if try_direct and self.direct is not None and self._serve_direct(block):
             return
-        server = BlockServer(block, port=self.port, token=self.token, extra_handlers=self.handlers()).start()
+        server = BlockServer(block, port=self.port, token=self.token, extra_handlers=self.handlers(),
+                             on_session_close=self.metrics.record_stage).start()
         with self._lock:
             self._block, self.server = block, server
             self.port = server.port
@@ -901,12 +902,12 @@ class Node:
         want = self.port or (direct_mod.DEFAULT_TCP_PORT if cfg.auto else 0)
         try:
             server = BlockServer(block, host, want, token=self.token, extra_handlers=self.handlers(),
-                                 ssl_context=ctx).start()
+                                 ssl_context=ctx, on_session_close=self.metrics.record_stage).start()
         except OSError:
             if not want or self.port:
                 raise
             server = BlockServer(block, host, 0, token=self.token, extra_handlers=self.handlers(),
-                                 ssl_context=ctx).start()   # the default port is busy: any free one
+                                 ssl_context=ctx, on_session_close=self.metrics.record_stage).start()   # port busy: any free one
         with self._lock:
             self._block, self.server = block, server
             self.port = server.port
@@ -1112,9 +1113,11 @@ class Node:
 
     def _front_decision(self, setting, front, weight_gib, reused):
         if setting != "auto":
+            front.on_session_close = self.metrics.record_stage
             return front, ("reusing this node's own block" if reused else "loaded separately")
         decision = localfront.decide_auto(self._bench_front(front), self._free_gib() if not (reused or self.hw.backend == 'nf4') else 1e9, weight_gib)
         if decision.enabled:
+            front.on_session_close = self.metrics.record_stage
             return front, decision.reason
         front.shutdown()
         return None, decision.reason

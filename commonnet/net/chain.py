@@ -225,6 +225,11 @@ def run(server, obj) -> dict:
                 reply = client.chain(hop["url"], onward)
             except (RemoteError, Unreachable) as exc:
                 raise downstream_failure(exc, hop, req["route"]) from None
+            if client.timings:
+                timing = client.timings[-1]
+                total, served = timing.get("total_ms"), timing.get("server_ms")
+                if timing.get("path") == "/chain" and timing.get("status") == 200 and isinstance(total, (int, float)) and isinstance(served, (int, float)):
+                    session.network_ms = (session.network_ms or 0.0) + max(total - served, 0.0)
         reply = check_reply(reply)
         session.chain_last = (key, reply)
         return reply

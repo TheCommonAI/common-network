@@ -282,9 +282,17 @@ class BlockClient:
         body = protocol.encode_session_request(session_id)
         protocol.decode_ok(self._call("POST", endpoint, "/session", body, timeout))
 
-    def close(self, endpoint: str, session_id: str, timeout: float = CONTROL_TIMEOUT_SECONDS) -> None:
-        body = protocol.encode_session_request(session_id)
-        protocol.decode_ok(self._call("POST", endpoint, "/close", body, timeout))
+    def close(self, endpoint: str, session_id: str, timeout: float = CONTROL_TIMEOUT_SECONDS,
+              *, network_ms: float | None = None) -> None:
+        body = protocol.encode_close_request(session_id, network_ms)
+        try:
+            protocol.decode_ok(self._call("POST", endpoint, "/close", body, timeout))
+        except RemoteError as exc:
+            if network_ms is None or exc.status != 400:
+                raise
+            # Older peers only accept the original {id} close envelope.
+            protocol.decode_ok(self._call("POST", endpoint, "/close",
+                                          protocol.encode_session_request(session_id), timeout))
 
     def truncate(self, endpoint: str, session_id: str, length: int, timeout: float = CONTROL_TIMEOUT_SECONDS) -> None:
         """Cut the session back to `length` positions. Idempotent. An old server answers 404 'no endpoint'."""

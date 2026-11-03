@@ -11,7 +11,7 @@ WINDOW_SECONDS = 300
 BUCKET_SECONDS = 10
 BIND = b"commonnet-dashboard-v1\n"
 COUNTERS = ("requests", "completed", "failed", "cancelled", "output_tokens", "decode_tokens", "decode_ms",
-            "ttft_count", "ttft_ms", "total_ms")
+            "ttft_count", "ttft_ms", "total_ms", "stage_count", "stage_ms", "network_count", "network_ms")
 
 
 class Metrics:
@@ -42,6 +42,23 @@ class Metrics:
                 if count > 1:
                     bucket["decode_tokens"] += count - 1
                     bucket["decode_ms"] += max(0, last - first) * 1000
+
+    def record_stage(self, stage_ms, network_ms=None):
+        """Record this node's compute and transit for one distributed model session."""
+        if not isinstance(stage_ms, (int, float)) or stage_ms <= 0:
+            return
+        if network_ms is not None and (not isinstance(network_ms, (int, float)) or network_ms < 0):
+            network_ms = None
+        now = self.clock()
+        with self._lock:
+            self._expire(now)
+            stamp = int(now // BUCKET_SECONDS) * BUCKET_SECONDS
+            bucket = self._buckets.setdefault(stamp, {"ts": stamp, **dict.fromkeys(COUNTERS, 0)})
+            bucket["stage_count"] += 1
+            bucket["stage_ms"] += stage_ms
+            if network_ms is not None:
+                bucket["network_count"] += 1
+                bucket["network_ms"] += network_ms
 
     def snapshot(self):
         with self._lock:
@@ -98,7 +115,7 @@ class Reporter:
 
     def payload(self):
         self.seq += 1
-        return self.identity.sign_dashboard({"v": 1, **self.snapshot(), "session": self.session,
+        return self.identity.sign_dashboard({"v": 2, **self.snapshot(), "session": self.session,
                                              "seq": self.seq, "ts": self.clock(), "buckets": self.metrics.snapshot()})
 
     def _post(self, payload):

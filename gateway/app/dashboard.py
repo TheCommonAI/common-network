@@ -28,9 +28,10 @@ MAX_PEERS = 5000
 MAX_SESSIONS = 5000
 MAX_PER_SOURCE = 200
 BIND = b"commonnet-dashboard-v1\n"
-COUNTERS = ("requests", "completed", "failed", "cancelled", "output_tokens", "decode_tokens", "decode_ms",
-            "ttft_count", "ttft_ms", "total_ms")
-TIME_COUNTERS = {"decode_ms", "ttft_ms", "total_ms"}
+COUNTERS_V1 = ("requests", "completed", "failed", "cancelled", "output_tokens", "decode_tokens", "decode_ms",
+               "ttft_count", "ttft_ms", "total_ms")
+COUNTERS = (*COUNTERS_V1, "stage_count", "stage_ms", "network_count", "network_ms")
+TIME_COUNTERS = {"decode_ms", "ttft_ms", "total_ms", "stage_ms", "network_ms"}
 PHASES = {"starting", "downloading", "loading", "up", "moving", "leaving", "stopped", "error"}
 _lock = threading.Lock()
 _peers = {}
@@ -88,7 +89,7 @@ def validate(body, now):
     required = {"v", "network", "peer", "pub", "sig", "session", "seq", "ts", "phase", "backend", "gib",
                 "layers", "assigned_layers", "buckets"}
     try:
-        if not isinstance(body, dict) or set(body) != required or type(body["v"]) is not int or body["v"] != 1:
+        if not isinstance(body, dict) or set(body) != required or type(body["v"]) is not int or body["v"] not in (1, 2):
             return "malformed report"
         if not isinstance(body["network"], str) or not 1 <= len(body["network"]) <= 128:
             return "bad network"
@@ -109,15 +110,16 @@ def validate(body, now):
         if not isinstance(body["buckets"], list) or len(body["buckets"]) > WINDOW_SECONDS // BUCKET_SECONDS + 1:
             return "too many metric buckets"
         stamps = set()
+        counters = COUNTERS if body["v"] == 2 else COUNTERS_V1
         for bucket in body["buckets"]:
-            if not isinstance(bucket, dict) or set(bucket) != {"ts", *COUNTERS}:
+            if not isinstance(bucket, dict) or set(bucket) != {"ts", *counters}:
                 return "bad metrics"
             stamp = bucket["ts"]
             if (type(stamp) is not int or stamp % BUCKET_SECONDS or stamp in stamps
                     or not now - WINDOW_SECONDS - BUCKET_SECONDS <= stamp <= now + 15):
                 return "bad bucket timestamp"
             stamps.add(stamp)
-            for name in COUNTERS:
+            for name in counters:
                 value = bucket[name]
                 if not _number(value) or not 0 <= value <= 1e12 or (name not in TIME_COUNTERS and type(value) is not int):
                     return "bad metric counter"
@@ -170,7 +172,9 @@ async def report(request):
         if key not in _reports and len(_reports) >= MAX_SESSIONS:
             return JSONResponse({"error": "metrics full"}, status_code=429)
         buckets = dict(old["buckets"]) if old else {}
-        buckets.update({b["ts"]: b for b in body["buckets"]})
+        for bucket in body["buckets"]:
+            normalized = {**dict.fromkeys(COUNTERS, 0), **bucket}
+            buckets[bucket["ts"]] = normalized
         buckets = {stamp: bucket for stamp, bucket in buckets.items() if stamp >= now - WINDOW_SECONDS}
         _reports[key] = {"seq": body["seq"], "at": now, "buckets": buckets}
         _remember(body, now, source)
@@ -178,13 +182,15 @@ async def report(request):
 
 
 def _summary(buckets):
-    counts = {name: sum(b[name] for b in buckets) for name in COUNTERS}
+    counts = {name: sum(b.get(name, 0) for b in buckets) for name in COUNTERS}
     decode, ttft = counts["decode_tokens"], counts["ttft_count"]
     return {"sample_count": counts["completed"], "failed_requests": counts["failed"],
             "cancelled_requests": counts["cancelled"], "output_tokens": counts["output_tokens"],
             "avg_tokens_per_second": round(decode * 1000 / counts["decode_ms"], 3) if decode and counts["decode_ms"] else None,
             "avg_ms_per_token": round(counts["decode_ms"] / decode, 3) if decode and counts["decode_ms"] else None,
-            "avg_time_to_first_token_ms": round(counts["ttft_ms"] / ttft, 3) if ttft else None}
+            "avg_time_to_first_token_ms": round(counts["ttft_ms"] / ttft, 3) if ttft else None,
+            "avg_stage_ms": round(counts["stage_ms"] / counts["stage_count"], 3) if counts["stage_count"] else None,
+            "avg_network_ms": round(counts["network_ms"] / counts["network_count"], 3) if counts["network_count"] else None}
 
 
 def snapshot(networks_path, network=None):
@@ -241,12 +247,20 @@ def snapshot(networks_path, network=None):
                           else "unassigned" if not n["layers"] else "full" if ready else "partial")
             n["display_state"] = {"offline": "off", "linking": "lnk", "unassigned": "idl", "full": "ful", "partial": "grp"}[n["state"]]
         metrics = by_model[ident]
+        model_summary = _summary(metrics)
+        model_summary.pop("avg_stage_ms", None)  # stage averages belong to individual nodes
+        model_counts = {name: sum(b.get(name, 0) for b in metrics) for name in COUNTERS}
+        # network_ms is summed over participating stages, while completed is
+        # counted once at each node that accepted the user's chat request.
+        model_summary["avg_network_ms"] = (
+            round(model_counts["network_ms"] / model_counts["completed"], 3)
+            if model_counts["network_count"] and model_counts["completed"] else None)
         models.append({"network": ident, "model": model.get("name", ident), "num_layers": model.get("num_layers"),
                        "route_ready": ready, "online_nodes": sum(n["online"] for n in nodes),
                        "serving_nodes": sum(n["online"] and n["phase"] == "up" and bool(n["layers"]) for n in nodes),
                        "reporting_nodes": sum(n["telemetry_reporting"] for n in nodes),
                        "stages": [{"layers": [a, b], "peers": sum(x <= a and b <= y for x, y in windows)} for a, b in stages],
-                       "metrics": _summary(metrics), "nodes": nodes})
+                       "metrics": model_summary, "nodes": nodes})
     return {"v": 1, "updated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
             "window_seconds": WINDOW_SECONDS, "bucket_seconds": BUCKET_SECONDS, "history_seconds": HISTORY_SECONDS,
             "history_since": STARTED_AT, "poll_after_seconds": 5, "metrics_source": "self_reported_local_chat_api",
