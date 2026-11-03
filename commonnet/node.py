@@ -71,6 +71,10 @@ MOVE_COOLDOWN_SECONDS = 300.0
 TUNNEL_CHECK_SECONDS = 120.0
 TUNNEL_GRACE_SECONDS = 600.0
 TUNNEL_WAIT_SECONDS = 180.0
+TUNNEL_RETRY_SECONDS = 30.0
+# A laptop sleeping suspends this process. Its peers stop hearing renewals and
+# expire it; on resume, refresh discovery and repair a stale tunnel promptly.
+RESUME_GAP_SECONDS = 45.0
 VRAM_RESERVE_GIB = 1.5
 MAC_MEMORY_FRACTION = 0.62
 CPU_AVAILABLE_FRACTION = 0.6  # a CPU-only machine offers min(60% of free RAM, 50% of total RAM)
@@ -395,7 +399,7 @@ class Node:
         # public address, no tunnel unless the node proves unreachable. None (the default) changes nothing.
         self.direct, self.state_dir, self._decider = direct, state_dir, decider
         # local_front (None | "auto" | "on" | a layer count): also hold layers [0, F) here and run them in the chat client's
-        # process (commonnet/localfront.py). None, the default, changes nothing.
+        # process (commonnet/localfront.py). CLI joins default to auto; None keeps programmatic Node users unchanged.
         self.local_front_setting = local_front
         self.local_front = None
         self._free_gib, self._bench_front = localfront.free_gib, localfront.benchmark_ms
@@ -449,6 +453,7 @@ class Node:
         self._block = None
         self._tunnel_proc = None
         self._tunnel_bad_since: float | None = None
+        self._tunnel_retry_at = 0.0
         self._last_move = 0.0
         self._lock = threading.RLock()
         self._stop = threading.Event()   # set once stop() starts: loops end
@@ -617,6 +622,12 @@ class Node:
         if self._gossiper is not None:
             self._gossiper.stop()
         self._teardown_api()
+        if self.local_front is not None:
+            try:
+                self.local_front.shutdown()
+            except Exception:
+                pass
+            self.local_front = None
         self._teardown_server()
         self._close_tunnel()
         self._stop_direct()
@@ -787,9 +798,9 @@ class Node:
         self.progress.feed(message)
         self.log(message)
 
-    def _serve(self, window) -> None:
-        block = self._make_block(window)
-        if self.direct is not None and self._serve_direct(block):
+    def _serve(self, window, block=None, *, try_direct: bool = True) -> None:
+        block = self._make_block(window) if block is None else block
+        if try_direct and self.direct is not None and self._serve_direct(block):
             return
         server = BlockServer(block, port=self.port, token=self.token, extra_handlers=self.handlers()).start()
         with self._lock:
@@ -1216,6 +1227,8 @@ class Node:
 
     def _close_tunnel(self) -> None:
         proc, self._tunnel_proc = self._tunnel_proc, None
+        with self._lock:
+            self.url = None
         if proc is not None:
             try:
                 proc.terminate()
@@ -1227,19 +1240,103 @@ class Node:
                     pass
 
     def _check_tunnel(self) -> None:
-        if not self.use_tunnel or self._tunnel_proc is None or self.state != "up":
+        if not self.use_tunnel or self.server is None or self.state != "up":
+            return
+        if self.direct is not None and self.decision is not None and self.decision.direct:
+            return
+        now = time.monotonic()
+        if self._tunnel_proc is None:
+            if now < self._tunnel_retry_at:
+                return
+            self.log("network tunnel is not running; reopening it")
+            try:
+                self._start_tunnel()
+            except Exception:
+                self._tunnel_retry_at = time.monotonic() + TUNNEL_RETRY_SECONDS
+                raise
+            self._tunnel_retry_at = 0.0
+            self._tunnel_bad_since = None
             return
         from commonnet.net import tunnel as tunnel_mod
         if tunnel_mod._probe(self.url, self.token):
             self._tunnel_bad_since = None
             return
-        now = time.monotonic()
         self._tunnel_bad_since = self._tunnel_bad_since or now
         if now - self._tunnel_bad_since >= TUNNEL_GRACE_SECONDS:
             self.log("the tunnel stayed unreachable; replacing it")
             self._close_tunnel()
-            self._start_tunnel()
-            self._tunnel_bad_since = None
+            try:
+                self._start_tunnel()
+            except Exception:
+                self._tunnel_retry_at = time.monotonic() + TUNNEL_RETRY_SECONDS
+                raise
+            else:
+                self._tunnel_bad_since = None
+                self._tunnel_retry_at = 0.0
+
+    def _after_resume(self) -> None:
+        """Refresh peer discovery and restore connectivity after the OS suspended this process."""
+        self.log("laptop resumed; reconnecting to the network")
+        if self._gossiper is not None:
+            # Peers that failed just before sleep should get another chance now.
+            self._gossiper.failures.clear()
+        self._learn_directory()
+        self._learn()
+        if self.dht is not None:
+            try:
+                self.dht.bootstrap()
+                self._merge_dht()
+            except Exception as e:
+                self.log(f"DHT refresh after resume failed ({type(e).__name__})")
+
+        if self.direct is not None:
+            self._reopen_direct_endpoint()
+            return
+
+        # A quick tunnel can keep its process but lose its connection while the
+        # laptop sleeps. Probe it now instead of waiting for the normal 10-minute
+        # failure grace period. The server/model stay loaded; only the tunnel is
+        # replaced when it no longer answers.
+        if self.use_tunnel and self.server is not None:
+            from commonnet.net import tunnel as tunnel_mod
+            if self._tunnel_proc is not None and tunnel_mod._probe(self.url, self.token):
+                self._tunnel_bad_since = None
+            else:
+                self.log("network tunnel did not survive sleep; reopening it")
+                self._close_tunnel()
+                self._tunnel_bad_since = None
+                try:
+                    self._start_tunnel()
+                except Exception:
+                    self._tunnel_retry_at = time.monotonic() + TUNNEL_RETRY_SECONDS
+                    raise
+                self._tunnel_retry_at = 0.0
+
+    def _reopen_direct_endpoint(self) -> None:
+        """Re-evaluate a direct address after sleep, retaining the loaded model block."""
+        with self._lock:
+            server, block, window = self.server, self._block, self.window
+            self.server = None
+            self.url = None
+            self.fp = self.fpsig = None
+        if server is not None:
+            server.stop()
+        self._stop_direct()  # release any old router mapping and replace the stale DHT socket
+        self.decision = None
+        self._gw_check = None
+        self._verified_by = ""
+        self._direct_failures = 0
+        if block is None or window is None:
+            raise NodeError("cannot reconnect after sleep because this node has no loaded layer block")
+        try:
+            self._start_dht()
+        except Exception as e:
+            if not (self.direct.tunnel_fallback and self.use_tunnel):
+                raise
+            self.log(f"direct network refresh failed ({type(e).__name__}); reconnecting through a tunnel")
+            self._serve(window, block, try_direct=False)
+            return
+        self._serve(window, block)
 
     # -- keeping the record fresh and rebalancing ----------------------------------------------
 
@@ -1265,8 +1362,15 @@ class Node:
 
     def _maintain(self) -> None:
         last_move_check = last_tunnel_check = time.monotonic()
+        last_wall = time.time()
+        last_mono = time.monotonic()
         while not self._stop.wait(self.resign_s):
             try:
+                wall, mono = time.time(), time.monotonic()
+                elapsed = max(wall - last_wall, mono - last_mono)
+                last_wall, last_mono = wall, mono
+                if elapsed >= RESUME_GAP_SECONDS:
+                    self._after_resume()
                 self._announce(self.publish())
                 now = time.monotonic()
                 if self.gateway:
@@ -1362,10 +1466,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--backend", choices=["mlx", "nf4", "cpu"], help="override the detected backend")
     p.add_argument("--stage-gib", type=float, help="memory to offer, in GiB (default: detected)")
     p.add_argument("--layers", metavar="A-B", help="serve exactly this window of layers (for example 27-36) instead of the one the network picks; it must start and end on a stage boundary")
-    p.add_argument("--local-front", metavar="N|auto|on", default=None,
+    p.add_argument("--local-front", metavar="N|auto|on|off", default=None,
                    help=f"also hold the first N layers (a stage boundary; on = the first stage) and run them in the chat client, so the "
-                        f"prompt never leaves this machine and the first network hop is gone; auto = only if this machine is fast "
-                        f"and has the memory. Default off (or set {localfront.ENV})")
+                        f"prompt stays local and the first network hop is removed when enabled; auto = only if this machine is fast "
+                        f"and has the memory. Default auto; use off to disable (or set {localfront.ENV})")
     p.add_argument("--identity-dir", type=Path, help="where this peer's key lives (default: ~/.common-network/net/<network>)")
     p.add_argument("--stub", action="store_true", help="serve an identity block with no weights (tests)")
     p.add_argument("--no-tunnel", action="store_true", help="do not open a tunnel; publish --advertise or the loopback URL")
@@ -1472,7 +1576,10 @@ def _main(args) -> int:
             if not m:
                 raise NodeError(f"--layers wants a window like 27-36, got {args.layers!r}")
             fixed_window = (int(m.group(1)), int(m.group(2)))
-        local_front = localfront.setting_from(args.local_front)
+        if args.local_front is None and localfront.ENV not in os.environ:
+            local_front = "auto"
+        else:
+            local_front = localfront.setting_from(args.local_front)
         directory = args.identity_dir or HOME / "net" / re.sub(r"[^A-Za-z0-9._-]", "_", manifest.id)
         identity = Identity.load_or_create(Path(directory) / "identity.key")
     except (NodeError, RecordError, ManifestError, localfront.FrontConfigError) as e:

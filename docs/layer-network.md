@@ -77,6 +77,14 @@ the recent setup details and live logs, then **d** again to return to the percen
 stay visible. Full logs are saved under `~/.common-network/logs/`; when output is redirected, use
 `--debug` for details. Ctrl+C leaves the network.
 
+### Laptop sleep and wake
+
+Keep the `common join` terminal open. When the laptop sleeps, the join process is suspended by the OS;
+other peers stop receiving renewals and mark this node offline after its lease expires. On wake, the
+running process refreshes peer discovery and its DHT connection, checks the tunnel, and replaces it if
+it did not survive sleep. The model stays loaded, so it does not need to download its layers again.
+This reconnect happens automatically; it does not prevent the laptop from sleeping.
+
 ### Switching the model
 
 The model a machine serves is the network it joins. Name a different one with `--model` (or `--network`):
@@ -141,23 +149,25 @@ A small local model guesses 8 tokens, the network verifies them in one pass and 
 shared across several tokens: about 1.7x on chat and 2.3 to 3.1x on code and quoted text at 50 ms hops, with identical greedy
 output. Greedy only (`temperature: 0`); it switches itself off against older peers. See [flash-drafter.md](flash-drafter.md).
 
-## Local front (opt in)
+## Local first layers for chat
 
-`common join --network --local-front on` (or `N`, a stage boundary, or `auto`; env `COMMONNET_LOCAL_FRONT`) makes a node that also
-runs the chat client hold the first layers of the model locally, in the client's process and not served over HTTP, next to its
-own assigned window. The client embeds and runs layers 0..F itself, then sends the layer-F hidden state straight to the peer
-that holds layer F onward. Replies are token IDs as before; drafts, speculative verify, rollback and replica failover work
-unchanged (a failed remote peer is replayed from the retained layer-F hidden states).
+`common join` now tries to keep the first model stage on the same device as the chat client. When enabled, the client
+embeds and runs layers 0..F locally, then sends the layer-F hidden state straight to the peer that holds layer F onward.
+That removes the first network hop from each request and keeps prompt tokens off the network. Speculative decoding helps
+later tokens; this local stage is the change intended to reduce time to the first token. Replies are token IDs as before; drafts,
+speculative verify, rollback and replica failover work unchanged (a failed remote peer is replayed from retained layer-F
+hidden states).
 
 - **Saves** the client-to-first-peer hop (about one round trip per token) and means no peer ever sees your prompt tokens: peers
   only receive layer-F hidden states (still activations, not encrypted, so this is less exposure, not privacy).
-- **Costs** memory: about 1 GB for 9 layers of Qwen3-8B 4-bit, about 0.5 GB for Bonsai 8B, about 1.5 GiB NF4. It helps only the
-  machine that asks; other clients still use the network as before. A node that already serves from layer 0 reuses that block
-  (loaded once) and the route starts at its window end.
-- `auto` benchmarks the first stage once at startup and turns the front on only if one decode token through it takes under
-  25 ms (median) and at least 1.5x its weight size is free; otherwise it stays off and says why.
+- **Costs** memory: about 1 GB for 9 layers of Qwen3-8B 4-bit, about 0.5 GB for Bonsai 8B, about 1.5 GiB NF4. If this node
+  does not already serve the first stage, it may download an extra copy. It helps only the machine that asks; other clients
+  still use the network as before. A node that serves from layer 0 reuses that block (loaded once).
+- The default `auto` benchmarks the first stage once at startup and enables it only if one decode token through it takes
+  under 25 ms (median) and at least 1.5x its weight size is free. Otherwise it leaves that stage on the network and says why.
 - Needs a peer whose window starts at F. If none does, the route silently uses the whole model on peers (the front is idle).
-- Default is off: without the flag nothing changes.
+- Use `common join --local-front off` or set `COMMONNET_LOCAL_FRONT=off` to opt out. Use `--local-front on` to request the
+  first stage without the speed test, or pass a stage boundary such as `--local-front 18` to run more layers locally.
 
 ## Status file (for apps that show what a peer is doing)
 
