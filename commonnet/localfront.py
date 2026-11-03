@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import statistics
+import threading
 import time
 from dataclasses import dataclass
 
@@ -119,6 +120,9 @@ class LocalFront:
 
     def __init__(self, block, end: int, owned: bool = True):
         self.block, self.end, self.owned = block, int(end), owned
+        self.on_session_close = None
+        self._stage_ms: dict[str, float] = {}
+        self._timing_lock = threading.Lock()
 
     @property
     def has_ids(self) -> bool:
@@ -136,18 +140,34 @@ class LocalFront:
         """Token ids through embedding and layers [0, F): the hidden state (1, T, hidden) that goes to the first peer."""
         if start_pos == 0:
             self.block.open(session_id)
-        return from_wire(self.block.forward(session_id, self.block.embed(list(ids)), start_pos))
+        started = time.perf_counter()
+        try:
+            return from_wire(self.block.forward(session_id, self.block.embed(list(ids)), start_pos))
+        finally:
+            with self._timing_lock:
+                self._stage_ms[session_id] = self._stage_ms.get(session_id, 0.0) + (time.perf_counter() - started) * 1000
 
     def forward_hidden(self, session_id: str, hidden: torch.Tensor, start_pos: int) -> torch.Tensor:
         if start_pos == 0:
             self.block.open(session_id)
-        return from_wire(self.block.forward(session_id, to_wire(hidden), start_pos)).to(hidden.dtype)
+        started = time.perf_counter()
+        try:
+            return from_wire(self.block.forward(session_id, to_wire(hidden), start_pos)).to(hidden.dtype)
+        finally:
+            with self._timing_lock:
+                self._stage_ms[session_id] = self._stage_ms.get(session_id, 0.0) + (time.perf_counter() - started) * 1000
 
     def truncate(self, session_id: str, length: int) -> None:
         self.block.truncate(session_id, length)
 
     def close(self, session_id: str) -> None:
-        self.block.close(session_id)
+        try:
+            self.block.close(session_id)
+        finally:
+            with self._timing_lock:
+                stage_ms = self._stage_ms.pop(session_id, 0.0)
+            if self.on_session_close is not None and stage_ms > 0:
+                self.on_session_close(stage_ms, None)
 
     def shutdown(self) -> None:
         if self.owned:

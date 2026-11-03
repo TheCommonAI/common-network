@@ -147,6 +147,24 @@ def decode_session_request(obj) -> str:
     return check_session_id(obj["id"])
 
 
+def encode_close_request(session_id: str, network_ms: float | None = None) -> dict:
+    out = encode_session_request(session_id)
+    if network_ms is not None:
+        if type(network_ms) not in (int, float) or not math.isfinite(network_ms) or not 0 <= network_ms <= 1e9:
+            raise ProtocolError("network_ms must be finite and non-negative")
+        out["network_ms"] = round(float(network_ms), 3)
+    return out
+
+
+def decode_close_request(obj) -> tuple[str, float | None]:
+    _fields(obj, "close request", ("id",), ("network_ms",))
+    session_id = check_session_id(obj["id"])
+    value = obj.get("network_ms")
+    if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1e9):
+        raise ProtocolError("network_ms must be finite and non-negative")
+    return session_id, None if value is None else float(value)
+
+
 def encode_truncate_request(session_id: str, length: int) -> dict:
     if type(length) is not int or length < 0:
         raise ProtocolError(f"length must be a non-negative int, got {length!r}")

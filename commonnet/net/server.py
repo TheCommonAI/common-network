@@ -111,12 +111,14 @@ class StubBlock:
 
 
 class _Session:
-    __slots__ = ("last", "chain_last", "chain_lock")
+    __slots__ = ("last", "chain_last", "chain_lock", "stage_ms", "network_ms")
 
     def __init__(self) -> None:
         self.last: tuple | None = None  # (step key, reply Tensor) of the last forward
         self.chain_last = None
         self.chain_lock = threading.Lock()
+        self.stage_ms = 0.0
+        self.network_ms = None
 
 
 def _step_key(hidden: Tensor | None, start_pos: int, ids=None, output=None, which="last", sampling=None) -> tuple:
@@ -153,7 +155,8 @@ class BlockServer:
     def __init__(self, block, host: str = LOOPBACK, port: int = 0, *,
                  max_request_bytes: int = MAX_REQUEST_BYTES, token: str | None = None,
                  extra_handlers: dict | None = None, ssl_context=None, allow_chain_private: bool = False,
-                 rtc_enabled: bool | None = None, allow_rtc_private: bool | None = None, rtc_stun_urls=None):
+                 rtc_enabled: bool | None = None, allow_rtc_private: bool | None = None, rtc_stun_urls=None,
+                 on_session_close=None):
         """token=None serves without authentication. Only tests and --stub do that;
         the command line refuses to start a real block without a token.
 
@@ -172,6 +175,7 @@ class BlockServer:
             raise ValueError("max_request_bytes must be positive")
         self.token = None if token is None else auth.check_token(token)
         self.block = block
+        self.on_session_close = on_session_close
         self.layers = protocol.check_layers(block.layers)
         self.device = str(block.device)
         self.max_request_bytes = max_request_bytes
@@ -237,12 +241,19 @@ class BlockServer:
             self.block.open(session_id)
             self._sessions[session_id] = _Session()
 
-    def close(self, session_id: str) -> None:
+    def close(self, session_id: str, network_ms: float | None = None) -> None:
+        report = None
         with self._lock:
-            if session_id not in self._sessions:
+            session = self._sessions.get(session_id)
+            if session is None:
                 return
+            if network_ms is not None:
+                session.network_ms = (session.network_ms or 0.0) + network_ms
             self.block.close(session_id)
+            report = (session.stage_ms, session.network_ms)
             del self._sessions[session_id]
+        if self.on_session_close is not None:
+            self.on_session_close(*report)
 
     def truncate(self, session_id: str, length: int) -> None:
         """Cut the session back to `length` positions (speculative decoding's rollback).
@@ -351,7 +362,8 @@ class BlockServer:
             self.open(protocol.decode_session_request(obj))
             return protocol.encode_ok(), None
         if path == "/close":
-            self.close(protocol.decode_session_request(obj))
+            session_id, network_ms = protocol.decode_close_request(obj)
+            self.close(session_id, network_ms)
             return protocol.encode_ok(), None
         if path == "/truncate":
             session_id, length = protocol.decode_truncate_request(obj)
@@ -388,12 +400,14 @@ class BlockServer:
                 if fn is None:
                     raise NotImplementedError("this block cannot truncate a session")
                 fn(session_id, truncate_to)
+            compute_started = time.perf_counter()
             if ids is not None:
                 hidden = self.block.embed(ids)
             out = self.block.forward(session_id, hidden, start_pos)
             _check_output(out, hidden)
             if output is not None:
                 out = [int(t) for t in self.block.head(out, which, sampling, start_pos)]
+            session.stage_ms += (time.perf_counter() - compute_started) * 1000
             session.last = (key, out)
             return out
 

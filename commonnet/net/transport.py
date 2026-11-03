@@ -113,6 +113,7 @@ class HttpTransport:
         self._replicas = {n: list(r) for n, r in (replicas or {}).items()}
         self._clients: dict[tuple[str, int], BlockClient] = {}
         self._open: set[tuple[str, str]] = set()
+        self._session_network_ms: dict[tuple[str, str], float | None] = {}
         self._active: dict[tuple[str, str], int] = {}
         self._history: dict[tuple[str, str], list] = {}
         self._dead: dict[tuple[str, int], float] = {}
@@ -166,6 +167,19 @@ class HttpTransport:
         client, url = self._target(name, index)
         client.open(url, session_id)
         self._active[(name, session_id)] = index
+        self._session_network_ms.setdefault((name, session_id), None)
+
+    def _record_network(self, name: str, session_id: str, client: BlockClient, path: str) -> None:
+        if not client.timings:
+            return
+        row = client.timings[-1]
+        if row.get("path") != path or row.get("status") != 200:
+            return
+        total, server = row.get("total_ms"), row.get("server_ms")
+        if isinstance(total, (int, float)) and isinstance(server, (int, float)):
+            key = (name, session_id)
+            previous = self._session_network_ms.get(key)
+            self._session_network_ms[key] = (previous or 0.0) + max(total - server, 0.0)
 
     @staticmethod
     def _entry_url(entry) -> str:
@@ -244,7 +258,9 @@ class HttpTransport:
             index = self._active[key]
             client, url = self._target(name, index)
             try:
-                return _send_piece(client, url, session_id, piece, start_pos, truncate_to)
+                result = _send_piece(client, url, session_id, piece, start_pos, truncate_to)
+                self._record_network(name, session_id, client, "/forward")
+                return result
             except (Unreachable, RemoteError) as e:
                 if len(self._candidates(name)) < 2 and self._on_exhausted is None:
                     raise
@@ -464,7 +480,9 @@ class HttpTransport:
     def _chain_send(self, state, body):
         first = state["hops"][0]
         client, url = self._target(first["name"], first["index"])
-        return client.chain(url, body)
+        reply = client.chain(url, body)
+        self._record_network(first["name"], state["caller_id"], client, "/chain")
+        return reply
 
     def _chain_restart(self, state, endpoints, error):
         """Rebuild every KV cache from the retained token-ID history after a failure.
@@ -540,6 +558,7 @@ class HttpTransport:
             for hop in state["hops"]:
                 self._open.add((hop["name"], session_id))
                 self._active[(hop["name"], session_id)] = hop["index"]
+                self._session_network_ms[(hop["name"], session_id)] = None
         elif [(ep.name, ep.start, ep.end) for ep in remote] != [
                 (h["name"], *h["layers"]) for h in state["hops"]]:
             raise ValueError("a chain session cannot change its route windows")
@@ -651,14 +670,19 @@ class HttpTransport:
                 return
             try:
                 client, url = self._target(hop["name"], hop["index"])
-                client.close(url, chain["wire_id"])
+                network_ms = self._session_network_ms.pop((endpoint.name, session_id), None)
+                client.close(url, chain["wire_id"], network_ms=(
+                    network_ms if endpoint.name == chain["hops"][0]["name"] else None))
             except Exception:
+                self._session_network_ms.pop((endpoint.name, session_id), None)
                 pass
             chain["closed"].add(endpoint.name)
             self._open.discard((endpoint.name, session_id))
             self._active.pop((endpoint.name, session_id), None)
             if len(chain["closed"]) == len(chain["hops"]):
                 del self._chain_sessions[session_id]
+                for hop in chain["hops"]:
+                    self._session_network_ms.pop((hop["name"], session_id), None)
             return
         key = (endpoint.name, session_id)
         if key not in self._open:
@@ -669,9 +693,9 @@ class HttpTransport:
         index = self._active.pop(key, 0)
         try:
             client, url = self._target(endpoint.name, index)
-            client.close(url, session_id)
+            client.close(url, session_id, network_ms=self._session_network_ms.pop(key, None))
         except Exception:  # best effort: the server also drops sessions with the process
-            pass
+            self._session_network_ms.pop(key, None)
 
     def stats(self) -> dict:
         """Per endpoint: forward calls, mean total_ms, mean server_ms, and connections reused."""

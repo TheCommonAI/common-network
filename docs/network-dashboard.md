@@ -23,7 +23,7 @@ until their manifest is installed on the gateway.
 
 | Field | Meaning |
 | --- | --- |
-| `v` | Schema version, currently 1 |
+| `v` | Public snapshot schema version, currently 1 |
 | `updated_at` | UTC timestamp of the snapshot |
 | `online_nodes` | Recently seen peer instances, including nodes that are still loading |
 | `serving_nodes` | Online peers advertising an active layer slice |
@@ -38,8 +38,9 @@ until their manifest is installed on the gateway.
 Each node includes `peer`, `backend` (`mlx`, `nf4`, `cpu`), `gib` (offered memory), `phase`,
 `layers` (actively served slice), `assigned_layers` (the slice being prepared), `online`, `last_seen`
 (Unix seconds), `telemetry_reporting`, and `metrics`. Layer ranges exclude their end: `[0, 7]`
-means layers 0 through 6. A node's timing summary describes chats initiated through that node's
-local API, including their full distributed route; it is not a benchmark of that GPU alone.
+means layers 0 through 6. A node's `avg_stage_ms` and `avg_network_ms` describe inference sessions
+that used its layer slice and peer link. TTFT and generation-rate fields describe chats initiated through
+that node's local API.
 
 The mesh status fields map to the existing CSS classes:
 
@@ -67,7 +68,8 @@ announcements, not an active inference probe or a guarantee that every peer comp
   "output_tokens": 0,
   "avg_tokens_per_second": null,
   "avg_ms_per_token": null,
-  "avg_time_to_first_token_ms": null
+  "avg_time_to_first_token_ms": null,
+  "avg_network_ms": null
 }
 ```
 
@@ -77,6 +79,11 @@ announcements, not an active inference probe or a guarantee that every peer comp
   excluded from both. A generation of N tokens contributes N−1 decode intervals.
 - `avg_time_to_first_token_ms` is the mean time from the local API receiving a request to observing its
   first token, including local queueing and prompt processing. It excludes browser-to-node network time.
+- `avg_network_ms` is the total reported transit time across the participating peer links, averaged over
+  completed model requests. Per-link transit is estimated from each successful RPC's elapsed time minus
+  the server-reported compute time. A null means no updated peer has reported a usable sample yet.
+- `models[].nodes[].metrics.avg_stage_ms` is the mean time that node spent computing its own layer slice
+  for each closed inference session. It includes embedding/head work when those run on that node.
 - Failed and cancelled generations are counted separately and do not contribute speed samples.
   Invalid requests that never create a generation stream are not counted.
 - A zero-token completion has no first-token sample; a single-token completion has no decode-rate
@@ -89,6 +96,10 @@ Different process sessions retain distinct samples across a node restart. These 
 observations, not independently attested benchmarks. `reporting_nodes` indicates the current reporting
 coverage. External clients that bypass updated nodes' chat APIs are not measured. Historical speed
 samples can remain visible for five minutes after their source node goes offline.
+
+Dashboard report schema v2 adds the stage and network counters. The gateway continues to accept v1 reports;
+their new timing fields remain null until v2 telemetry arrives. An older peer that does not accept the
+optional timing value on session close still receives the original close request as a compatibility fallback.
 
 The public endpoint never returns bearer tokens, peer URLs, IP addresses, keys, prompts, or answers.
 The report schema contains only identifiers, node state, and numeric aggregates. Nodes can disable
