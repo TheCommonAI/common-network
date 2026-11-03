@@ -27,7 +27,7 @@ DEFAULT_ENDPOINT = "https://huggingface.co"
 INDEX_NAME = "model.safetensors.index.json"
 SINGLE_NAME = "model.safetensors"
 SMALL_FILES = ("config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json",
-               "vocab.json", "merges.txt", "special_tokens_map.json")
+               "vocab.json", "merges.txt", "special_tokens_map.json", "chat_template.jinja")
 TIMEOUT = 60
 RETRIES = 5
 CHUNK = 1 << 20
@@ -428,10 +428,20 @@ class Hub:
             tied = not any(n.startswith(("lm_head.", "language_model.lm_head.")) for n in wm)
             prefixes = needed_prefixes(layers, client, layout, embed, head, tied)
             shards = sorted({wm[n] for n in select_names(wm, prefixes)})
-            if ranged or layout != "model." or len(set(wm.values())) == 1:
-                # qwen3_5 repos have ~5 GB shards that also hold vision/other layers, and a one-file pack (the
-                # Bonsai MLX packs) is a single shard holding every layer: range-download only the needed
-                # tensors of each shard into a compact copy with a filtered index.
+            # A shard boundary is a storage detail, not a layer boundary. Even
+            # ordinary multi-shard Qwen checkpoints can put many layers in each
+            # shard, so fetching only the selected shard files can download
+            # hundreds of MB of layers this member will never host. Compact
+            # range fetching is the default for every explicit selection; it
+            # writes only the selected tensors and a matching filtered index.
+            # Keep whole-file fetching for an unfiltered full-model download.
+            selected = layers is not None or client or embed or head
+            if ranged or selected or layout != "model." or len(set(wm.values())) == 1:
+                # qwen3_5 repos can have ~5 GB shards that also hold vision and
+                # other layers, while Bonsai MLX packs may place every layer in
+                # one shard. Range-fetching handles both, and the same path is
+                # also needed for standard multi-shard Qwen repos when a member
+                # requests only a subset of layers.
                 sel = ("L%d-%d" % tuple(layers) if layers else "") + ("+client" if client else "") + (
                     "+embed" if embed else "") + ("+head" if head else "")
                 self.dir = os.path.join(base, "compact-" + sel.strip("+"))

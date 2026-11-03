@@ -122,6 +122,13 @@ class HubTest(unittest.TestCase):
         x = torch.randn(1, 5, 64)
         torch.testing.assert_close(got.forward("s", x, 0), ref.forward("s", x, 0))
 
+    def test_fetch_config_downloads_standalone_chat_template(self):
+        template = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+        h, _, _ = self.hub({"config.json": b"{}", "chat_template.jinja": template.encode()})
+        h.fetch_config()
+        with open(os.path.join(h.dir, "chat_template.jinja"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), template)
+
     def _full(self, files):
         d = os.path.join(self.tmp, "full")
         os.makedirs(d, exist_ok=True)
@@ -129,7 +136,7 @@ class HubTest(unittest.TestCase):
             open(os.path.join(d, n), "wb").write(b)
         return d
 
-    def test_sharded_only_needed_shards(self):
+    def test_sharded_only_needed_tensors_and_outputs_match(self):
         model, files = model_files(True)
         wm = json.loads(files[hub.INDEX_NAME])["weight_map"]
         shards = sorted(set(wm.values()))
@@ -140,6 +147,14 @@ class HubTest(unittest.TestCase):
         got = {n for _, n, _, _ in log if n.endswith(".safetensors")}
         self.assertEqual(got, want)
         self.assertLess(len(want), len(shards))
+        shard_requests = [(method, name, rng) for method, name, rng, _ in log if name in want]
+        self.assertTrue(shard_requests)
+        self.assertTrue(all(rng is not None for _, _, rng in shard_requests),
+                        "a partial layer fetch must use byte ranges, not download whole shards")
+        requested_bytes = sum(int(rng[6:].split("-")[1]) - int(rng[6:].split("-")[0]) + 1
+                              for _, _, rng in shard_requests)
+        whole_shard_bytes = sum(len(files[name]) for name in want)
+        self.assertLess(requested_bytes, whole_shard_bytes)
         ref = BlockRange(checkpoint_dir=self._full(files), start=3, end=4)
         out = BlockRange(checkpoint_dir=d, start=3, end=4)
         x = torch.randn(1, 4, 64)
