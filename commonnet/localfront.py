@@ -2,7 +2,8 @@
 
 The client then embeds and runs layers 0..F locally and sends the hidden state straight to the peer that holds layer F
 onward. That removes the client-to-first-peer hop and keeps the prompt tokens off the network (peers only ever receive
-layer-F hidden states). It costs the memory of those layers and only helps the machine that asks. Off by default.
+layer-F hidden states). It costs the memory of those layers and only helps the machine that asks. The CLI defaults to
+the memory-and-speed-gated `auto` setting; programmatic Node users can leave it off.
 
 The front is a block of the usual kind (factory.build_block) that is not served over HTTP. It appears in a route as the
 endpoint FRONT_NAME [0, F); HttpTransport runs it locally and sends the rest of the route to peers.
