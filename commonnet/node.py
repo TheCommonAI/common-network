@@ -442,6 +442,7 @@ class Node:
         self.no_draft = no_draft
         self._api: dict | None = None  # {"port": int, "ready": bool} once --api is on
         self._api_server = None
+        self._api_runtime_backend = None
         self._api_error: str | None = None
         self._route_was_ready = None
         from commonnet.metrics import Metrics
@@ -1143,6 +1144,7 @@ class Node:
             return
         with self._lock:
             self._api_server = server
+            self._api_runtime_backend = lazy
         self._spawn(server.serve_forever, "node-api")
         self.log(f"chat API on http://127.0.0.1:{self._api_port}/v1 (loading the client part in the background)")
         self._spawn(lambda: self._load_api_backend(lazy, network), "node-api-load")
@@ -1171,6 +1173,11 @@ class Node:
                 if self._stop.wait(wait):
                     return
                 continue
+            if self._stop.is_set() or self._api_server is None:
+                close = getattr(backend, "close", None)
+                if close is not None:
+                    close()
+                return
             lazy.set(backend)
             with self._lock:
                 self._api_error = None
@@ -1183,10 +1190,16 @@ class Node:
     def _teardown_api(self) -> None:
         with self._lock:
             server, self._api_server = self._api_server, None
+            backend, self._api_runtime_backend = self._api_runtime_backend, None
         if server is not None:
             try:
                 server.shutdown()
                 server.server_close()
+            except Exception:
+                pass
+        if backend is not None:
+            try:
+                backend.close()
             except Exception:
                 pass
 
