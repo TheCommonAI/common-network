@@ -1,0 +1,16 @@
+{
+  "name": "common-message-board",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The Common message board: one page, messages kept in Netlify Database.",
+  "type": "module",
+  "scripts": {
+    "dev": "netlify dev",
+    "test": "node --test test/*.test.mts"
+  },
+  "license": "AGPL-3.0-only",
+  "dependencies": {
+    "@netlify/database": "^2.0.1",
+    "@netlify/functions": "^6.0.3"
+  }
+}
