@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import collections
 import concurrent.futures
+import errno
 import http.client
 import json
 import math
@@ -164,6 +165,15 @@ def _server_ms(header) -> float | None:
     return None
 
 
+def _set_nodelay(sock) -> None:
+    """Turn off Nagle. Small per-token RPCs must not wait for TCP to batch them (~80 ms on a real link)."""
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except OSError as e:
+        if e.errno != errno.ENOPROTOOPT:
+            raise
+
+
 def _connect_resolved(conn, tls: bool) -> None:
     """Connect to the resolved address, keeping the hostname for the Host header and SNI."""
     address = dns.resolve(conn.host, conn.port)
@@ -178,14 +188,15 @@ def _connect_resolved(conn, tls: bool) -> None:
             raise OSError("chain destination is not a public address")
         address = choices[0]
     sock = socket.create_connection((address, conn.port), conn.timeout, conn.source_address)
-    # small request/reply messages must not wait for TCP to batch them (Nagle): each token pays that wait otherwise
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    # After TLS wrap: wrap_socket can replace the Python socket object, so Nagle must
+    # be turned off on the socket the HTTP client actually writes (tunnels and direct TLS).
     if tls:
         try:
             sock = conn._context.wrap_socket(sock, server_hostname=conn.host)
         except BaseException:
             sock.close()
             raise
+    _set_nodelay(sock)
     conn.sock = sock
 
 
