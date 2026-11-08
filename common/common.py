@@ -58,8 +58,11 @@ import sys
 import tarfile
 import tempfile
 import time
+import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
+import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -3677,5 +3680,88 @@ def main() -> None:
         sys.exit(1)
 
 
+class _ErrorOutput:
+    """Keep a bounded copy of stderr without changing what the terminal sees."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.text = ""
+
+    def write(self, value):
+        self.text = (self.text + value)[-4000:]
+        return self.stream.write(value)
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def _bug_report_url(error: str) -> str:
+    error = re.sub(r"\x1b\[[0-9;]*m", "", error)
+    error = error.replace(str(Path.home()), "~")
+    # Errors can contain request URLs or credentials. Never include URL query
+    # strings or common token forms in the browser's address/history.
+    error = re.sub(r"(https?://)[^\s/@]+:[^\s/@]+@", r"\1[redacted]@", error)
+    error = re.sub(r"(https?://[^\s?#]+)[?#][^\s]*", r"\1?[redacted]", error)
+    error = re.sub(r"(?i)(bearer\s+)\S+", r"\1[redacted]", error)
+    error = re.sub(r"(?i)((?:[\w-]*(?:token|password|secret)|api[_-]?key)\s*[=:]\s*)[^\s,;]+",
+                   r"\1[redacted]", error)
+    # Bound the encoded payload too: browser URL limits count escaped bytes.
+    while len(urllib.parse.quote(error, safe="")) > 5000:
+        error = error[len(error) // 4:]
+    title = "CLI bug: " + (error.strip().splitlines()[-1][:100] if error.strip() else "unexpected error")
+    body = (f"## Error\n```text\n{error}\n```\n\n"
+            f"## Environment\n- Common: {VERSION}\n"
+            f"- OS: {platform.system()} {platform.release()}\n"
+            f"- Python: {platform.python_version()}\n\n"
+            "## Steps to reproduce\n<!-- Describe what you were doing. Review the error for private information before submitting. -->\n")
+    return f"https://github.com/{REPO}/issues/new?" + urllib.parse.urlencode({"title": title, "body": body})
+
+
+def _offer_bug_report(error: str) -> None:
+    if not sys.stdin.isatty() or not sys.stderr.isatty():
+        return
+    try:
+        print("Would you like to report this bug? [y/N] ", end="", file=sys.stderr, flush=True)
+        if input().strip().lower() not in ("y", "yes"):
+            return
+        url = _bug_report_url(error)
+        print("Opening a GitHub issue draft. Review it before submitting.", file=sys.stderr)
+        try:
+            opened = webbrowser.open(url)
+        except Exception:
+            opened = False
+        if not opened:
+            print(f"Open this link to report the bug:\n{url}", file=sys.stderr)
+    except (EOFError, KeyboardInterrupt, OSError):
+        return
+
+
+def cli(run=None) -> None:
+    original_stderr = sys.stderr
+    captured = _ErrorOutput(original_stderr)
+    sys.stderr = captured
+    try:
+        (run or main)()
+    except SystemExit as exc:
+        # argparse uses 2 for invalid usage; successful exits need no report.
+        if exc.code not in (None, 0, 2):
+            detail = captured.text or str(exc.code)
+            if isinstance(exc.code, str):
+                print(exc.code, file=original_stderr)
+            _offer_bug_report(detail)
+            if isinstance(exc.code, str):
+                raise SystemExit(1) from None
+        raise
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
+    except Exception:
+        detail = traceback.format_exc()
+        print(detail, end="", file=original_stderr)
+        _offer_bug_report(detail)
+        raise SystemExit(1) from None
+    finally:
+        sys.stderr = original_stderr
+
+
 if __name__ == "__main__":
-    main()
+    cli()
