@@ -70,7 +70,8 @@ def _served(inner, start, end, device, checkpoint, backend, environ):
     dtype = getattr(inner, "dtype", None) if backend != "mlx" else None
     io = endio.EndIO(checkpoint, backend, want_embed="ids_in" in caps, want_head="head_out" in caps,
                     device=None if backend == "mlx" else device, dtype=dtype) if caps else None
-    return ServedBlock(inner, start, end, device, io, caps)
+    from commonnet.recurrent import CAPABILITY
+    return ServedBlock(inner, start, end, device, io, tuple(caps) + (CAPABILITY,))
 
 
 def build_block(start: int, end: int, backend: str | None = None, checkpoint: str | None = None, environ=None):
@@ -116,3 +117,4 @@ def build_block(start: int, end: int, backend: str | None = None, checkpoint: st
 
 def FACTORY(start: int, end: int):
     return build_block(start, end)
+
