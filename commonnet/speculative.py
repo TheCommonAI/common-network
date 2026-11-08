@@ -182,6 +182,10 @@ def can_speculate(client, endpoints) -> tuple[bool, str]:
     if not hasattr(t, "supports_truncate") or not hasattr(t, "truncate"):
         return False, "transport cannot roll back a session"
     try:
+        if getattr(client, "arch", "").startswith("qwen3_5"):
+            from commonnet.recurrent import CAPABILITY
+            if not all(CAPABILITY in t.capabilities(ep) for ep in endpoints):
+                return False, "a peer lacks recurrent-state rollback support"
         ok = t.supports_truncate(endpoints)
     except Exception as e:  # a failed probe is not worth failing the request for
         return False, f"probe failed: {type(e).__name__}"
@@ -290,3 +294,4 @@ def generate_stream(client, endpoints, prompt_ids, max_new_tokens: int, *, draft
         return client.generate_stream(endpoints, prompt_ids, max_new_tokens, temperature=temperature, **plain)
     return speculative_stream(client, endpoints, prompt_ids, max_new_tokens, drafter, k=k, adaptive=adaptive,
                               stop_ids=plain.get("stop_ids"), stats=stats)
+
