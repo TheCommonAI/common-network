@@ -31,7 +31,7 @@ Open a new terminal, then:
 
 ```bash
 common join --check              # can this machine join? checks only, installs nothing
-common join                      # serve a slice of the default model
+common join                      # beta default: Qwen3.5-35B-A3B
 common join --7                  # seven-node target: Qwen3.5-122B-A10B (same command on every machine)
 common ask "What's a good way to learn recursion?"
 ```
@@ -58,6 +58,22 @@ been verified on real hardware; see the status notes in
 [docs/layer-network.md](docs/layer-network.md).
 
 ### Choosing a network
+
+The beta default is **Qwen3.5-35B-A3B**: 35B total parameters, roughly 3B active
+per token, split across peers. Apple silicon uses MLX 4-bit weights; NVIDIA
+quantizes the original weights to NF4 on load. CPU peers use bfloat16 and need
+substantially more memory. Every layer still needs hosting: active parameters
+do not describe the total memory requirement.
+
+This is the beta target, not a validated speed claim. Full-size distributed
+performance has not been established, and Common currently disables speculative
+decoding for Qwen3.5 because recurrent-state rollback is unsupported. Before
+calling it launch-ready, verify useful coding/chat answers, 13–20 output tok/s
+across real homes, reliable joining, and recovery from peer loss.
+
+Use `common join --network qwen3-8b` for the smaller fallback. The 122B model
+remains an explicit opt-in; existing processes keep their current model until
+restarted. Use the same model selection across the participating machines.
 
 Node-count presets select the stepping-stone model and fill gaps among online peers:
 `--1`/`--2` use Qwen3-8B, `--3`–`--6` use Qwen3.5-35B-A3B, and `--7` uses
@@ -104,7 +120,7 @@ run the new command with `--permanent` to replace a background service. See
   tokens and the network verifies them in one pass, with output identical to
   non-speculative greedy decoding. The drafter is MLX on Macs and PyTorch
   elsewhere. Not available for networks whose model cannot roll back (Bonsai 2
-  9B/27B). Gains on a real wide-area network vary and are still being measured.
+  9B/27B and Qwen3.5-35B-A3B/122B-A10B). Gains on a real wide-area network vary and are still being measured.
   See [docs/flash-drafter.md](docs/flash-drafter.md).
 - **Resilience.** If another peer holds the same layers, the client switches to
   it and replays what it sent; if a stage loses every peer, a spare peer moves

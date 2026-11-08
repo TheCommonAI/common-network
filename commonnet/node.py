@@ -50,7 +50,8 @@ HOME = Path(os.environ.get("COMMON_NETWORK_HOME") or Path.home() / ".common-netw
 NETWORK_ENV = "COMMONNET_NETWORK"
 # The operator fills in always-on peers here once there are any; --seed and the manifest add more.
 DEFAULT_SEEDS: tuple[str, ...] = ()
-DEFAULT_MANIFEST = Path(__file__).resolve().parent / "networks" / "main.json"
+# Beta flagship. Keep main.json as the explicit Qwen3-8B fallback network.
+DEFAULT_MANIFEST = Path(__file__).resolve().parent / "networks" / "qwen3.5-35b-a3b.json"
 # Short names accepted by common join --network NAME. Keep this explicit so test
 # manifests in the same directory are never exposed as user choices.
 NETWORK_MODELS = {
