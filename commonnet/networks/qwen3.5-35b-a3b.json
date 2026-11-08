@@ -15,7 +15,11 @@
       "cpu": "bfloat16"
     },
     "max_window_layers": 16,
-    "no_speculation": "Qwen3.5 MoE uses hybrid recurrent attention; speculative cache rollback is not supported"
+    "speculative_rollback": "recurrent_rollback_v1",
+    "draft_repos": {
+      "mlx": "mlx-community/Qwen3.5-0.8B-4bit",
+      "torch": "Qwen/Qwen3.5-0.8B"
+    }
   },
   "boundaries": [
     0,
