@@ -375,7 +375,9 @@ class HttpTransport:
         """What the server for this endpoint advertises in /health (ids_in, head_out). Empty for an old server or on
         any failure, so the caller falls back to the original protocol. Cached per endpoint name."""
         if endpoint.name == FRONT_NAME:
-            return ("ids_in",) if self._front_for(endpoint).has_ids else ()
+            front = self._front_for(endpoint)
+            caps = tuple(getattr(front.block, "caps", ()) or ())
+            return tuple(dict.fromkeys(caps + (("ids_in", "chain_v1") if front.has_ids else ())))
         cached = self._caps.get(endpoint.name)
         if cached is None:
             client, url = self._target(endpoint.name, self._first_alive(endpoint.name))
@@ -738,3 +740,4 @@ class HttpTransport:
                 self.close(SimpleNamespace(name=hop["name"]), session_id)
         for client in self._clients.values():
             client.close_connections()
+
