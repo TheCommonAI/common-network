@@ -18,6 +18,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3RotaryEmbedding,
 )
 
+from commonnet.recurrent import RecurrentRollback
 from commonnet.weights import CheckpointReader, build_module
 
 
@@ -96,7 +97,7 @@ class _Session:
 
 
 @dataclass
-class BlockRange:
+class BlockRange(RecurrentRollback):
     """Serves decoder layers [start, end) of the checkpoint in checkpoint_dir.
 
     forward(session_id, hidden_states, start_pos) runs the hidden states through
@@ -176,6 +177,7 @@ class BlockRange:
             raise ValueError(f"expected (batch, seq, {self.config.hidden_size}), got {tuple(hidden_states.shape)}")
         hidden = hidden_states.to(device=self.device, dtype=self.dtype)
         q_len = hidden.shape[1]
+        self._save_recurrent(session_id, hidden, start_pos)
 
         if start_pos == 0:
             session = _Session(cache=KVCache(self.num_local))
@@ -215,7 +217,8 @@ class BlockRange:
         if length >= session.length:
             return
         if self.arch.startswith("qwen3_5"):
-            raise NotImplementedError("this block has non-attention layers; its cache cannot be truncated")
+            self._restore_recurrent(session_id, length)
+            return
         cache = session.cache
         for i in range(len(cache.keys)):
             if cache.keys[i] is not None:
@@ -238,7 +241,9 @@ class BlockRange:
 
     def close(self, session_id: str) -> None:
         """Drop a session's KV cache. Closing an unknown id is a no-op."""
+        self._forget_recurrent(session_id)
         self._sessions.pop(session_id, None)
 
     def open_sessions(self) -> int:
         return len(self._sessions)
+
