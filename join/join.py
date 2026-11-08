@@ -2264,4 +2264,14 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Installed copies are siblings; a checkout keeps the CLI in common/.
+    cli_dir = Path(__file__).resolve().parent.parent / "common"
+    if cli_dir.is_dir():
+        sys.path.insert(0, str(cli_dir))
+    try:
+        from common import cli
+    except ImportError:
+        # Standalone join.py remains usable without the full CLI installed.
+        main()
+    else:
+        cli(main)
