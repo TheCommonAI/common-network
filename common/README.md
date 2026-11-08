@@ -51,3 +51,11 @@ every `ask` — which peers answered, time to the first token, total time.
 Retired verbs from the old whole-model gateway (`demand`, `contrib`,
 `recommend`, `serve`, `test`, `--legacy`) still parse so old scripts get a
 clear message. They are not how the network works.
+
+
+On a terminal, CLI failures offer `Would you like to report this bug? [y/N]`.
+Choose `y` to open a GitHub issue draft with the error and Common, OS and Python
+versions. Review and submit it in your browser. Empty input or `n` skips it;
+scripts, invalid command syntax and Ctrl+C do not prompt. Common credential
+patterns are redacted, but review the draft for private information.
+
