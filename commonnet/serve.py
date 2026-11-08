@@ -36,8 +36,18 @@ DEFAULT_DRAFT = "mlx-community/Qwen3-0.6B-4bit"
 TORCH_DRAFT = "Qwen/Qwen3-0.6B"
 
 
-def build_default_drafter(target_tokenizer):
+def build_default_drafter(target_tokenizer, repos=None):
     """(drafter, repo): MlxDrafter when mlx_lm imports, else TorchDrafter. Raises if neither can load."""
+    repos = repos or {}
+    if repos:
+        from commonnet.hybrid_draft import HybridMlxDrafter, HybridTorchDrafter
+        try:
+            import mlx_lm
+        except ImportError:
+            repo = repos["torch"]
+            return HybridTorchDrafter(repo, target_tokenizer=target_tokenizer), repo
+        repo = repos["mlx"]
+        return HybridMlxDrafter(repo, target_tokenizer=target_tokenizer), repo
     try:
         import mlx_lm  # noqa: F401
     except Exception:
@@ -178,17 +188,23 @@ class NetworkBackend:
         self.client = self._worker.submit(load).result()
         self.draft_k, self.drafter, self.draft_note = draft_k, None, "off"
         no_spec = manifest.model.get("no_speculation")
+        self.draft_repos = manifest.model.get("draft_repos")
+        self.recurrent_rollback = manifest.model.get("speculative_rollback") == "recurrent_rollback_v1"
         # Default-on speculation: the drafter loads on the first eligible request, not at startup.
         self.auto_draft = bool(auto_draft) and not draft and not no_spec and draft_enabled()
         self._auto_failed = False
         self._drafter_factory = None   # tests replace it; default builds an MlxDrafter on the worker thread
         if self.auto_draft:
-            self.draft_note = f"on, loads on first greedy request ({DEFAULT_DRAFT}, k={draft_k})"
+            draft_name = (self.draft_repos or {}).get("mlx", DEFAULT_DRAFT)
+            self.draft_note = f"on, loads on first greedy request ({draft_name}, k={draft_k})"
         if draft and no_spec:   # the network itself says speculation cannot work on this model
             self.draft_note = f"off: {no_spec}"[:300]
             print(f"speculative decoding is off: {self.draft_note}", file=sys.stderr, flush=True)
         elif draft:
             def load_drafter():
+                if self.recurrent_rollback:
+                    from commonnet.hybrid_draft import HybridMlxDrafter
+                    return HybridMlxDrafter(draft, target_tokenizer=self.tokenizer)
                 from commonnet.speculative import MlxDrafter
                 return MlxDrafter(draft, target_tokenizer=self.tokenizer)
             try:   # no drafter is never fatal: requests then use plain decoding
@@ -304,7 +320,11 @@ class NetworkBackend:
             return None
         try:
             for i, ep in enumerate(endpoints):
-                if CHAIN_CAPABILITY not in transport.capabilities(ep):
+                caps = transport.capabilities(ep)
+                if getattr(self, "recurrent_rollback", False) and "recurrent_rollback_v1" not in caps:
+                    self.last_reason = f"hop {i} lacks recurrent-state rollback support; update this peer"
+                    return None
+                if CHAIN_CAPABILITY not in caps:
                     name = ep.get("url") or ep.get("peer") if isinstance(ep, dict) else None
                     self.last_reason = f"hop {i}{' (' + str(name) + ')' if name else ''} lacks {CHAIN_CAPABILITY}"
                     return None
@@ -315,7 +335,9 @@ class NetworkBackend:
             repo = [DEFAULT_DRAFT]
 
             def build():
-                d, repo[0] = build_default_drafter(self.tokenizer)
+                repos = getattr(self, "draft_repos", None)
+                d, repo[0] = (build_default_drafter(self.tokenizer, repos) if repos
+                              else build_default_drafter(self.tokenizer))
                 return d
             self.drafter = (self._drafter_factory or build)()
             self.draft_note = f"on ({repo[0]}, k={self.draft_k})"
@@ -674,3 +696,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
