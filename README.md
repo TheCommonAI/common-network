@@ -66,8 +66,10 @@ substantially more memory. Every layer still needs hosting: active parameters
 do not describe the total memory requirement.
 
 This is the beta target, not a validated speed claim. Full-size distributed
-performance has not been established, and Common currently disables speculative
-decoding for Qwen3.5 because recurrent-state rollback is unsupported. Before
+performance has not been established. Common Flash is enabled for 35B greedy
+requests using a Qwen3.5-0.8B drafter and recurrent-state checkpoint/replay. Every
+peer on the route must advertise the new rollback capability; older peers, an
+unavailable drafter, or a tokenizer mismatch fall back to normal decoding. Before
 calling it launch-ready, verify useful coding/chat answers, 13–20 output tok/s
 across real homes, reliable joining, and recovery from peer loss.
 
@@ -120,7 +122,8 @@ run the new command with `--permanent` to replace a background service. See
   tokens and the network verifies them in one pass, with output identical to
   non-speculative greedy decoding. The drafter is MLX on Macs and PyTorch
   elsewhere. Not available for networks whose model cannot roll back (Bonsai 2
-  9B/27B and Qwen3.5-35B-A3B/122B-A10B). Gains on a real wide-area network vary and are still being measured.
+  9B/27B and Qwen3.5-122B-A10B). Qwen3.5-35B-A3B uses checkpoint/replay rollback
+  and a matching-family drafter. Gains on a real wide-area network vary and are still being measured.
   See [docs/flash-drafter.md](docs/flash-drafter.md).
 - **Resilience.** If another peer holds the same layers, the client switches to
   it and replays what it sent; if a stage loses every peer, a spare peer moves
@@ -207,3 +210,4 @@ are entitled to the code you are actually running, not to ours.
 The **name** is not covered by the AGPL. Fork the code freely; give your fork
 its own name. See [TRADEMARK.md](TRADEMARK.md) — it is short, and permissive
 about everything except calling a modified version "Common".
+
