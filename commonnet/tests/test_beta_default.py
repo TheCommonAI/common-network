@@ -16,7 +16,7 @@ class BetaDefault(unittest.TestCase):
         self.assertEqual(manifest.model["name"], "Qwen3.5-35B-A3B")
         self.assertEqual(manifest.num_layers, 40)
         self.assertEqual(manifest.model["repos"]["mlx"], "mlx-community/Qwen3.5-35B-A3B-4bit")
-        self.assertIn("rollback", manifest.model["no_speculation"])
+        self.assertEqual(manifest.model["speculative_rollback"], "recurrent_rollback_v1")
 
     def test_explicit_8b_remains_a_separate_network(self):
         fallback = self.resolve("qwen3-8b")
@@ -39,3 +39,4 @@ class BetaDefault(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
