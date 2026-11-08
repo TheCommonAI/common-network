@@ -62,7 +62,7 @@ class MoeParity(unittest.TestCase):
                 expected = self.reference(torch.tensor([self.prompt + [7]])).logits[:, -1:]
                 self.assertLess((client._logits(hidden) - expected).abs().max().item(), 1e-4)
                 self.assertEqual(CheckpointReader(self.path).arch, "qwen3_5_moe")
-                with self.assertRaises(NotImplementedError):
+                with self.assertRaises(ValueError):
                     next(iter(blocks.values())).truncate("incremental", 1)
 
     def test_expert_slice_loader_preserves_routing_without_loading_whole_fused_tensors(self):
@@ -163,3 +163,4 @@ class MoeParity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

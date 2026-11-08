@@ -27,6 +27,7 @@ from mlx_lm.models.base import create_attention_mask, create_causal_mask, create
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.qwen3 import ModelArgs, TransformerBlock
 
+from commonnet.recurrent import RecurrentRollback
 from commonnet.wire import decode_fp16, encode_fp16
 
 INDEX_NAME = "model.safetensors.index.json"
@@ -66,7 +67,7 @@ class _Session:
 
 
 @dataclass
-class MlxBlockRange:
+class MlxBlockRange(RecurrentRollback):
     checkpoint_dir: str
     start: int
     end: int
@@ -190,6 +191,7 @@ class MlxBlockRange:
             data, shape = encode_fp16(hidden_states)
             x = mx.array(np.frombuffer(data, dtype=np.float16).reshape(shape)).astype(self.dtype)
         q_len = hidden_states.shape[1]
+        self._save_recurrent(session_id, hidden_states, start_pos)
 
         if start_pos == 0:
             if self.qwen35:
@@ -243,13 +245,15 @@ class MlxBlockRange:
         if length >= sess.length:
             return
         if not all(c.is_trimmable() for c in sess.caches):
-            raise NotImplementedError("this block has non-attention layers; its cache cannot be truncated")
+            self._restore_recurrent(session_id, length)
+            return
         drop = sess.length - length
         for c in sess.caches:
             c.trim(drop)
         sess.length = length
 
     def close(self, session_id: str) -> None:
+        self._forget_recurrent(session_id)
         self._sessions.pop(session_id, None)
 
     def open_sessions(self) -> int:
@@ -323,3 +327,4 @@ class OnWorkerThread:
 
     def shutdown(self):
         self._pool.shutdown(wait=True)
+

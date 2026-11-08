@@ -26,8 +26,8 @@ Usage:
 `common join` keeps running in its terminal. `common ask` talks to that node's
 local API at http://127.0.0.1:11440/v1, so a machine needs join running before
 it can ask. Greedy asks (`temperature` 0, the default) use Common Flash
-speculative decoding on supported models. The Qwen3.5 beta default currently
-runs without speculation because recurrent-state rollback is unsupported.
+speculative decoding on supported models. The Qwen3.5 beta default uses a
+matching-family drafter when every peer supports recurrent-state rollback.
 
 This CLI checks GitHub for newer launcher files on every run and updates
 them together (pass --no-update to skip). It never overwrites a copy that lives in
@@ -3766,3 +3766,4 @@ def cli(run=None) -> None:
 
 if __name__ == "__main__":
     cli()
+
