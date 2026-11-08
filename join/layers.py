@@ -188,6 +188,8 @@ class JoinDisplay:
             return
         hint = "Debug (press d)" if self.interactive else "Debug: --debug"
         label = "Connected" if self.percent == 100 else "Joining"
+        if self.percent == 100 and self.output.isatty() and not os.environ.get("NO_COLOR"):
+            label = "\033[32mConnected\033[0m"
         self.say(f"{label} · {self.percent}%   {hint}", progress=True)
 
     def download(self, fraction):
