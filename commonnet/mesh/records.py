@@ -130,6 +130,11 @@ class Identity:
         record["sig"] = _b64e(self._key.sign(BIND + canonical(record)))
         return record
 
+    def sign_device_binding(self, peer_pub: bytes) -> str:
+        """As this machine's device key: vouch that `peer_pub` (a per-network peer key) runs here."""
+        from commonnet.metrics import DEVICE_BIND
+        return _b64e(self._key.sign(DEVICE_BIND + peer_pub))
+
 
 def check_shape(record: dict) -> None:
     """Raises RecordError unless every field has the right type and size. Does not check the signature."""

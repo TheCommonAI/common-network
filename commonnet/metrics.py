@@ -10,9 +10,10 @@ import urllib.request
 WINDOW_SECONDS = 300
 BUCKET_SECONDS = 10
 BIND = b"commonnet-dashboard-v1\n"
+DEVICE_BIND = b"commonnet-device-v1\n"  # a device key vouching that a per-network peer key is on the same machine
 COUNTERS = ("requests", "completed", "failed", "cancelled", "output_tokens", "decode_tokens", "decode_ms",
             "ttft_count", "ttft_ms", "total_ms", "stage_count", "stage_ms", "network_count", "network_ms",
-            "speculative_drafted_tokens", "speculative_accepted_tokens")
+            "speculative_drafted_tokens", "speculative_accepted_tokens", "served_tokens", "served_compute_ms")
 
 
 class Metrics:
@@ -66,6 +67,18 @@ class Metrics:
                 bucket["network_count"] += 1
                 bucket["network_ms"] += network_ms
 
+    def record_work(self, tokens, compute_ms):
+        """Count one forward step this node computed for a route: positions through its layers, and the time."""
+        if type(tokens) is not int or tokens <= 0 or not isinstance(compute_ms, (int, float)) or compute_ms < 0:
+            return
+        now = self.clock()
+        with self._lock:
+            self._expire(now)
+            stamp = int(now // BUCKET_SECONDS) * BUCKET_SECONDS
+            bucket = self._buckets.setdefault(stamp, {"ts": stamp, **dict.fromkeys(COUNTERS, 0)})
+            bucket["served_tokens"] += tokens
+            bucket["served_compute_ms"] += compute_ms
+
     def snapshot(self):
         with self._lock:
             self._expire(self.clock())
@@ -114,8 +127,11 @@ class MeasuredStream:
 
 
 class Reporter:
-    def __init__(self, identity, gateway, snapshot, metrics, *, interval=15, post=None, clock=time.time):
+    def __init__(self, identity, gateway, snapshot, metrics, *, interval=15, post=None, clock=time.time, device=None):
         self.identity, self.gateway, self.snapshot, self.metrics = identity, gateway, snapshot, metrics
+        # The machine's network-independent key (the peer key changes with the model); defaults to the peer key.
+        self.device = device or identity
+        self._device_sig = self.device.sign_device_binding(identity.pub)
         self.interval, self.post, self.clock = interval, post or self._post, clock
         self.session = secrets.token_hex(16)
         self.seq = 0
@@ -125,7 +141,9 @@ class Reporter:
 
     def payload(self):
         self.seq += 1
-        return self.identity.sign_dashboard({"v": 3, **self.snapshot(), "session": self.session,
+        return self.identity.sign_dashboard({"v": 4, **self.snapshot(), "session": self.session,
+                                             "device": self.device.peer, "device_pub": self.device.pub_b64,
+                                             "device_sig": self._device_sig,
                                              "seq": self.seq, "ts": self.clock(), "buckets": self.metrics.snapshot()})
 
     def _post(self, payload):

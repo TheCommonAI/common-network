@@ -1739,6 +1739,12 @@ def cmd_status(gateway: str, as_json: bool) -> None:
         print(dim(f"chat API        127.0.0.1:{api.get('port')}  ({'ready' if api.get('ready') else 'loading'})"))
     if snap.get("error"):
         print(red(snap["error"]))
+    try:
+        device = (INSTALL_DIR / "net" / "device.id").read_text().strip()
+    except OSError:
+        device = ""
+    if device:
+        print(dim(f"device          {device}  (this machine's name in the contribution log)"))
     print()
     _print_coverage(snap)
 
