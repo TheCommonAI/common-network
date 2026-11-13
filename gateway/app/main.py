@@ -8,6 +8,7 @@ transport) now happens inside the layer network, with no central server. What is
   GET /seeds       peers that are normally up (same list `common join` fetches from the repository)
   POST /announce, GET /directory, POST /check   a tiny rendezvous so `common join` needs no typed address (directory.py)
   GET /api/network-stats, POST /api/network-report   public status and signed numeric telemetry
+  GET /api/contributions   beta totals per machine: tokens, compute time, requests served, uptime (contributions.py)
   GET /            a short page saying where things went
   anything else    410 Gone with a plain sentence, so an old node or app version learns why it stopped working
 """
@@ -20,7 +21,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from . import directory, dashboard
+from . import contributions, directory, dashboard
 
 NETWORKS = Path(os.environ.get("COMMON_NETWORKS_DIR", Path(__file__).resolve().parent.parent / "networks"))
 if not NETWORKS.exists() and "COMMON_NETWORKS_DIR" not in os.environ:
@@ -52,6 +53,11 @@ def network_stats(network: str | None = None):
 @app.post("/api/network-report")
 async def network_report(request: Request):
     return await dashboard.report(request)
+
+
+@app.get("/api/contributions")
+def contribution_totals():
+    return contributions.log.snapshot()
 
 
 def _load(name: str) -> dict:
