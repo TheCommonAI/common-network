@@ -9,7 +9,7 @@
 #
 # Installs `common` (ask / join / status / …), `common-chat`, and `common-join`,
 # plus cloudflared if it is missing (other peers reach this machine through a
-# Cloudflare quick tunnel). Python 3.10+ is the only other requirement.
+# Cloudflare quick tunnel). Python is downloaded automatically when needed.
 #
 # The wrappers run python with -u (unbuffered). Windows block-buffers Python's
 # stdout when it goes through a .cmd wrapper, which puts printed output out of
@@ -43,7 +43,7 @@ New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 # interpreter its version without a temporary file per candidate, and Windows
 # installs Python per-version rather than swapping one `python3` in place.
 $PythonExe = $null
-$candidates = @("$InstallDir\runtime\python\python.exe") +
+$candidates = @("$InstallDir\runtime\python\python.exe", "$InstallDir\runtime\python\Scripts\python.exe") +
               @(Get-Command python, python3 -ErrorAction SilentlyContinue |
                 Select-Object -ExpandProperty Source)
 foreach ($candidate in $candidates) {
@@ -55,9 +55,31 @@ foreach ($candidate in $candidates) {
     if ($LASTEXITCODE -eq 0) { $PythonExe = $candidate; break }
 }
 if (-not $PythonExe) {
-    Write-Host "Common needs Python 3.10 or newer, and none was found."
-    Write-Host "Install it from https://www.python.org/downloads/ (check 'Add python.exe to PATH'), then re-run this installer."
-    exit 1
+    Write-Host "Downloading Common's private Python 3.12..."
+    $Uv = "$InstallDir\tools\uv.exe"
+    $oldUvInstall = $env:UV_UNMANAGED_INSTALL
+    $oldPythonDir = $env:UV_PYTHON_INSTALL_DIR
+    $oldUvCache = $env:UV_CACHE_DIR
+    try {
+        $env:UV_UNMANAGED_INSTALL = "$InstallDir\tools"
+        $env:UV_PYTHON_INSTALL_DIR = "$InstallDir\python"
+        $env:UV_CACHE_DIR = "$InstallDir\cache\uv"
+        if (-not (Test-Path $Uv)) {
+            $installer = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString() + ".ps1")
+            try {
+                Invoke-WebRequest https://astral.sh/uv/install.ps1 -OutFile $installer
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
+                if ($LASTEXITCODE -ne 0) { throw "Could not install Common's Python downloader." }
+            } finally { Remove-Item $installer -ErrorAction SilentlyContinue }
+        }
+        & $Uv venv --python 3.12 --managed-python --seed "$InstallDir\runtime\python"
+        if ($LASTEXITCODE -ne 0) { throw "Automatic Python setup failed. Check your connection and rerun this installer." }
+        $PythonExe = "$InstallDir\runtime\python\Scripts\python.exe"
+    } finally {
+        $env:UV_UNMANAGED_INSTALL = $oldUvInstall
+        $env:UV_PYTHON_INSTALL_DIR = $oldPythonDir
+        $env:UV_CACHE_DIR = $oldUvCache
+    }
 }
 Write-Host "Using Python: $PythonExe"
 

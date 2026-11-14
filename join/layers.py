@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import tempfile
 import time
 from collections import deque
 import urllib.error
@@ -626,6 +627,83 @@ def ensure_source(env=None, ref: str | None = None, dest: Path = SOURCE_DIR, url
     return dest
 
 
+def runtime_python_supported(python, run=subprocess.run) -> bool:
+    """Use a conservative wheel-compatible Python for fresh runtime installs.
+
+    Already-working runtimes are checked by import first, regardless of version.
+    """
+    try:
+        result = run([str(python), "-c",
+                      "import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] < (3, 14) else 1)"],
+                     capture_output=True, timeout=15)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def find_runtime_python(current_python, run=subprocess.run, which=shutil.which) -> str:
+    """Find an installed interpreter without changing the user's system Python."""
+    candidates = [str(current_python), str(HOME_DIR / "runtime/python" /
+                  ("python.exe" if os.name == "nt" else "bin/python3")),
+                  str(HOME_DIR / "runtime/python/Scripts/python.exe")]
+    for version in ("3.12", "3.13", "3.11", "3.10"):
+        candidates.extend(filter(None, [which("python" + version),
+                          f"/opt/homebrew/bin/python{version}", f"/usr/local/bin/python{version}",
+                          f"/usr/bin/python{version}"]))
+        if os.name == "nt" and which("py"):
+            try:
+                result = run([which("py"), "-" + version, "-c", "import sys; print(sys.executable)"],
+                             capture_output=True, text=True, timeout=15)
+                if result.returncode == 0 and result.stdout.strip():
+                    candidates.append(result.stdout.strip())
+            except (OSError, subprocess.SubprocessError):
+                pass
+    for candidate in dict.fromkeys(candidates):
+        if runtime_python_supported(candidate, run):
+            return candidate
+    raise LayersError("No compatible Python was found for the model dependencies. Install Python 3.12 "
+                      "alongside your existing Python, then run common join again. "
+                      "macOS: brew install python@3.12; Windows: install Python 3.12 from python.org; "
+                      "Linux: install python3.12 and python3.12-venv with your package manager. "
+                      "Your system Python does not need to be removed or downgraded.")
+
+
+def install_managed_environment(venv: Path, *, run=subprocess.run, dry_run=False, log=print,
+                                which=shutil.which, urlopen=urllib.request.urlopen):
+    """Bootstrap uv and a private Python, without relying on system pip or venv."""
+    tools = HOME_DIR / "tools"
+    uv = which("uv") or str(tools / ("uv.exe" if os.name == "nt" else "uv"))
+    env = dict(os.environ, UV_CACHE_DIR=str(HOME_DIR / "cache/uv"),
+               UV_UNMANAGED_INSTALL=str(tools),
+               UV_PYTHON_INSTALL_DIR=str(HOME_DIR / "python"),
+               UV_PYTHON_DOWNLOADS="automatic")
+    log("Setting up Common's private Python 3.12 automatically...")
+    command = [uv, "venv", "--python", "3.12", "--managed-python", "--seed", str(venv)]
+    if dry_run:
+        log("  would download uv if needed, then run: " + " ".join(command))
+        return
+    try:
+        if not Path(uv).is_file():
+            suffix = ".ps1" if os.name == "nt" else ".sh"
+            with tempfile.TemporaryDirectory(prefix="common-python-") as tmp:
+                installer = Path(tmp) / ("install" + suffix)
+                with urlopen("https://astral.sh/uv/install" + suffix, timeout=60) as response:
+                    installer.write_bytes(response.read())
+                bootstrap = (["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer)]
+                             if os.name == "nt" else ["sh", str(installer)])
+                result = run(bootstrap, env=env)
+                if result.returncode != 0:
+                    raise LayersError(f"Downloading Common's Python installer failed (exit {result.returncode}). "
+                                      "Check your connection and run common join again.")
+        result = run(command, env=env)
+        if result.returncode != 0:
+            raise LayersError(f"Automatic Python setup failed (exit {result.returncode}). "
+                              "Check the error above and run common join again.")
+    except (OSError, subprocess.SubprocessError) as error:
+        raise LayersError(f"Could not set up Common's private Python: {error}. "
+                          "Check your connection and run common join again.") from None
+
+
 def ensure_runtime(kind: str, *, source: Path, current_python=None, venv: Path = RUNTIME_VENV,
                    run=subprocess.run, dry_run: bool = False, log=print) -> str:
     """A Python that can run commonnet.node: this interpreter if it can, else the runtime venv (made if needed)."""
@@ -635,10 +713,30 @@ def ensure_runtime(kind: str, *, source: Path, current_python=None, venv: Path =
     python = venv_python(venv)
     if python.is_file() and can_import(python, source, run, kind):
         return str(python)
+    # Reuse functional runtimes on any Python, but don't ask pip to build pinned
+    # native dependencies against a newer, unsupported interpreter. Preserve a
+    # failed environment so no user files are deleted while recovering.
+    if python.is_file() and not runtime_python_supported(python, run):
+        venv = venv.with_name(venv.name + "-compatible")
+        python = venv_python(venv)
+        if python.is_file() and can_import(python, source, run, kind):
+            return str(python)
+        if python.is_file() and not runtime_python_supported(python, run):
+            raise LayersError(f"{venv} uses an incompatible Python. Rename that directory and join again.")
+    base_python = None
+    managed = False
+    if not python.is_file():
+        try:
+            base_python = find_runtime_python(current_python, run)
+        except LayersError:
+            install_managed_environment(venv, run=run, dry_run=dry_run, log=log)
+            managed = True
+    if base_python and str(base_python) != str(current_python):
+        log(f"Using {base_python} for the model runtime (system Python is unchanged).")
     plain, torch_args = requirements(kind)
     steps = []
-    if not python.is_file():
-        steps.append(([str(current_python), "-m", "venv", str(venv)], "creating a Python environment"))
+    if not python.is_file() and not managed:
+        steps.append(([str(base_python), "-m", "venv", str(venv)], "creating a Python environment"))
     steps.append(([str(python), "-m", "pip", "install", "--upgrade", "pip"], "preparing pip"))
     if torch_args:
         steps.append(([str(python), "-m", "pip", "install", *torch_args], "installing torch (large)"))

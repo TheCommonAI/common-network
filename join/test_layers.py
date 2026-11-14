@@ -91,7 +91,7 @@ class Commands(unittest.TestCase):
         def fake_run(command, **kwargs):
             commands.append(command)
             is_check = len(command) > 2 and command[1] == "-c"
-            return mock.Mock(returncode=1 if is_check else 0)
+            return mock.Mock(returncode=1 if is_check and "sys.version_info" not in command[2] else 0)
 
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(layers.LayersError) as caught:  # installs "succeed", the import check still fails
@@ -104,7 +104,7 @@ class Commands(unittest.TestCase):
         self.assertTrue(any("transformers==5.8.0" in c for c in joined))
 
         def failing(command, **kwargs):
-            return mock.Mock(returncode=1)
+            return mock.Mock(returncode=0 if "sys.version_info" in " ".join(command) else 1)
 
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(layers.LayersError) as caught:
@@ -121,9 +121,100 @@ class Commands(unittest.TestCase):
             checks = mock.Mock(returncode=1)
             runs = []
             python = layers.ensure_runtime("mac-arm64", source=Path(tmp), current_python="/cur", venv=Path(tmp) / "venv",
-                                           run=lambda c, **k: runs.append(c) or checks, dry_run=True, log=logged.append)
+                                           run=lambda c, **k: runs.append(c) or mock.Mock(returncode=0 if "sys.version_info" in " ".join(c) else 1), dry_run=True, log=logged.append)
             self.assertTrue(all(c[1] == "-c" for c in runs))  # only the import probes ran
             self.assertTrue(any("would run" in line for line in logged))
+
+
+class PythonCompatibility(unittest.TestCase):
+    def test_new_python_falls_back_to_installed_312(self):
+        def run(command, **kwargs):
+            return mock.Mock(returncode=0 if command[0] == "/python3.12" else 1)
+        self.assertEqual(layers.find_runtime_python("/python3.15", run=run,
+                         which=lambda name: "/python3.12" if name == "python3.12" else None),
+                         "/python3.12")
+
+    def test_missing_compatible_python_gives_actionable_error(self):
+        with self.assertRaisesRegex(layers.LayersError, "Install Python 3.12"):
+            layers.find_runtime_python("/python3.15", run=lambda *a, **k: mock.Mock(returncode=1),
+                                       which=lambda name: None)
+
+    def test_failed_new_python_venv_is_preserved_and_replaced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            venv = Path(tmp) / "venv"
+            old_python = layers.venv_python(venv)
+            old_python.parent.mkdir(parents=True)
+            old_python.touch()
+            commands = []
+            def run(command, **kwargs):
+                commands.append(command)
+                return mock.Mock(returncode=0 if "sys.version_info" in " ".join(command)
+                                 and command[0] == "/python3.12" else 1)
+            with mock.patch.object(layers, "find_runtime_python", return_value="/python3.12"):
+                selected = layers.ensure_runtime("cpu", source=Path(tmp), current_python="/python3.15",
+                                                  venv=venv, run=run, dry_run=True, log=lambda *_: None)
+            self.assertTrue(old_python.is_file())
+            self.assertEqual(selected, str(layers.venv_python(venv.with_name("venv-compatible"))))
+
+    def test_missing_python_automatically_downloads_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            venv = Path(tmp) / "venv"
+            commands = []
+            def run(command, **kwargs):
+                commands.append(command)
+                return mock.Mock(returncode=0)
+            with mock.patch.object(layers, "can_import", side_effect=[False, True]), \
+                 mock.patch.object(layers, "find_runtime_python", side_effect=layers.LayersError("missing")), \
+                 mock.patch.object(layers, "install_managed_environment") as setup:
+                selected = layers.ensure_runtime("cpu", source=Path(tmp), current_python="/python3.15",
+                                                  venv=venv, run=run, log=lambda *_: None)
+            setup.assert_called_once_with(venv, run=run, dry_run=False, log=mock.ANY)
+            self.assertEqual(selected, str(layers.venv_python(venv)))
+            self.assertFalse(any(c[1:3] == ["-m", "venv"] for c in commands))
+
+    def test_managed_setup_dry_run_never_downloads_or_executes(self):
+        def forbidden(*args, **kwargs):
+            raise AssertionError("dry run performed a mutation")
+        layers.install_managed_environment(Path("/unused"), dry_run=True, run=forbidden,
+                                          urlopen=forbidden, which=lambda _: None, log=lambda *_: None)
+
+    def test_managed_setup_uses_private_python_and_reports_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            uv = Path(tmp) / "uv"
+            uv.touch()
+            run = mock.Mock(return_value=mock.Mock(returncode=1))
+            with self.assertRaisesRegex(layers.LayersError, "Automatic Python setup failed"):
+                layers.install_managed_environment(Path(tmp) / "venv", run=run,
+                                                  which=lambda _: str(uv), log=lambda *_: None)
+            command = run.call_args.args[0]
+            self.assertIn("--managed-python", command)
+            self.assertEqual(command[command.index("--python") + 1], "3.12")
+            self.assertEqual(run.call_args.kwargs["env"]["UV_PYTHON_INSTALL_DIR"], str(layers.HOME_DIR / "python"))
+
+    def test_uv_is_bootstrapped_without_system_python_packages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            commands = []
+            def run(command, **kwargs):
+                commands.append((command, kwargs))
+                return mock.Mock(returncode=0)
+            fetch = mock.Mock(return_value=io.BytesIO(b"# test installer"))
+            with mock.patch.object(layers, "HOME_DIR", home):
+                layers.install_managed_environment(home / "venv", run=run, which=lambda _: None,
+                                                  urlopen=fetch, log=lambda *_: None)
+            self.assertTrue(fetch.call_args.args[0].startswith("https://astral.sh/uv/install."))
+            self.assertEqual(len(commands), 2)
+            self.assertEqual(commands[0][1]["env"]["UV_UNMANAGED_INSTALL"], str(home / "tools"))
+            self.assertEqual(commands[1][0][-1], str(home / "venv"))
+
+    def test_version_probe_uses_numeric_bounds(self):
+        # Execute the real probe, simulating both sides of the compatibility boundary.
+        for version, accepted in [((3, 9), False), ((3, 10), True), ((3, 12), True),
+                                  ((3, 13), True), ((3, 14), False), ((3, 15), False)]:
+            def run(command, **kwargs):
+                probe = command[2].replace("import sys;", f"import sys; sys.version_info = {version!r};")
+                return subprocess.run([sys.executable, "-c", probe], **kwargs)
+            self.assertEqual(layers.runtime_python_supported("/python", run), accepted)
 
 
 class Source(unittest.TestCase):

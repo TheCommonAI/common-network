@@ -10,7 +10,7 @@
 #
 # Installs `common` (ask / join / status / …), `common-chat`, and `common-join`,
 # plus cloudflared if it is missing (other peers reach this machine through a
-# Cloudflare quick tunnel). Python 3.10+ is the only other requirement.
+# Cloudflare quick tunnel). Python is downloaded automatically when needed.
 set -euo pipefail
 
 REPO="TheCommonAI/common-network"
@@ -58,14 +58,16 @@ if [ -z "$PY" ]; then
   done
 fi
 if [ -z "$PY" ]; then
-  echo "Common needs Python 3.10 or newer, and none was found."
-  if [ "$OS" = "Darwin" ]; then
-    echo "  A stock macOS ships 3.9, which is too old for this. Install a newer one:"
-    echo "    brew install python@3.12"
-  else
-    echo "  Install it with your package manager, e.g.: sudo apt install python3"
+  echo "Downloading Common's private Python 3.12..."
+  UV="$INSTALL_DIR/tools/uv"
+  if [ ! -x "$UV" ]; then
+    UV_INSTALLER="$(mktemp)"
+    curl -fsSL https://astral.sh/uv/install.sh -o "$UV_INSTALLER"
+    UV_UNMANAGED_INSTALL="$INSTALL_DIR/tools" sh "$UV_INSTALLER"
+    rm -f "$UV_INSTALLER"
   fi
-  exit 1
+  UV_CACHE_DIR="$INSTALL_DIR/cache/uv" UV_PYTHON_INSTALL_DIR="$INSTALL_DIR/python" "$UV" venv --python 3.12 --managed-python --seed "$INSTALL_DIR/runtime/python"
+  PY="$INSTALL_DIR/runtime/python/bin/python3"
 fi
 
 # Each wrapper resolves its own interpreter when it runs, instead of having the

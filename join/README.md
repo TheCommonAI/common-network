@@ -31,3 +31,7 @@ layers. Other peers reach the node through a Cloudflare quick tunnel
 
 Details, flags, and backends: the [top-level README](../README.md) and
 [docs/layer-network.md](../docs/layer-network.md).
+
+### Python setup
+
+The installer accepts Python 3.10 or newer and automatically downloads a private Python 3.12 if none is available. On first `common join`, if the installed Python cannot run the model dependencies and no compatible interpreter is found, Common downloads Python 3.12 using uv and creates its own environment. No manual Python downgrade, pip installation, or administrator access is required. Downloads need internet access to astral.sh, GitHub, and the package indexes.
