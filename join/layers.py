@@ -21,6 +21,7 @@ Nothing here runs unless --network was given: join.py without it behaves as it a
 from __future__ import annotations
 
 import io
+import ctypes
 import os
 import platform
 import re
@@ -375,6 +376,21 @@ def free_disk_gib(path: Path) -> float:
     return shutil.disk_usage(path).free / 2**30
 
 
+def windows_vc_runtime_available(loader=None) -> bool:
+    """Whether the MSVC runtime DLLs needed by the Windows torch wheels can load."""
+    if platform.system() != "Windows":
+        return True
+    loader = loader or getattr(ctypes, "WinDLL", None)
+    if loader is None:
+        return False
+    try:
+        for name in ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"):
+            loader(name)
+    except OSError:
+        return False
+    return True
+
+
 def gateway_from_env(env) -> str | None:
     """COMMONNET_GATEWAY if set ("off" disables the directory), else the default gateway."""
     value = env.get(GATEWAY_ENV)
@@ -401,6 +417,12 @@ def preflight(env=None, *, system: str | None = None, machine: str | None = None
     except LayersError as e:
         return [Check("this machine", False, str(e), "The layer network runs on macOS, Windows and Linux.")]
     checks = [Check("this machine", True, PLATFORM_LABEL[kind])]
+
+    if system == "Windows" and not windows_vc_runtime_available():
+        checks.append(Check(
+            "Microsoft Visual C++ runtime", False, "required runtime DLLs are not available",
+            "Install the x64 Microsoft Visual C++ v14 Redistributable from "
+            "https://aka.ms/vc14/vc_redist.x64.exe, then reopen PowerShell and run common join again."))
 
     if env.get("COMMONNET_SRC"):
         checks.append(Check("code", True, "COMMONNET_SRC is set, so nothing is downloaded"))
