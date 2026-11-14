@@ -549,10 +549,19 @@ def venv_python(venv: Path = RUNTIME_VENV) -> Path:
     return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
-def _source_prefix(source: Path | None) -> str:
+def _source_prefix(source: Path | None, python=None) -> str:
     # -m and -c put the working directory before PYTHONPATH. Select the downloaded
     # code explicitly while keeping cwd unchanged for relative manifest paths.
-    return f"import sys; sys.path.insert(0, {str(source.resolve())!r}); " if source is not None else ""
+    statements = []
+    if source is not None:
+        statements.append(f"import sys; sys.path.insert(0, {str(source.resolve())!r})")
+    if os.name == "nt" and python:
+        # PyTorch loads native DLLs with restricted Windows search paths, which
+        # do not include a venv's Scripts directory automatically. msvc-runtime
+        # installs the redistributable DLLs there for app-local deployment.
+        dll_dir = str(Path(python).resolve().parent)
+        statements.append(f"_common_dll_dir = __import__('os').add_dll_directory({dll_dir!r})")
+    return "; ".join(statements) + ("; " if statements else "")
 
 
 def can_import(python, source: Path | None = None, run=subprocess.run, kind: str | None = None) -> bool:
@@ -563,7 +572,9 @@ def can_import(python, source: Path | None = None, run=subprocess.run, kind: str
     if source is not None:
         env["PYTHONPATH"] = os.pathsep.join(p for p in (str(source), env.get("PYTHONPATH", "")) if p)
     try:
-        check = _source_prefix(source) + IMPORT_CHECK + ("; " + BACKEND_IMPORTS[kind] if BACKEND_IMPORTS.get(kind) else "")
+        check = _source_prefix(source, python) + IMPORT_CHECK
+        if BACKEND_IMPORTS.get(kind):
+            check += "; " + BACKEND_IMPORTS[kind]
         out = run([str(python), "-c", check], capture_output=True, env=env, timeout=120)
     except (OSError, subprocess.SubprocessError):
         return False
@@ -767,7 +778,7 @@ def ensure_runtime(kind: str, *, source: Path, current_python=None, venv: Path =
         if source is not None:
             env["PYTHONPATH"] = os.pathsep.join(
                 p for p in (str(source), env.get("PYTHONPATH", "")) if p)
-        check = _source_prefix(source) + IMPORT_CHECK
+        check = _source_prefix(source, python) + IMPORT_CHECK
         if BACKEND_IMPORTS.get(kind):
             check += "; " + BACKEND_IMPORTS[kind]
         detail = ""
@@ -796,7 +807,7 @@ def build_command(python: str, network: str | None, extra: list[str] | None = No
     """The command that runs the node. `network` may be None to use COMMONNET_NETWORK or the default seeds."""
     command = [str(python), "-m", "commonnet.node"]
     if source is not None:
-        command = [str(python), "-c", _source_prefix(source)
+        command = [str(python), "-c", _source_prefix(source, python)
                    + "import runpy; runpy.run_module('commonnet.node', run_name='__main__', alter_sys=True)"]
     if network:
         command += ["--network", network]
