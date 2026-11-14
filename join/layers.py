@@ -21,7 +21,6 @@ Nothing here runs unless --network was given: join.py without it behaves as it a
 from __future__ import annotations
 
 import io
-import ctypes
 import os
 import platform
 import re
@@ -68,6 +67,7 @@ CPU_TORCH_REQUIREMENT = "torch==2.11.0"
 CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"  # Windows and Linux; macOS wheels come from PyPI
 CUDA_TORCH_REQUIREMENT = "torch==2.11.0"
 CUDA_TORCH_INDEX = "https://download.pytorch.org/whl/cu128"  # UNTESTED
+WINDOWS_MSVC_REQUIREMENT = "msvc-runtime>=14.44.35112"  # app-local VC runtime DLLs; no machine-wide install
 
 
 class LayersError(RuntimeError):
@@ -376,21 +376,6 @@ def free_disk_gib(path: Path) -> float:
     return shutil.disk_usage(path).free / 2**30
 
 
-def windows_vc_runtime_available(loader=None) -> bool:
-    """Whether the MSVC runtime DLLs needed by the Windows torch wheels can load."""
-    if platform.system() != "Windows":
-        return True
-    loader = loader or getattr(ctypes, "WinDLL", None)
-    if loader is None:
-        return False
-    try:
-        for name in ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"):
-            loader(name)
-    except OSError:
-        return False
-    return True
-
-
 def gateway_from_env(env) -> str | None:
     """COMMONNET_GATEWAY if set ("off" disables the directory), else the default gateway."""
     value = env.get(GATEWAY_ENV)
@@ -417,12 +402,6 @@ def preflight(env=None, *, system: str | None = None, machine: str | None = None
     except LayersError as e:
         return [Check("this machine", False, str(e), "The layer network runs on macOS, Windows and Linux.")]
     checks = [Check("this machine", True, PLATFORM_LABEL[kind])]
-
-    if system == "Windows" and not windows_vc_runtime_available():
-        checks.append(Check(
-            "Microsoft Visual C++ runtime", False, "required runtime DLLs are not available",
-            "Install the x64 Microsoft Visual C++ v14 Redistributable from "
-            "https://aka.ms/vc14/vc_redist.x64.exe, then reopen PowerShell and run common join again."))
 
     if env.get("COMMONNET_SRC"):
         checks.append(Check("code", True, "COMMONNET_SRC is set, so nothing is downloaded"))
@@ -551,12 +530,19 @@ def requirements(kind: str) -> tuple[list[str], list[str]]:
     if kind == "mac-arm64":
         return list(MAC_REQUIREMENTS), []
     if kind == "nvidia":
-        return list(NVIDIA_REQUIREMENTS), [CUDA_TORCH_REQUIREMENT, "--index-url", CUDA_TORCH_INDEX]
-    if kind == "cpu":
+        plain, torch_args = list(NVIDIA_REQUIREMENTS), [CUDA_TORCH_REQUIREMENT, "--index-url", CUDA_TORCH_INDEX]
+    elif kind == "cpu":
         # macOS has no separate CPU wheel index; the default wheels are CPU builds there
         index = ["--index-url", CPU_TORCH_INDEX] if platform.system() in ("Windows", "Linux") else []
-        return list(CPU_REQUIREMENTS), [CPU_TORCH_REQUIREMENT, *index]
-    raise LayersError(f"unknown platform kind {kind!r}")
+        plain, torch_args = list(CPU_REQUIREMENTS), [CPU_TORCH_REQUIREMENT, *index]
+    else:
+        raise LayersError(f"unknown platform kind {kind!r}")
+    if platform.system() == "Windows":
+        # PyTorch's Windows wheels need MSVC DLLs. Ship them in this venv so a
+        # first join works without an administrator install of the machine-wide
+        # Visual C++ Redistributable.
+        plain.append(WINDOWS_MSVC_REQUIREMENT)
+    return plain, torch_args
 
 
 def venv_python(venv: Path = RUNTIME_VENV) -> Path:
@@ -796,9 +782,9 @@ def ensure_runtime(kind: str, *, source: Path, current_python=None, venv: Path =
         suffix = f"\nImport check output:\n{detail}" if detail else ""
         if (os.name == "nt" and "winerror 126" in detail.lower()
                 and "c10.dll" in detail.lower()):
-            suffix += ("\nThis Windows torch DLL error usually means the Microsoft Visual C++ v14 "
-                       "runtime is missing or out of date. Install the x64 redistributable from "
-                       "https://aka.ms/vc14/vc_redist.x64.exe, restart the terminal, and run common join again.")
+            suffix += ("\nCommon installs the required Microsoft C++ runtime DLLs into its private Python "
+                       "environment. If this still fails, check the earlier pip output for an "
+                       "msvc-runtime install error, then run common join again to resume setup.")
         raise LayersError("the runtime installed but commonnet still cannot be imported. "
                           f"The environment is at {venv}; fix the import error above and run common join again."
                           f"{suffix}")
