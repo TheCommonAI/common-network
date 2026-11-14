@@ -751,8 +751,30 @@ def ensure_runtime(kind: str, *, source: Path, current_python=None, venv: Path =
             raise LayersError(f"{what} failed (exit {result.returncode}). Fix the error above and run the same "
                               "command again; it resumes where it stopped.")
     if not dry_run and not can_import(python, source, run, kind):
-        raise LayersError("the runtime installed but commonnet still cannot be imported; "
-                          f"try deleting {venv} and joining again")
+        # Keep the first probe quiet because it is also used while searching for
+        # an already-working interpreter. Once installation has completed, show
+        # the real import exception so users can distinguish a broken wheel from
+        # a package/API incompatibility without deleting their environment.
+        env = dict(os.environ)
+        if source is not None:
+            env["PYTHONPATH"] = os.pathsep.join(
+                p for p in (str(source), env.get("PYTHONPATH", "")) if p)
+        check = _source_prefix(source) + IMPORT_CHECK
+        if BACKEND_IMPORTS.get(kind):
+            check += "; " + BACKEND_IMPORTS[kind]
+        detail = ""
+        try:
+            failed = run([str(python), "-c", check], capture_output=True, text=True,
+                         env=env, timeout=120)
+            detail = (getattr(failed, "stderr", "") or getattr(failed, "stdout", "") or "").strip()
+        except (OSError, subprocess.SubprocessError) as error:
+            detail = str(error)
+        if len(detail) > 4000:
+            detail = detail[-4000:]
+        suffix = f"\nImport check output:\n{detail}" if detail else ""
+        raise LayersError("the runtime installed but commonnet still cannot be imported. "
+                          f"The environment is at {venv}; fix the import error above and run common join again."
+                          f"{suffix}")
     return str(python)
 
 
