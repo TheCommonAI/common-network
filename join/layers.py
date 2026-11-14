@@ -772,6 +772,11 @@ def ensure_runtime(kind: str, *, source: Path, current_python=None, venv: Path =
         if len(detail) > 4000:
             detail = detail[-4000:]
         suffix = f"\nImport check output:\n{detail}" if detail else ""
+        if (os.name == "nt" and "winerror 126" in detail.lower()
+                and "c10.dll" in detail.lower()):
+            suffix += ("\nThis Windows torch DLL error usually means the Microsoft Visual C++ v14 "
+                       "runtime is missing or out of date. Install the x64 redistributable from "
+                       "https://aka.ms/vc14/vc_redist.x64.exe, restart the terminal, and run common join again.")
         raise LayersError("the runtime installed but commonnet still cannot be imported. "
                           f"The environment is at {venv}; fix the import error above and run common join again."
                           f"{suffix}")
