@@ -156,7 +156,7 @@ class BlockServer:
                  max_request_bytes: int = MAX_REQUEST_BYTES, token: str | None = None,
                  extra_handlers: dict | None = None, ssl_context=None, allow_chain_private: bool = False,
                  rtc_enabled: bool | None = None, allow_rtc_private: bool | None = None, rtc_stun_urls=None,
-                 on_session_close=None):
+                 on_session_close=None, on_forward=None):
         """token=None serves without authentication. Only tests and --stub do that;
         the command line refuses to start a real block without a token.
 
@@ -176,6 +176,7 @@ class BlockServer:
         self.token = None if token is None else auth.check_token(token)
         self.block = block
         self.on_session_close = on_session_close
+        self.on_forward = on_forward  # (positions, compute ms) after each newly computed step; retries are not counted
         self.layers = protocol.check_layers(block.layers)
         self.device = str(block.device)
         self.max_request_bytes = max_request_bytes
@@ -407,9 +408,12 @@ class BlockServer:
             _check_output(out, hidden)
             if output is not None:
                 out = [int(t) for t in self.block.head(out, which, sampling, start_pos)]
-            session.stage_ms += (time.perf_counter() - compute_started) * 1000
+            compute_ms = (time.perf_counter() - compute_started) * 1000
+            session.stage_ms += compute_ms
             session.last = (key, out)
-            return out
+        if self.on_forward is not None:
+            self.on_forward(int(hidden.shape[0] * hidden.shape[1]), compute_ms)
+        return out
 
 
 class _Httpd(ThreadingHTTPServer):

@@ -25,6 +25,11 @@ security model has to be stated, not assumed.
   The website API strips connection tokens, URLs, keys, and IP addresses. Signatures identify the
   reporting peer; they do not attest to its performance claims. Set `COMMONNET_TELEMETRY=0` to disable
   this reporting. See [the dashboard API](docs/network-dashboard.md) for sampling and retention.
+- **The gateway keeps a contribution log per machine.** For the closed beta, each report also adds a
+  line to a log kept until deleted: the machine's device ID (a public key hash that stays the same
+  across models and restarts), its layers and backend, and how much it served (tokens, compute time,
+  requests, uptime). Running totals are public at `/api/contributions`. No text, URLs, IP addresses or
+  hardware names are logged. `COMMONNET_TELEMETRY=0` stops this too.
 - **`common ask` talks to this machine.** The local API is
   `http://127.0.0.1:11440/v1`. The prompt then travels across the peer chain as
   token IDs (or as hidden states with `--local-front`). Direct/WebRTC links use

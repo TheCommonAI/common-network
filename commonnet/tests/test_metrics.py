@@ -144,3 +144,41 @@ class Timings(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ServedWork(unittest.TestCase):
+    """What a node computed for routes: positions through its layers and their time, counted once per step."""
+
+    def test_forward_steps_count_positions_and_retries_count_once(self):
+        from commonnet.net.server import BlockServer, StubBlock
+        from commonnet.tests.test_net_server import hidden_tensor
+        metrics = Metrics()
+        server = BlockServer(StubBlock(0, 8), "127.0.0.1", 0, on_forward=metrics.record_work)
+        server.open("s1")
+        prefill = hidden_tensor(1, shape=(1, 5, 8))
+        server.forward("s1", prefill, 0)
+        server.forward("s1", prefill, 0)  # a retry of the same step returns the cached reply
+        server.forward("s1", hidden_tensor(2), 5)
+        buckets = metrics.snapshot()
+        self.assertEqual(sum(b["served_tokens"] for b in buckets), 6)
+        self.assertGreaterEqual(sum(b["served_compute_ms"] for b in buckets), 0)
+
+    def test_bad_work_values_are_ignored(self):
+        metrics = Metrics()
+        for tokens, ms in ((0, 1.0), (-3, 1.0), (2.5, 1.0), (2, -1.0), (2, "x")):
+            metrics.record_work(tokens, ms)
+        self.assertEqual(metrics.snapshot(), [])
+
+    def test_report_names_the_device_and_the_device_vouches_for_the_peer(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        from commonnet.metrics import DEVICE_BIND
+        import base64
+        peer, device = Identity.generate(), Identity.generate()
+        snapshot = lambda: {"network": "n", "phase": "up", "backend": "mlx", "gib": 1.0, "layers": None,
+                            "assigned_layers": None}
+        payload = Reporter(peer, "http://unused", snapshot, Metrics(), device=device).payload()
+        self.assertEqual((payload["v"], payload["peer"], payload["device"]), (4, peer.peer, device.peer))
+        Ed25519PublicKey.from_public_bytes(device.pub).verify(base64.b64decode(payload["device_sig"]),
+                                                              DEVICE_BIND + peer.pub)
+        alone = Reporter(peer, "http://unused", snapshot, Metrics()).payload()
+        self.assertEqual(alone["device"], peer.peer)

@@ -395,7 +395,7 @@ class Node:
                  status: StatusFile | None = None, status_s: float = STATUS_SECONDS,
                  api_port: int | None = None, api_backend=None, no_draft: bool = False,
                  fixed_window: tuple[int, int] | None = None,
-                 direct=None, state_dir=None, decider=None, gateway=None, local_front=None):
+                 direct=None, state_dir=None, decider=None, gateway=None, local_front=None, device=None):
         # direct (a commonnet.direct.DirectConfig) turns on direct mode: DHT discovery, a TLS block server on a
         # public address, no tunnel unless the node proves unreachable. None (the default) changes nothing.
         self.direct, self.state_dir, self._decider = direct, state_dir, decider
@@ -418,6 +418,7 @@ class Node:
         self._direct_failures = 0
         self.fixed_window = fixed_window
         self.manifest, self.seeds, self.identity, self.hw = manifest, list(seeds), identity, hardware
+        self.device = device or identity  # the machine's network-independent key, named in dashboard reports
         self.cpu_dtype = None
         if hardware.backend == "cpu" and not os.environ.get("COMMONNET_DTYPE"):
             self.cpu_dtype, self.hw = choose_cpu_dtype(manifest, hardware, cpu_has_fast_bf16())
@@ -565,9 +566,11 @@ class Node:
     def start(self) -> "Node":
         if self.gateway and os.environ.get("COMMONNET_TELEMETRY", "1").lower() not in ("0", "false", "off", "no"):
             from commonnet.metrics import Reporter
-            self._dashboard = Reporter(self.identity, self.gateway, self._dashboard_snapshot, self.metrics)
+            self._dashboard = Reporter(self.identity, self.gateway, self._dashboard_snapshot, self.metrics,
+                                       device=self.device)
             self._dashboard.start()
         self.log(f"peer {self.identity.peer}: {self.hw.name}, offering {self.hw.gib:.1f} GiB on {self.hw.backend}")
+        self.log(f"device {self.device.peer}")
         if self._api_port is not None:
             self._api = {"port": self._api_port, "ready": False}
         if self._status is not None:
@@ -805,7 +808,7 @@ class Node:
         if try_direct and self.direct is not None and self._serve_direct(block):
             return
         server = BlockServer(block, port=self.port, token=self.token, extra_handlers=self.handlers(),
-                             on_session_close=self.metrics.record_stage).start()
+                             on_session_close=self.metrics.record_stage, on_forward=self.metrics.record_work).start()
         with self._lock:
             self._block, self.server = block, server
             self.port = server.port
@@ -903,12 +906,14 @@ class Node:
         want = self.port or (direct_mod.DEFAULT_TCP_PORT if cfg.auto else 0)
         try:
             server = BlockServer(block, host, want, token=self.token, extra_handlers=self.handlers(),
-                                 ssl_context=ctx, on_session_close=self.metrics.record_stage).start()
+                                 ssl_context=ctx, on_session_close=self.metrics.record_stage,
+                                 on_forward=self.metrics.record_work).start()
         except OSError:
             if not want or self.port:
                 raise
             server = BlockServer(block, host, 0, token=self.token, extra_handlers=self.handlers(),
-                                 ssl_context=ctx, on_session_close=self.metrics.record_stage).start()   # port busy: any free one
+                                 ssl_context=ctx, on_session_close=self.metrics.record_stage,
+                                 on_forward=self.metrics.record_work).start()   # port busy: any free one
         with self._lock:
             self._block, self.server = block, server
             self.port = server.port
@@ -1599,6 +1604,14 @@ def _main(args) -> int:
             local_front = localfront.setting_from(args.local_front)
         directory = args.identity_dir or HOME / "net" / re.sub(r"[^A-Za-z0-9._-]", "_", manifest.id)
         identity = Identity.load_or_create(Path(directory) / "identity.key")
+        # One key per machine, shared by every network it joins, so its contribution keeps one name across model
+        # switches and restarts. An explicit --identity-dir (tests, several peers on one machine) stands alone.
+        device = identity if args.identity_dir else Identity.load_or_create(HOME / "net" / "device.key")
+        if not args.identity_dir:
+            try:
+                (HOME / "net" / "device.id").write_text(device.peer + "\n")  # public; `common status` shows it
+            except OSError:
+                pass
     except (NodeError, RecordError, ManifestError, localfront.FrontConfigError) as e:
         print(f"error: {e}", file=sys.stderr)
         status.write(blank_status("error", error=friendly(e)))
@@ -1607,7 +1620,7 @@ def _main(args) -> int:
     gateway = mesh_directory.gateway_url(default=None if args.stub else mesh_directory.DEFAULT_GATEWAY)
     node = Node(manifest, seeds, identity, hardware, port=args.port, stub=args.stub, tunnel=not args.no_tunnel,
                 advertise=args.advertise, status=status, api_port=args.api, no_draft=args.no_draft, fixed_window=fixed_window,
-                direct=direct, state_dir=directory, gateway=gateway, local_front=local_front)
+                direct=direct, state_dir=directory, gateway=gateway, local_front=local_front, device=device)
 
     def leave(signum, frame):
         node.request_leave()

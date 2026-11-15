@@ -19,6 +19,8 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi.responses import JSONResponse
 
+from . import contributions
+
 WINDOW_SECONDS = 300
 BUCKET_SECONDS = 10
 HISTORY_SECONDS = 3600
@@ -28,11 +30,15 @@ MAX_PEERS = 5000
 MAX_SESSIONS = 5000
 MAX_PER_SOURCE = 200
 BIND = b"commonnet-dashboard-v1\n"
+DEVICE_BIND = b"commonnet-device-v1\n"
 COUNTERS_V1 = ("requests", "completed", "failed", "cancelled", "output_tokens", "decode_tokens", "decode_ms",
                "ttft_count", "ttft_ms", "total_ms")
 COUNTERS_V2 = (*COUNTERS_V1, "stage_count", "stage_ms", "network_count", "network_ms")
-COUNTERS = (*COUNTERS_V2, "speculative_drafted_tokens", "speculative_accepted_tokens")
-TIME_COUNTERS = {"decode_ms", "ttft_ms", "total_ms", "stage_ms", "network_ms"}
+COUNTERS_V3 = (*COUNTERS_V2, "speculative_drafted_tokens", "speculative_accepted_tokens")
+COUNTERS = (*COUNTERS_V3, "served_tokens", "served_compute_ms")
+VERSION_COUNTERS = {1: COUNTERS_V1, 2: COUNTERS_V2, 3: COUNTERS_V3, 4: COUNTERS}
+DEVICE_FIELDS = {"device", "device_pub", "device_sig"}  # v4: the machine's key, which outlives model switches
+TIME_COUNTERS = {"decode_ms", "ttft_ms", "total_ms", "stage_ms", "network_ms", "served_compute_ms"}
 PHASES = {"starting", "downloading", "loading", "up", "moving", "leaving", "stopped", "error"}
 _lock = threading.Lock()
 _peers = {}
@@ -90,7 +96,9 @@ def validate(body, now):
     required = {"v", "network", "peer", "pub", "sig", "session", "seq", "ts", "phase", "backend", "gib",
                 "layers", "assigned_layers", "buckets"}
     try:
-        if not isinstance(body, dict) or set(body) != required or type(body["v"]) is not int or body["v"] not in (1, 2, 3):
+        if not isinstance(body, dict) or type(body.get("v")) is not int or body["v"] not in VERSION_COUNTERS:
+            return "malformed report"
+        if set(body) != (required | DEVICE_FIELDS if body["v"] >= 4 else required):
             return "malformed report"
         if not isinstance(body["network"], str) or not 1 <= len(body["network"]) <= 128:
             return "bad network"
@@ -111,7 +119,7 @@ def validate(body, now):
         if not isinstance(body["buckets"], list) or len(body["buckets"]) > WINDOW_SECONDS // BUCKET_SECONDS + 1:
             return "too many metric buckets"
         stamps = set()
-        counters = COUNTERS if body["v"] == 3 else COUNTERS_V2 if body["v"] == 2 else COUNTERS_V1
+        counters = VERSION_COUNTERS[body["v"]]
         for bucket in body["buckets"]:
             if not isinstance(bucket, dict) or set(bucket) != {"ts", *counters}:
                 return "bad metrics"
@@ -128,7 +136,7 @@ def validate(body, now):
                     or bucket["ttft_count"] > bucket["completed"]
                     or bucket["decode_tokens"] != bucket["output_tokens"] - bucket["ttft_count"]):
                 return "inconsistent metric counters"
-            if body["v"] == 3 and bucket["speculative_accepted_tokens"] > bucket["speculative_drafted_tokens"]:
+            if body["v"] >= 3 and bucket["speculative_accepted_tokens"] > bucket["speculative_drafted_tokens"]:
                 return "inconsistent speculative counters"
         pub = base64.b64decode(body["pub"], validate=True)
         sig = base64.b64decode(body["sig"], validate=True)
@@ -137,6 +145,12 @@ def validate(body, now):
         canonical = json.dumps({k: v for k, v in body.items() if k != "sig"}, sort_keys=True,
                                separators=(",", ":")).encode()
         Ed25519PublicKey.from_public_bytes(pub).verify(sig, BIND + canonical)
+        if body["v"] >= 4:
+            device_pub = base64.b64decode(body["device_pub"], validate=True)
+            if len(device_pub) != 32 or hashlib.sha256(device_pub).hexdigest()[:32] != body["device"]:
+                return "device does not match key"
+            Ed25519PublicKey.from_public_bytes(device_pub).verify(
+                base64.b64decode(body["device_sig"], validate=True), DEVICE_BIND + pub)
     except (InvalidSignature, ValueError, TypeError, KeyError, AttributeError):
         return "invalid signed report"
     return None
@@ -181,6 +195,7 @@ async def report(request):
         buckets = {stamp: bucket for stamp, bucket in buckets.items() if stamp >= now - WINDOW_SECONDS}
         _reports[key] = {"seq": body["seq"], "at": now, "buckets": buckets}
         _remember(body, now, source)
+    contributions.log.record(body, now)
     return {"ok": True}
 
 

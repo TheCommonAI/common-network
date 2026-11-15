@@ -109,8 +109,11 @@ coverage. External clients that bypass updated nodes' chat APIs are not measured
 samples can remain visible for five minutes after their source node goes offline.
 
 Dashboard report schema v2 adds the stage and network counters. Schema v3 adds speculative draft and
-acceptance counters. The gateway continues to accept v1 and v2 reports; fields absent from older schemas
-remain null until newer telemetry arrives. An older peer that does not accept the
+acceptance counters. Schema v4 adds `served_tokens` and `served_compute_ms` (work done for routes) and
+names the machine with a device key (`device`, `device_pub`, `device_sig`; see below). The gateway
+continues to accept v1–v3 reports; fields absent from older schemas remain null until newer telemetry arrives.
+Deploy the gateway before nodes running v4: an older gateway rejects v4 reports, which only costs those
+nodes their dashboard visibility. An older peer that does not accept the
 optional timing value on session close still receives the original close request as a compatibility fallback.
 
 The public endpoint never returns bearer tokens, peer URLs, IP addresses, keys, prompts, or answers.
@@ -176,3 +179,35 @@ gateway worker/instance. Recently seen nodes are retained for up to an hour; at 
 and 5,000 reporting sessions are held. A gateway restart resets offline history, and active node
 reports rebuild their recent metrics. `history_since` exposes when this gateway process started.
 Multiple gateway workers/replicas require a shared store before their snapshots can be combined.
+
+## Contribution log (closed beta)
+
+`GET /api/contributions` returns running totals per machine, for the closed beta and as the measured
+basis for a later credit system. Each machine is named by its **device**: a key kept at
+`~/.common-network/net/device.key`, separate from the per-network peer key, so a machine keeps one name
+across restarts, updates and model switches. `common status` prints it (from `net/device.id`). The
+device key signs for each peer key it reports with (`device_sig`), so one machine cannot claim another's
+peer. Older nodes appear under their peer ID.
+
+| Field | Meaning | Measured by |
+|---|---|---|
+| `tokens` | Positions this machine's layers processed for routes: prefill, decode and speculative verification. A retried step counts once. | the node (self-reported, signed) |
+| `compute_ms` | Time those layer steps took | the node |
+| `requests_served` | Route sessions this machine served to a clean close | the node |
+| `chat_completed`, `chat_failed`, `output_tokens` | Chat requests made through this machine's own local API (use, not contribution) | the node |
+| `uptime_s` | Seconds serving layers, summed between heartbeats at most 60 s apart | the gateway |
+| `first_seen`, `last_seen`, `networks`, `backends` | When and where the machine reported | the gateway |
+
+Work done by `--local-front` (a machine running the first layers of its own chats) is not counted.
+Requests a machine routes through its own layers are counted like anyone else's.
+
+Every accepted report appends one JSON line to the file named by `COMMON_CONTRIBUTIONS_LOG`, holding
+only what grew since that node's previous report. The totals are the sum of the lines; on start the
+gateway replays the file, so resent buckets are never counted twice across a restart. **Put the file
+on a persistent volume** (on Railway, attach a volume and set, for example,
+`COMMON_CONTRIBUTIONS_LOG=/data/contributions.jsonl`). Without the variable the totals live only in
+memory and reset on deploy. Each line is also printed to stdout, prefixed `contribution `, as a backup in
+the host's logs. The file grows by about 200 bytes per node per 15 seconds and is kept until deleted.
+
+These numbers are not proof of work: nothing yet checks that a peer computed what it claims. Uptime is
+the only figure the gateway measures itself.
