@@ -302,3 +302,12 @@ class CompanionIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MacReloadRetry(unittest.TestCase):
+    def test_bootstrap_retries_teardown_race(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(join, "_macos_plist_path", return_value=Path(tmp)/"node.plist"), mock.patch.object(join.Path, "home", return_value=Path(tmp)), mock.patch.object(join.time, "sleep") as sleep, mock.patch.object(join.subprocess, "run") as run:
+            run.side_effect = [subprocess.CompletedProcess([], 0), subprocess.CalledProcessError(5, "launchctl", stderr="Bootstrap failed: 5"), subprocess.CompletedProcess([], 0)]
+            join.install_macos_service(["python", "join.py"])
+            self.assertEqual(run.call_count, 3)
+            sleep.assert_called_once_with(0.5)

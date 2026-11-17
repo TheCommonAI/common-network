@@ -1578,7 +1578,18 @@ def install_macos_service(argv: list[str], *, label: str = LAUNCHD_LABEL) -> Non
 
     uid = os.getuid()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{label}"], capture_output=True)
-    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)], check=True)
+    # bootout can return before launchd has finished removing the old job.
+    # Retry bootstrap during that short teardown window and retain its actual diagnostic.
+    command = ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)]
+    for attempt in range(10):
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            break
+        except subprocess.CalledProcessError as error:
+            if attempt == 9:
+                detail = (error.stderr or error.stdout or str(error)).strip()
+                raise RuntimeError(f"Could not start Common's background service: {detail}") from error
+            time.sleep(0.5)
     print(f"{GLYPH_DONE} {blue('installed as a background service (LaunchAgent)', bold=True)} — starts at login, restarts if it crashes.")
     print(comment(f"logs: {log_path}"))
     print(comment(f"to stop: python3 {os.path.abspath(__file__)} --remove-permanent --no-update"))
