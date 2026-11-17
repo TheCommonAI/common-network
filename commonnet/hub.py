@@ -137,7 +137,8 @@ class Hub:
         last = None
         for attempt in range(RETRIES):
             try:
-                return _opener.open(urllib.request.Request(self.url(name), headers=headers, method=method), timeout=TIMEOUT)
+                from commonnet.resources import PacedResponse
+                return PacedResponse(_opener.open(urllib.request.Request(self.url(name), headers=headers, method=method), timeout=TIMEOUT))
             except urllib.error.HTTPError as e:
                 if e.code in (401, 403, 404):
                     raise HubError(f"{name}: HTTP {e.code} (check repo id, revision, HF_TOKEN)") from None

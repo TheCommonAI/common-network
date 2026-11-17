@@ -785,7 +785,9 @@ def ensure_runtime(kind: str, *, source: Path, current_python=None, venv: Path =
         try:
             failed = run([str(python), "-c", check], capture_output=True, text=True,
                          env=env, timeout=120)
-            detail = (getattr(failed, "stderr", "") or getattr(failed, "stdout", "") or "").strip()
+            detail = next((value.strip() for value in (getattr(failed, "stderr", ""),
+                                                      getattr(failed, "stdout", ""))
+                           if isinstance(value, str) and value.strip()), "")
         except (OSError, subprocess.SubprocessError) as error:
             detail = str(error)
         if len(detail) > 4000:

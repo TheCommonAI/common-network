@@ -29,6 +29,7 @@ import threading
 import time
 import urllib.parse
 
+from commonnet import resources
 from commonnet.net import auth, dns, protocol
 from commonnet.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
 
@@ -562,9 +563,11 @@ class BlockClient:
         for _ in range(2):
             conn, reused = self._take(key, timeout)
             try:
+                resources.bandwidth.consume(len(data or b""))
                 conn.request(method, target, body=data, headers=headers)
                 response = conn.getresponse()
                 raw = response.read()
+                resources.bandwidth.consume(len(raw))
             except (OSError, http.client.HTTPException):
                 conn.close()
                 if reused:
@@ -589,6 +592,7 @@ class BlockClient:
         if peer is not None:
             started = time.perf_counter()
             try:
+                resources.bandwidth.consume(len(data or b""))
                 response = peer.request(method, path, body, timeout=timeout)
                 status, reply = response["status"], response["body"]
                 if type(status) is not int or not 100 <= status <= 599 or not isinstance(reply, dict):
@@ -596,6 +600,7 @@ class BlockClient:
                 raw = json.dumps(reply, separators=(",", ":")).encode("utf-8")
                 if len(raw) > self.max_request_bytes:
                     raise ValueError("direct response exceeds the payload limit")
+                resources.bandwidth.consume(len(raw))
                 server_ms = response.get("server_ms")
                 if (type(server_ms) not in (int, float) or not math.isfinite(server_ms) or server_ms < 0):
                     server_ms = None

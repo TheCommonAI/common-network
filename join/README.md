@@ -35,3 +35,16 @@ Details, flags, and backends: the [top-level README](../README.md) and
 ### Python setup
 
 The installer accepts Python 3.10 or newer and automatically downloads a private Python 3.12 if none is available. On first `common join`, if the installed Python cannot run the model dependencies and no compatible interpreter is found, Common downloads Python 3.12 using uv and creates its own environment. No manual Python downgrade, pip installation, or administrator access is required. Downloads need internet access to astral.sh, GitHub, and the package indexes.
+
+## Background operation and resource controls
+
+`common join --permanent` installs the node plus desktop resource controls.
+On macOS, click Common's menu-bar icon for native resource sliders; on Windows
+and Linux, the tray's **Resource controls…** action opens a local control panel.
+`common join --controls` reopens controls. `common leave` removes startup.
+
+Use `--memory-gib N` (alias `--stage-gib`), `--cpu-threads N`,
+`--compute-percent 1..100`, and `--bandwidth-mbps N` for the same settings from
+the command line. `--no-controls` skips desktop UI, and `--no-api` is preserved
+when installing a service. See the repository README for budget semantics,
+platform startup behavior, and logs.

@@ -37,7 +37,9 @@ import platform
 import plistlib
 import re
 import secrets
-import shlex
+import math
+import tempfile
+import xml.etree.ElementTree as ET
 import shutil
 import signal
 import socket
@@ -1482,6 +1484,12 @@ def _direct_flags(args: argparse.Namespace) -> list[str]:
     return flags
 
 
+def _resource_flags(args: argparse.Namespace) -> list[str]:
+    return [f"--{name.replace('_', '-')}={getattr(args, name)}"
+            for name in ("cpu_threads", "compute_percent", "bandwidth_mbps")
+            if getattr(args, name, None) is not None]
+
+
 def _service_argv(args: argparse.Namespace) -> list[str]:
     if getattr(args, "network", None) is not None:
         # A layer-network service: the spec goes last, as --network=SPEC, so it can never swallow another flag.
@@ -1490,8 +1498,15 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
             argv += [f"--nodes={args.nodes}"]
         if args.no_update:
             argv += ["--no-update"]
+        if getattr(args, "no_api", False):
+            argv += ["--no-api"]
+        argv += _resource_flags(args)
         if getattr(args, "api", None) is not None:
             argv += [f"--api={args.api}"]
+        if getattr(args, "no_api", False):
+            argv += ["--no-api"]
+        if getattr(args, "no_controls", False):
+            argv += ["--no-controls"]
         if getattr(args, "no_draft", False):
             argv += ["--no-draft"]
         if getattr(args, "layers", None):
@@ -1506,7 +1521,10 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
             argv += _direct_flags(args)
         if getattr(args, "nodes", None) is not None:
             return argv
-        return argv + ([f"--network={args.network}"] if args.network else ["--network"])
+        network = args.network
+        if network and Path(network).is_file():
+            network = str(Path(network).resolve())
+        return argv + ([f"--network={network}"] if network else ["--network"])
     argv = [
         sys.executable, os.path.abspath(__file__),
         "--legacy",  # recorded, so a service never changes mode when the default does
@@ -1536,8 +1554,8 @@ def _macos_plist_path() -> Path:
     return d / f"{LAUNCHD_LABEL}.plist"
 
 
-def install_macos_service(argv: list[str]) -> None:
-    plist_path = _macos_plist_path()
+def install_macos_service(argv: list[str], *, label: str = LAUNCHD_LABEL) -> None:
+    plist_path = _macos_plist_path() if label == LAUNCHD_LABEL else _macos_plist_path().with_name(label + ".plist")
     log_path = Path.home() / ".common-network" / "join.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1548,17 +1566,18 @@ def install_macos_service(argv: list[str]) -> None:
     # absolute path, which is one of the reasons it moved there.
     with open(plist_path, "wb") as f:
         plistlib.dump({
-            "Label": LAUNCHD_LABEL,
+            "Label": label,
             "ProgramArguments": argv,
             "EnvironmentVariables": {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")},
             "RunAtLoad": True,
             "KeepAlive": True,
+            "ThrottleInterval": 5,
             "StandardOutPath": str(log_path),
             "StandardErrorPath": str(log_path),
         }, f)
 
     uid = os.getuid()
-    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"], capture_output=True)
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{label}"], capture_output=True)
     subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)], check=True)
     print(f"{GLYPH_DONE} {blue('installed as a background service (LaunchAgent)', bold=True)} — starts at login, restarts if it crashes.")
     print(comment(f"logs: {log_path}"))
@@ -1580,16 +1599,25 @@ def _systemd_unit_path() -> Path:
     return d / SYSTEMD_UNIT
 
 
+def _systemd_quote(value: str, *, command: bool = False) -> str:
+    # systemd has its own quoting and expands percent specifiers and (in ExecStart) dollars.
+    value = value.replace("%", "%%")
+    if command:
+        value = value.replace("$", "$$")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r") + '"'
+
+
 def install_linux_service(argv: list[str]) -> None:
     unit_path = _systemd_unit_path()
-    exec_start = " ".join(shlex.quote(a) for a in argv)
+    exec_start = " ".join(_systemd_quote(a, command=True) for a in argv)
     path_env = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
     unit_path.write_text(f"""[Unit]
 Description=Common Network node
 After=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
-Environment=PATH={path_env}
+Environment={_systemd_quote("PATH=" + path_env)}
 ExecStart={exec_start}
 Restart=always
 RestartSec=5
@@ -1616,23 +1644,92 @@ def remove_linux_service() -> None:
     print(f"{GLYPH_DONE} removed the background service.")
 
 
-def install_windows_service(argv: list[str]) -> None:
+# Task Scheduler owns this wrapper. A kill-on-close job keeps every descendant (join,
+# runtime and tunnel) tied to it, so /end or task replacement cannot leave an orphan node.
+_WINDOWS_JOB_GUARD = r"""
+import os
+if os.name == 'nt':
+    import ctypes as c
+    from ctypes import wintypes as w
+    class Basic(c.Structure):
+        _fields_ = [('process_time', c.c_int64), ('job_time', c.c_int64), ('flags', w.DWORD),
+                    ('min_working_set', c.c_size_t), ('max_working_set', c.c_size_t),
+                    ('active_process_limit', w.DWORD), ('affinity', c.c_size_t),
+                    ('priority', w.DWORD), ('scheduling', w.DWORD)]
+    class IO(c.Structure):
+        _fields_ = [(name, c.c_uint64) for name in ('read_ops','write_ops','other_ops','read_bytes','write_bytes','other_bytes')]
+    class Extended(c.Structure):
+        _fields_ = [('basic', Basic), ('io', IO), ('process_memory', c.c_size_t),
+                    ('job_memory', c.c_size_t), ('peak_process_memory', c.c_size_t), ('peak_job_memory', c.c_size_t)]
+    kernel = c.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateJobObjectW.argtypes = [c.c_void_p, w.LPCWSTR]
+    kernel.CreateJobObjectW.restype = w.HANDLE
+    kernel.SetInformationJobObject.argtypes = [w.HANDLE, c.c_int, c.c_void_p, w.DWORD]
+    kernel.SetInformationJobObject.restype = w.BOOL
+    kernel.AssignProcessToJobObject.argtypes = [w.HANDLE, w.HANDLE]
+    kernel.AssignProcessToJobObject.restype = w.BOOL
+    kernel.GetCurrentProcess.restype = w.HANDLE
+    common_job = kernel.CreateJobObjectW(None, None)
+    limits = Extended()
+    limits.basic.flags = 0x2000
+    if not common_job or not kernel.SetInformationJobObject(common_job, 9, c.byref(limits), c.sizeof(limits)) or not kernel.AssignProcessToJobObject(common_job, kernel.GetCurrentProcess()):
+        raise c.WinError(c.get_last_error())
+"""
+
+
+def _windows_task_xml(argv: list[str], log_path: Path, user: str) -> bytes:
+    ns = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+    ET.register_namespace("", ns)
+    def add(parent, name, text=None, **attrs):
+        element = ET.SubElement(parent, f"{{{ns}}}{name}", attrs)
+        element.text = text
+        return element
+    task = ET.Element(f"{{{ns}}}Task", version="1.2")
+    triggers = add(task, "Triggers")
+    trigger = add(triggers, "LogonTrigger")
+    add(trigger, "Enabled", "true")
+    add(trigger, "UserId", user)
+    principals = add(task, "Principals")
+    principal = add(principals, "Principal", id="Contributor")
+    add(principal, "UserId", user)
+    add(principal, "LogonType", "InteractiveToken")
+    add(principal, "RunLevel", "LeastPrivilege")
+    settings = add(task, "Settings")
+    for name, value in (("MultipleInstancesPolicy", "IgnoreNew"),
+                        ("DisallowStartIfOnBatteries", "false"), ("StopIfGoingOnBatteries", "false"),
+                        ("StartWhenAvailable", "true"), ("ExecutionTimeLimit", "PT0S")):
+        add(settings, name, value)
+    restart = add(settings, "RestartOnFailure")
+    add(restart, "Interval", "PT1M")
+    add(restart, "Count", "999")
+    actions = add(task, "Actions", Context="Contributor")
+    action = add(actions, "Exec")
+    # No cmd.exe: paths, model URLs and metacharacters stay literal arguments. The wrapper preserves
+    # the node's exit code for Task Scheduler and sends both streams to a persistent log.
+    wrapper = (_WINDOWS_JOB_GUARD + "\nimport subprocess,sys; "
+               f"f=open({str(log_path)!r},'ab',buffering=0); "
+               f"sys.exit(subprocess.call({argv!r},stdout=f,stderr=subprocess.STDOUT))")
+    add(action, "Command", argv[0])
+    add(action, "Arguments", subprocess.list2cmdline(["-c", wrapper]))
+    return ET.tostring(task, encoding="utf-16", xml_declaration=True)
+
+
+def install_windows_service(argv: list[str], *, name: str = SCHTASKS_NAME) -> None:
     log_path = Path.home() / ".common-network" / "join.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd_str = " ".join(f'"{a}"' if " " in a else a for a in argv)
-    cmd_str = f'cmd /c "{cmd_str} >> "{log_path}" 2>&1"'
-    result = subprocess.run([
-        "schtasks", "/create", "/f", "/sc", "onlogon", "/rl", "highest",
-        "/tn", SCHTASKS_NAME, "/tr", cmd_str,
-    ], capture_output=True, text=True)
+    user = subprocess.run(["whoami"], capture_output=True, text=True, check=True).stdout.strip()
+    with tempfile.TemporaryDirectory(prefix="common-task-") as tmp:
+        task_path = Path(tmp) / "join.xml"
+        task_path.write_bytes(_windows_task_xml(argv, log_path, user))
+        # Replacing a task definition does not stop its old process.
+        subprocess.run(["schtasks", "/end", "/tn", name], capture_output=True)
+        result = subprocess.run(["schtasks", "/create", "/f", "/tn", name,
+                                 "/xml", str(task_path)], capture_output=True, text=True)
     if result.returncode != 0:
-        if "Access is denied" in result.stderr or "access" in result.stderr.lower():
-            die("creating the scheduled task requires an elevated (admin) PowerShell.")
         die(f"schtasks failed: {result.stderr.strip()}")
-    subprocess.run(["schtasks", "/run", "/tn", SCHTASKS_NAME], check=True)
-    print(f"{GLYPH_DONE} {blue('installed as a scheduled task', bold=True)} — starts at login.")
+    subprocess.run(["schtasks", "/run", "/tn", name], check=True)
+    print(f"{GLYPH_DONE} {blue('installed as a scheduled task', bold=True)} — starts at login, retries crashes every minute (up to 999 retries).")
     print(comment(f"logs: {log_path}"))
-    print(comment("Windows Task Scheduler doesn't auto-restart on crash like launchd/systemd do."))
     print(comment(f"to stop: python3 {os.path.abspath(__file__)} --remove-permanent --no-update"))
 
 
@@ -1640,6 +1737,66 @@ def remove_windows_service() -> None:
     subprocess.run(["schtasks", "/end", "/tn", SCHTASKS_NAME], capture_output=True)
     subprocess.run(["schtasks", "/delete", "/f", "/tn", SCHTASKS_NAME], capture_output=True)
     print(f"{GLYPH_DONE} removed the scheduled task.")
+
+
+CONTROLS_LABEL = "network.common.controls"
+CONTROLS_TASK = "CommonNetworkControls"
+
+
+def service_config_path() -> Path:
+    return Path.home() / ".common-network" / "service.json"
+
+
+def _controls_command() -> list[str]:
+    layers = _load_layers()
+    if layers is None:
+        raise RuntimeError("layers.py is missing; run the installer again")
+    source = layers.ensure_source()
+    python = layers.ensure_runtime(layers.platform_kind(), source=source)
+    module = "AppKit" if platform.system() == "Darwin" else "pystray, PIL"
+    check = subprocess.run([str(python), "-c", "import " + module], capture_output=True)
+    if check.returncode:
+        packages = (["pyobjc-framework-Cocoa>=10"] if platform.system() == "Darwin"
+                    else ["pystray>=0.19", "Pillow>=10"])
+        subprocess.run([str(python), "-m", "pip", "install", *packages], check=True)
+    return [str(python), "-c", layers._source_prefix(source, python)
+            + "import runpy; runpy.run_module('commonnet.controls', run_name='__main__', alter_sys=True)",
+            "--config", str(service_config_path())]
+
+
+def install_controls() -> None:
+    system = platform.system()
+    if system == "Linux" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        print(comment("No desktop session: tray controls skipped; use the resource flags on this server."))
+        return
+    # Applying sliders replaces the node service, but must not kill the panel's own in-flight Apply.
+    mac_path = Path.home() / "Library" / "LaunchAgents" / (CONTROLS_LABEL + ".plist")
+    desktop_path = Path.home() / ".config" / "autostart" / "common-controls.desktop"
+    if system == "Darwin" and mac_path.exists():
+        return
+    if system == "Linux" and desktop_path.exists():
+        return
+    if system == "Windows":
+        found = subprocess.run(["schtasks", "/query", "/tn", CONTROLS_TASK], capture_output=True)
+        if found.returncode == 0:
+            return
+    command = _controls_command()
+    if system == "Darwin":
+        install_macos_service(command, label=CONTROLS_LABEL)
+    elif system == "Windows":
+        install_windows_service(command, name=CONTROLS_TASK)
+    elif system == "Linux":
+        desktop_path.parent.mkdir(parents=True, exist_ok=True)
+        # Desktop Entry Exec quoting: reserved characters must remain literal, including percent codes.
+        def desktop_argument(value):
+            # Exec has two decoding passes: Desktop Entry string escapes, then argument quoting.
+            quoted = '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$').replace('%', '%%') + '"'
+            return quoted.replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+        quoted = ' '.join(desktop_argument(a) for a in command)
+        desktop_path.write_text("[Desktop Entry]\nType=Application\nName=Common resource controls\nExec="
+                                + quoted + "\nTerminal=false\n")
+        subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def install_permanent(args: argparse.Namespace) -> None:
@@ -1653,6 +1810,19 @@ def install_permanent(args: argparse.Namespace) -> None:
         install_windows_service(argv)
     else:
         die(f"--permanent isn't supported on {system}")
+    if getattr(args, "network", None) is not None:
+        path = service_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        limits = {name: getattr(args, name, None) for name in
+                  ("stage_gib", "cpu_threads", "compute_percent", "bandwidth_mbps")}
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"argv": argv, "limits": limits}, indent=2) + "\n")
+        temporary.replace(path)
+        if not getattr(args, "no_controls", False):
+            try:
+                install_controls()
+            except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+                print(comment(f"The node is running, but tray setup failed: {e}. Retry with common join --controls."))
 
 
 def remove_permanent() -> None:
@@ -1665,6 +1835,17 @@ def remove_permanent() -> None:
         remove_windows_service()
     else:
         die(f"--permanent isn't supported on {system}")
+    service_config_path().unlink(missing_ok=True)
+    if system == "Darwin":
+        path = Path.home() / "Library" / "LaunchAgents" / (CONTROLS_LABEL + ".plist")
+        path.unlink(missing_ok=True)
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{CONTROLS_LABEL}"], capture_output=True)
+    elif system == "Windows":
+        subprocess.run(["schtasks", "/end", "/tn", CONTROLS_TASK], capture_output=True)
+        subprocess.run(["schtasks", "/delete", "/f", "/tn", CONTROLS_TASK], capture_output=True)
+    elif system == "Linux":
+        (Path.home() / ".config" / "autostart" / "common-controls.desktop").unlink(missing_ok=True)
+        # The panel notices the removed config and exits; it never restarts the node by itself.
 
 
 def _load_layers():
@@ -1793,7 +1974,10 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--network", nargs="?", const="", default=None, metavar="MODEL|URL|FILE", help=f"Join the decentralised layer network: serve a slice of the shared model as a peer. Choose {', '.join(NETWORK_MODEL_NAMES)}, or give a seed peer URL or manifest file (default: COMMONNET_NETWORK or the built-in seeds). No gateway registration")
     parser.add_argument("--layers", metavar="A-B", help="With the layer network: serve exactly this window of layers (for example 27-36) instead of the one the network picks for you. It must start and end on a stage boundary and fit in memory")
-    parser.add_argument("--stage-gib", type=float, default=None, metavar="GIB", help="With the layer network: how much memory to offer, in GiB (default: detected). Raise it if a window is just over what this machine offers and you can spare the memory")
+    parser.add_argument("--stage-gib", "--memory-gib", type=float, default=None, metavar="GIB", help="With the layer network: how much memory to offer, in GiB (default: detected). Raise it if a window is just over what this machine offers and you can spare the memory")
+    parser.add_argument("--cpu-threads", type=int, help="Maximum PyTorch/OpenMP CPU compute threads (positive integer)")
+    parser.add_argument("--compute-percent", type=float, help="Inference duty cycle for CPU/GPU: 1-100 percent; inserts idle time after each stage step")
+    parser.add_argument("--bandwidth-mbps", type=float, help="Aggregate model-download and peer payload pacing in megabits/sec (positive; excludes protocol overhead and discovery)")
     parser.add_argument("--local-front", metavar="N|auto|on|off", default=None, help="With the layer network: also hold the first layers (N = a stage boundary; on = first stage; auto = only when fast and memory fits) in the chat client, so prompts stay local and the first network hop disappears. Auto is the default; use off or COMMONNET_LOCAL_FRONT=off to disable. It can use about 1 GB for Qwen3-8B and helps this machine's own chat")
     parser.add_argument("--no-draft", action="store_true", help="With the layer network: turn off speculative decoding in the local chat API (same as COMMONNET_DRAFT=0)")
     parser.add_argument("--no-api", action="store_true", help="With the layer network: do not serve the local chat API (on by default, so `common ask` and chat apps work). Saves the ~1 GB client part of the model")
@@ -1825,6 +2009,8 @@ def main() -> None:
     parser.add_argument("--no-update", action="store_true", default=bool(os.environ.get("COMMON_NO_UPDATE")), help="Skip the self-update check (useful when hacking on this script locally)")
     parser.add_argument("--debug", action="store_true", help="Show full join logs from the start (press d while joining to toggle)")
     parser.add_argument("--lan", action="store_true", help="Use a LAN worker address instead of a Cloudflare tunnel; still registers with --gateway (production by default).")
+    parser.add_argument("--controls", action="store_true", help="Open the background node's menu-bar/tray resource controls")
+    parser.add_argument("--no-controls", action="store_true", help="Install the background node without desktop controls (servers)")
     parser.add_argument("--permanent", action="store_true", help="Install as a background service that starts at login/boot and restarts if it crashes, then exit")
     parser.add_argument("--check", action="store_true", help="Check that this machine can join the layer network (reads only: nothing is installed, downloaded or started), then exit")
     parser.add_argument("--remove-permanent", action="store_true", help="Remove the background service installed by --permanent, then exit")
@@ -1837,6 +2023,20 @@ def main() -> None:
         model_names_a_network(args)
     except ValueError as e:
         parser.error(str(e))
+
+    for name in ("stage_gib", "cpu_threads", "compute_percent", "bandwidth_mbps"):
+        value = getattr(args, name)
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            parser.error(f"--{name.replace('_', '-')} must be finite and positive")
+    if args.compute_percent is not None and not 1 <= args.compute_percent <= 100:
+        parser.error("--compute-percent must be between 1 and 100")
+
+    if args.controls:
+        if not service_config_path().is_file():
+            parser.error("Install a background node with common join --permanent first")
+        command = _controls_command()
+        subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=(os.name != "nt"))
+        return
 
     if args.check:
         layers = _load_layers()
@@ -1877,6 +2077,8 @@ def main() -> None:
         parser.error("--bootstrap, --public-ip, --external-port, --direct-port, --dht-port and --no-tunnel-fallback need --direct")
     if args.layers and mode != "network":
         parser.error("--layers is only used with the layer network (--network, or a plain join on a machine that can serve it)")
+    if _resource_flags(args) and mode != "network":
+        parser.error("resource limits are only used with the layer network")
     if args.stage_gib and mode != "network":
         parser.error("--stage-gib is only used with the layer network (--network, or a plain join on a machine that can serve it)")
     if args.local_front and mode != "network":
@@ -1906,6 +2108,10 @@ def main() -> None:
         if args.permanent:
             install_permanent(args)
             return
+        if args.cpu_threads:
+            # Set these before launching the runtime: BLAS reads them when its libraries import.
+            for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+                os.environ[name] = str(args.cpu_threads)
         node_args = [] if args.api is None else ["--api", str(args.api)]
         if args.nodes is not None:
             node_args += ["--nodes", str(args.nodes)]
@@ -1917,6 +2123,7 @@ def main() -> None:
             node_args += ["--stage-gib", str(args.stage_gib)]
         if args.local_front:
             node_args += ["--local-front", args.local_front]
+        node_args += _resource_flags(args)
         node_args += _direct_flags(args)
         # Direct mode with no network named: the built-in manifest and the DHT, no seed URL (name one with --network URL)
         run_network_member(args.network or ("dht" if args.direct and args.nodes is None else None), node_args, debug=args.debug)

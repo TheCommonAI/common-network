@@ -45,6 +45,7 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from commonnet import resources
 from commonnet.net import auth, protocol
 from commonnet.net.chain import ChainUnavailable
 from commonnet.net.protocol import MAX_REQUEST_BYTES, ProtocolError, Tensor
@@ -304,6 +305,15 @@ class BlockServer:
         return server.offer(body, timeout=15)
 
     def rpc(self, method: str, path: str, body=None, *, allow_offer: bool = False) -> dict:
+        # Both HTTP and RTC enter here; a single aggregate payload budget covers either transport.
+        if resources.bandwidth.rate:
+            resources.bandwidth.consume(len(json.dumps(body, separators=(",", ":")).encode()))
+        result = self._rpc(method, path, body, allow_offer=allow_offer)
+        if resources.bandwidth.rate:
+            resources.bandwidth.consume(len(json.dumps(result["body"], separators=(",", ":")).encode()))
+        return result
+
+    def _rpc(self, method: str, path: str, body=None, *, allow_offer: bool = False) -> dict:
         """Shared HTTP/data-channel RPC dispatcher.
 
         An RTC channel has already been authenticated by its HTTP offer. It may
@@ -407,7 +417,10 @@ class BlockServer:
             _check_output(out, hidden)
             if output is not None:
                 out = [int(t) for t in self.block.head(out, which, sampling, start_pos)]
-            session.stage_ms += (time.perf_counter() - compute_started) * 1000
+            elapsed = time.perf_counter() - compute_started
+            session.stage_ms += elapsed * 1000
+            # Hold the compute lock through idle time so other sessions cannot consume the reserved share.
+            resources.idle_after(elapsed)
             session.last = (key, out)
             return out
 

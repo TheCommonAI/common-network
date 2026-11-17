@@ -1481,7 +1481,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=0, help="port for the block server (default: any free port; loopback only, "
                                                        "or with --direct the public TCP port, listening on all interfaces over TLS)")
     p.add_argument("--backend", choices=["mlx", "nf4", "cpu"], help="override the detected backend")
-    p.add_argument("--stage-gib", type=float, help="memory to offer, in GiB (default: detected)")
+    p.add_argument("--stage-gib", "--memory-gib", type=float, help="memory to offer, in GiB (default: detected)")
+    p.add_argument("--cpu-threads", type=int, help="CPU compute thread budget")
+    p.add_argument("--compute-percent", type=float, help="Serving inference duty cycle, 1-100 percent")
+    p.add_argument("--bandwidth-mbps", type=float, help="Aggregate downloads and peer payload megabits/sec")
     p.add_argument("--layers", metavar="A-B", help="serve exactly this window of layers (for example 27-36) instead of the one the network picks; it must start and end on a stage boundary")
     p.add_argument("--local-front", metavar="N|auto|on|off", default=None,
                    help=f"also hold the first N layers (a stage boundary; on = the first stage) and run them in the chat client, so the "
@@ -1546,6 +1549,11 @@ def direct_config(args):
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    from commonnet import resources
+    try:
+        resources.configure(args)
+    except ValueError as e:
+        parser.error(str(e))
     if args.nodes is not None and args.network is not None:
         parser.error("--nodes/--1 through --7 selects a model; use it without --network")
     previous = os.environ.get("COMMONNET_RTC")

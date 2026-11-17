@@ -2,7 +2,7 @@
 
 ![Common.](assets/common-banner.png)
 
-**Common Network v0.4**
+**v0.4**
 
 Common is an open, peer-to-peer network for running a language model across multiple computers. Instead of requiring every machine to hold the whole model, each participating peer downloads and serves a window of consecutive model layers. A request is processed by routing it through peers that collectively cover the model.
 
@@ -51,7 +51,56 @@ common status
 
 The local OpenAI-compatible API is available at `http://127.0.0.1:11440/v1` while the node is running. Any OpenAI-compatible client can use that endpoint.
 
-`common join --check` is a read-only preflight: it checks the platform, memory, disk and required network access without installing or downloading anything. The first actual join sets up its private runtime and downloads the selected layer weights. Press Ctrl+C to leave cleanly; use `--permanent` to keep the peer running after reboots.
+`common join --check` is a read-only preflight: it checks the platform, memory, disk and required network access without installing or downloading anything. The first actual join sets up its private runtime and downloads the selected layer weights. Press Ctrl+C to leave cleanly; use `--permanent` to run in the background, recover from crashes, and resume at login.
+
+## Background contribution and resource controls
+
+```bash
+common join --permanent
+common join --controls             # reopen menu-bar / tray controls
+common leave                       # stop and remove automatic startup
+```
+
+Click the Common icon in the macOS menu bar for native resource sliders. On
+Windows/Linux, choose **Resource controls…** from the tray to open the local
+control panel. Set model memory, CPU threads, compute share and bandwidth,
+then **Apply limits**. This restarts the node and reconnects with the saved
+limits. **Stop contributing** removes automatic startup.
+
+The same settings are available from the terminal:
+
+```bash
+common join --permanent --memory-gib 4 --cpu-threads 2 --compute-percent 50 --bandwidth-mbps 20
+common join --permanent --no-controls --no-api --local-front off --no-draft  # lean headless node
+```
+
+Limits are cooperative. `--memory-gib` (alias `--stage-gib`) is the estimated
+model-layer allocation budget, not a hard cap on total RAM/VRAM. The chat API,
+local front, drafter, runtime and request caches need additional memory; the
+second example disables optional model components. `--cpu-threads` limits PyTorch
+and common BLAS thread pools. Compute share inserts idle time after served
+inference steps on CPU/GPU; it does not cap instantaneous GPU utilization,
+model loading, or local chat/draft work. Bandwidth is a shared average budget
+for model downloads and HTTP/WebRTC peer request/response payloads, excluding
+protocol overhead, discovery and dependency installation. Individual requests
+can burst; very low limits can make peers time out. Defaults are automatic
+memory/threads, full compute share, and unlimited bandwidth.
+
+macOS uses a LaunchAgent; Windows uses a per-user scheduled task. Both resume
+at login after a restart. Linux uses `systemd --user`; enable lingering with
+`loginctl enable-linger "$USER"` to resume at boot before login and stay online
+after logout. Windows retries failures every minute, up to 999 retries;
+macOS/Linux keep retrying. A sleeping or offline computer cannot serve.
+
+Settings are stored in `~/.common-network/service.json`. Re-run
+`common join --permanent` with new flags to replace them. Desktop controls
+install their small UI dependencies on first use. Linux requires a supported
+tray (such as an AppIndicator-capable desktop); when unavailable, the sliders
+open in a browser. Use `--no-controls` for headless installations.
+
+Logs: `~/.common-network/join.log` on macOS/Windows, or
+`journalctl --user -u common-join.service -f` on Linux. Detailed join logs also
+live under `~/.common-network/logs/`.
 
 ## Models and network selection
 
