@@ -41,7 +41,7 @@ common join --check
 common join
 ```
 
-The built-in network is **Qwen3-8B**. A peer chooses a layer window that fits its available memory, downloads only the weights for that window, and starts serving it. Keep `common join` running in its terminal. In another terminal, ask the network:
+The built-in beta network is **Qwen3.5-35B-A3B**. A peer chooses a layer window that fits its available memory, downloads only the weights for that window, and starts serving it. `common join` starts a background service and returns to your terminal. Then ask the network:
 
 ```bash
 common ask "What's a good way to learn recursion?"
@@ -51,12 +51,13 @@ common status
 
 The local OpenAI-compatible API is available at `http://127.0.0.1:11440/v1` while the node is running. Any OpenAI-compatible client can use that endpoint.
 
-`common join --check` is a read-only preflight: it checks the platform, memory, disk and required network access without installing or downloading anything. The first actual join sets up its private runtime and downloads the selected layer weights. Press Ctrl+C to leave cleanly; use `--permanent` to run in the background, recover from crashes, and resume at login.
+`common join --check` is a read-only preflight: it checks the platform, memory, disk and required network access without installing or downloading anything. The first actual join sets up its private runtime and downloads the selected layer weights. Joining runs in the background by default, recovers from crashes, and resumes at login. Use `common leave` to stop, or `common join --foreground` for a terminal session that ends with Ctrl+C.
 
 ## Background contribution and resource controls
 
 ```bash
-common join --permanent
+common join                         # background service is the default
+common join --foreground            # optional terminal session
 common join --controls             # reopen menu-bar / tray controls
 common leave                       # stop and remove automatic startup
 ```
@@ -65,13 +66,17 @@ Click the Common icon in the macOS menu bar for native resource sliders. On
 Windows/Linux, choose **Resource controls…** from the tray to open the local
 control panel. Set model memory, CPU threads, compute share and bandwidth,
 then **Apply limits**. This restarts the node and reconnects with the saved
-limits. **Stop contributing** removes automatic startup.
+limits. **Stop contributing** removes automatic startup. The panel refreshes
+live node status every two seconds: it distinguishes model loading, stopped or
+unresponsive nodes, and online nodes waiting for enough peers to cover the
+model. Recent model-session counts include local work and are not a count of
+requests served to other people.
 
 The same settings are available from the terminal:
 
 ```bash
-common join --permanent --memory-gib 4 --cpu-threads 2 --compute-percent 50 --bandwidth-mbps 20
-common join --permanent --no-controls --no-api --local-front off --no-draft  # lean headless node
+common join --memory-gib 4 --cpu-threads 2 --compute-percent 50 --bandwidth-mbps 20
+common join --no-controls --no-api --local-front off --no-draft  # lean headless node
 ```
 
 Limits are cooperative. `--memory-gib` (alias `--stage-gib`) is the estimated
@@ -93,7 +98,7 @@ after logout. Windows retries failures every minute, up to 999 retries;
 macOS/Linux keep retrying. A sleeping or offline computer cannot serve.
 
 Settings are stored in `~/.common-network/service.json`. Re-run
-`common join --permanent` with new flags to replace them. Desktop controls
+`common join` with new flags to replace them. Desktop controls
 install their small UI dependencies on first use. Linux requires a supported
 tray (such as an AppIndicator-capable desktop); when unavailable, the sliders
 open in a browser. Use `--no-controls` for headless installations.
@@ -104,11 +109,13 @@ live under `~/.common-network/logs/`.
 
 ## Models and network selection
 
-The default network is Qwen3-8B, defined by `commonnet/networks/main.json`. Other available layer-network manifests include:
+The default beta network is Qwen3.5-35B-A3B. Other available layer-network manifests include:
 
 | Network name | Model |
 |---|---|
-| `qwen3-8b` | Qwen3-8B (default) |
+| `qwen3.5-35b-a3b` | Qwen3.5-35B-A3B (beta default) |
+| `qwen3.5-122b-a10b` | Qwen3.5-122B-A10B |
+| `qwen3-8b` | Qwen3-8B (smaller fallback) |
 | `bonsai-8b` | Ternary Bonsai 8B |
 | `bonsai-27b` | Ternary Bonsai 27B |
 | `bonsai-2-9b` | Ternary Bonsai 2 9B |

@@ -12,7 +12,7 @@ import join
 class PresetFlags(unittest.TestCase):
     def test_shortcuts_and_long_flag_forward_the_count(self):
         for flags, count in [([f"--{n}"], n) for n in range(1, 8)] + [(["--nodes", "7"], 7)]:
-            with self.subTest(flags=flags), mock.patch.object(sys, "argv", ["join.py", "--no-update", *flags]), \
+            with self.subTest(flags=flags), mock.patch.object(sys, "argv", ["join.py", "--no-update", "--foreground", *flags]), \
                     mock.patch.object(join, "run_network_member") as run, mock.patch("builtins.print"):
                 join.main()
                 run.assert_called_once_with(None, ["--api", "11440", "--nodes", str(count), "--auto-direct"], debug=False)

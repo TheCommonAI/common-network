@@ -11,6 +11,8 @@ import math
 import os
 from pathlib import Path
 import secrets
+import re
+import time
 import subprocess
 import sys
 import threading
@@ -18,6 +20,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_CONFIG = Path.home() / ".common-network" / "service.json"
+DEFAULT_STATUS = Path(os.environ.get("COMMONNET_STATUS_FILE") or Path.home() / ".common-network" / "net" / "status.json")
 FLAGS = {"stage_gib": "--stage-gib", "cpu_threads": "--cpu-threads",
          "compute_percent": "--compute-percent", "bandwidth_mbps": "--bandwidth-mbps"}
 RESOURCE_FLAGS = {*FLAGS.values(), "--memory-gib"}
@@ -59,7 +62,7 @@ def apply_command(config, limits):
         if flag in RESOURCE_FLAGS:
             index += 1 if "=" in argument else 2
             continue
-        if flag != "--permanent":
+        if flag not in ("--permanent", "--foreground"):
             argv.append(argument)
         index += 1
     for name, value in limits.items():
@@ -76,6 +79,96 @@ def change_service(path, limits=None, *, stop=False, run=subprocess.run):
     if result.returncode:
         # Show the actionable tail, without sending logs to a remote service.
         raise RuntimeError((result.stderr or result.stdout or "The service could not be changed.")[-1500:])
+
+
+def pid_is_alive(pid):
+    if type(pid) is not int or pid <= 0:
+        return False
+    if os.name == "nt":
+        # os.kill(pid, 0) terminates processes on Windows; use a read-only handle instead.
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied still means it exists
+        try:
+            code = wintypes.DWORD()
+            return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def actionable_error(error):
+    """Keep useful node messages; turn implementation exceptions into a next step."""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", str(error or "")).strip()
+    if not text:
+        return "Run common join --check to check this computer, then try joining again."
+    if any(part in text for part in ("Traceback (", "returned non-zero exit status", "CalledProcessError", "Command '['")):
+        return "The background node could not restart. Try Apply again; if it still fails, check ~/.common-network/join.log."
+    text = " ".join(text.split())
+    return text[:380] + ("…" if len(text) > 380 else "")
+
+
+def node_status(path=DEFAULT_STATUS, *, now=None, pid_alive=pid_is_alive):
+    """Summarize observed node state without mistaking presence for useful inference."""
+    unavailable = {"state": "stopped", "title": "Node not running", "detail": "The node has not reported a running session. Start it with common join --permanent.", "activity": ""}
+    try:
+        status = json.loads(Path(path).read_text())
+        if not isinstance(status, dict):
+            return unavailable
+    except (OSError, ValueError, TypeError):
+        return unavailable
+    phase = status.get("state")
+    error = actionable_error(status.get("error")) if status.get("error") else ""
+    if phase in ("stopped", "leaving") or not pid_alive(status.get("pid")):
+        return {**unavailable, "detail": error or "The background service may be restarting. If it stays stopped, run common join --check."}
+    stamp = status.get("ts")
+    current = time.time() if now is None else now
+    if type(stamp) not in (int, float) or not math.isfinite(stamp) or not -5 <= current - stamp <= 15:
+        return {"state": "stale", "title": "Node status is out of date", "detail": "The process is running but has stopped reporting status. Wait for recovery, or check ~/.common-network/join.log.", "activity": ""}
+    if phase == "error":
+        return {"state": "error", "title": "Node needs attention", "detail": error or actionable_error(None), "activity": ""}
+    if phase in ("starting", "loading", "downloading", "moving"):
+        titles = {"starting": "Starting your node", "loading": "Loading model layers", "downloading": "Downloading model layers", "moving": "Updating hosted layers"}
+        detail = "Your node is preparing to contribute. Cached model layers are reused."
+        progress = status.get("download")
+        if phase == "downloading" and isinstance(progress, dict):
+            done, total = progress.get("bytes"), progress.get("total")
+            if type(done) in (int, float) and type(total) in (int, float) and total > 0:
+                detail = f"{min(100, max(0, round(100 * done / total)))}% downloaded. You can leave this running in the background."
+        return {"state": phase, "title": titles[phase], "detail": detail, "activity": ""}
+    if phase != "up":
+        return {"state": "starting", "title": "Connecting to the network", "detail": "Waiting for the node to report its hosted layers.", "activity": ""}
+    window = status.get("window")
+    hosting = (f" · hosting layers {window[0]}–{window[1]}" if isinstance(window, list) and len(window) == 2 and all(type(v) is int for v in window) else "")
+    stages, coverage = status.get("stages"), status.get("coverage")
+    complete = (isinstance(stages, list) and bool(stages) and isinstance(coverage, list)
+                and len(stages) == len(coverage) and all(type(count) is int and count > 0 for count in coverage))
+    detail = ("Peers currently cover every model layer. The network can attempt complete requests."
+              if complete else "Waiting for peers to cover the remaining model layers. Complete requests need every layer online.")
+    if error:
+        detail += " " + error
+    activity = ""
+    counts = status.get("activity")
+    if isinstance(counts, dict) and type(counts.get("stage_sessions")) is int and counts["stage_sessions"] >= 0:
+        count = counts["stage_sessions"]
+        seconds = counts.get("window_seconds", 300)
+        period = f"last {round(seconds / 60):g} min" if type(seconds) in (int, float) and math.isfinite(seconds) and seconds > 0 else "recently"
+        activity = (f"{count} model session{'s' if count != 1 else ''} processed · {period} (includes local work)" if count
+                    else f"No model sessions processed in the {period}")
+    return {"state": "online" if complete else "waiting", "title": "Online" + hosting, "detail": detail, "activity": activity}
 
 
 def memory_gib():
@@ -107,7 +200,7 @@ SLIDERS = (("stage_gib", "Model memory", "RAM or GPU memory offered for model la
            ("bandwidth_mbps", "Bandwidth", "Shared download and peer payload budget"))
 
 
-def run_macos(path):
+def run_macos(path, status_path=DEFAULT_STATUS):
     import AppKit as A
     import objc
     from Foundation import NSObject, NSTimer
@@ -129,14 +222,14 @@ def run_macos(path):
             button.setTarget_(self)
             button.setAction_("toggle:")
             controller = A.NSViewController.alloc().init()
-            view = A.NSVisualEffectView.alloc().initWithFrame_(((0, 0), (400, 604)))
+            view = A.NSVisualEffectView.alloc().initWithFrame_(((0, 0), (400, 680)))
             view.setMaterial_(A.NSVisualEffectMaterialPopover)
             view.setState_(A.NSVisualEffectStateActive)
             controller.setView_(view)
             self.popover = A.NSPopover.alloc().init()
             self.popover.setContentViewController_(controller)
             self.popover.setBehavior_(A.NSPopoverBehaviorTransient)
-            self.popover.setContentSize_((400, 604))
+            self.popover.setContentSize_((400, 680))
 
             def label(text, x, y, width, height, size=13, bold=False, secondary=False):
                 item = A.NSTextField.labelWithString_(text)
@@ -147,14 +240,21 @@ def run_macos(path):
                 view.addSubview_(item)
                 return item
 
-            label("Common", 24, 551, 260, 32, 24, True)
-            label("A little spare power. A shared network.", 24, 525, 352, 24, secondary=True)
+            label("Common", 24, 627, 260, 32, 24, True)
+            label("A little spare power. A shared network.", 24, 601, 352, 24, secondary=True)
+            self.status_title = label("Checking your node…", 24, 565, 352, 22, 14, True)
+            self.status_detail = label("", 24, 522, 352, 36, 11, secondary=True)
+            self.status_detail.setLineBreakMode_(A.NSLineBreakByWordWrapping)
+            self.status_detail.setMaximumNumberOfLines_(3)
+            self.activity = label("", 24, 493, 352, 26, 11, secondary=True)
+            self.activity.setLineBreakMode_(A.NSLineBreakByWordWrapping)
+            self.activity.setMaximumNumberOfLines_(2)
             limits = self.config.get("limits", {})
             maximums = {"stage_gib": max(memory_gib(), limits.get("stage_gib") or 0),
                         "cpu_threads": os.cpu_count() or 1, "compute_percent": 100,
                         "bandwidth_mbps": max(1000, limits.get("bandwidth_mbps") or 0)}
             for index, (name, title, detail) in enumerate(SLIDERS):
-                y = 477 - index * 92
+                y = 447 - index * 80
                 label(title, 24, y, 210, 22, 14, True)
                 readout = label("", 234, y, 142, 22, 13)
                 readout.setAlignment_(A.NSTextAlignmentRight)
@@ -168,23 +268,37 @@ def run_macos(path):
                 slider.setAction_("slide:")
                 view.addSubview_(slider)
                 self.sliders[name], self.readouts[name] = slider, readout
-            label("Memory is a model-layer budget, not a total RAM cap.", 24, 124, 352, 20, 11, secondary=True)
-            label("Applying restarts your node. Other peers may take over.", 24, 104, 352, 20, 11, secondary=True)
-            self.message = label("Your choices are saved across restarts.", 24, 78, 352, 20, 11, secondary=True)
+            label("Memory is a model-layer budget, not a total RAM cap.", 24, 130, 352, 20, 11, secondary=True)
+            label("Applying restarts your node. Other peers may take over.", 24, 110, 352, 20, 11, secondary=True)
+            self.message = label("Your choices are saved across restarts.", 24, 67, 352, 36, 11, secondary=True)
+            self.message.setLineBreakMode_(A.NSLineBreakByWordWrapping)
+            self.message.setMaximumNumberOfLines_(3)
             self.apply = A.NSButton.buttonWithTitle_target_action_("Apply limits", self, "apply:")
-            self.apply.setFrame_(((240, 25), (136, 36)))
+            self.apply.setFrame_(((240, 20), (136, 36)))
             self.apply.setBezelStyle_(A.NSBezelStyleRounded)
             self.apply.setKeyEquivalent_("\r")
             view.addSubview_(self.apply)
             self.stop = A.NSButton.buttonWithTitle_target_action_("Stop contributing", self, "stop:")
-            self.stop.setFrame_(((20, 25), (180, 36)))
+            self.stop.setFrame_(((20, 20), (180, 36)))
             self.stop.setBezelStyle_(A.NSBezelStyleRounded)
             view.addSubview_(self.stop)
             self.slide_(None)
+            self.updateStatus()
+
+        @objc.python_method
+        def updateStatus(self):
+            status = node_status(status_path)
+            self.status_title.setStringValue_(status["title"])
+            self.status_detail.setStringValue_(status["detail"])
+            self.status_detail.setToolTip_(status["detail"])
+            self.activity.setStringValue_(status["activity"])
+            self.item.button().setToolTip_("Common — " + status["title"] + ". " + status["detail"])
 
         def checkConfig_(self, timer):
             if not path.exists():
                 A.NSApplication.sharedApplication().terminate_(None)
+            else:
+                self.updateStatus()
 
         def toggle_(self, sender):
             if self.popover.isShown():
@@ -232,15 +346,22 @@ def run_macos(path):
                     change_service(path, values, stop=stop)
                     message = "Contribution stopped." if stop else "Saved. Your node is reconnecting."
                 except Exception as error:
-                    message = str(error)
+                    message = actionable_error(error)
                 self.performSelectorOnMainThread_withObject_waitUntilDone_("finished:", message, False)
             threading.Thread(target=work, daemon=True).start()
 
         def finished_(self, message):
             self.apply.setEnabled_(True)
             self.stop.setEnabled_(True)
-            self.message.setStringValue_(message.splitlines()[-1][:110])
+            self.message.setStringValue_(message)
             self.message.setToolTip_(message)
+            self.updateStatus()
+            if "could not" in message.lower() or "failed" in message.lower():
+                alert = A.NSAlert.alloc().init()
+                alert.setMessageText_("Common could not update your node")
+                alert.setInformativeText_(message)
+                alert.addButtonWithTitle_("OK")
+                alert.runModal()
 
     app = A.NSApplication.sharedApplication()
     app.setActivationPolicy_(A.NSApplicationActivationPolicyAccessory)
@@ -251,10 +372,12 @@ def run_macos(path):
 
 HTML = r'''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Common · Your contribution</title>
 <style>
-:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#193b31;background:#f2f5ef}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.panel{width:440px;max-width:100%;background:#fffef9;padding:32px;border:1px solid #dde5d8;border-radius:24px;box-shadow:0 18px 70px #24422b12}.brand{font-size:12px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;display:flex;align-items:center;gap:9px}.dot{height:9px;width:9px;background:#4b8c67;border-radius:50%}h1{font-size:30px;letter-spacing:-.04em;margin:20px 0 8px}p{color:#63746b;font-size:13px;line-height:1.5;margin:0 0 24px}.row{margin:27px 0}.line{display:flex;justify-content:space-between;gap:10px;font-size:14px;font-weight:650}output{font-variant-numeric:tabular-nums;color:#477458;font-weight:500}.detail{font-size:11px;color:#728078;margin:7px 0 12px}input{width:100%;accent-color:#397453;cursor:pointer}button{font:inherit;font-size:13px;border:0;border-radius:10px;padding:12px 16px;cursor:pointer}button:disabled{opacity:.5;cursor:wait}.actions{display:flex;justify-content:space-between;gap:12px;border-top:1px solid #e4e9df;padding-top:20px}#apply{background:#285a40;color:white}#stop{background:#edf1e9;color:#4b5d50}#message{font-size:12px;color:#55705d;min-height:35px;white-space:pre-wrap;margin-bottom:16px}.note{font-size:11px;margin-top:25px}
-</style><main class="panel"><div class="brand"><span class="dot"></span>Common</div><h1>Your spare power.<br>Our shared network.</h1><p>Choose how much this computer contributes.</p><div id="sliders"></div><p class="note">Memory is a model-layer budget, not a total RAM cap. Compute share paces served inference; bandwidth paces downloads and peer payloads. Applying restarts your node.</p><div id="message" role="status">Your choices are saved across restarts.</div><div class="actions"><button id="stop">Stop contributing</button><button id="apply">Apply limits</button></div></main>
+:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#193b31;background:#f2f5ef}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.panel{width:440px;max-width:100%;background:#fffef9;padding:32px;border:1px solid #dde5d8;border-radius:24px;box-shadow:0 18px 70px #24422b12}.brand{font-size:12px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;display:flex;align-items:center;gap:9px}.dot{height:9px;width:9px;background:#4b8c67;border-radius:50%}h1{font-size:30px;letter-spacing:-.04em;margin:20px 0 8px}p{color:#63746b;font-size:13px;line-height:1.5;margin:0 0 24px}.row{margin:27px 0}.line{display:flex;justify-content:space-between;gap:10px;font-size:14px;font-weight:650}output{font-variant-numeric:tabular-nums;color:#477458;font-weight:500}.detail{font-size:11px;color:#728078;margin:7px 0 12px}input{width:100%;accent-color:#397453;cursor:pointer}button{font:inherit;font-size:13px;border:0;border-radius:10px;padding:12px 16px;cursor:pointer}button:disabled{opacity:.5;cursor:wait}.actions{display:flex;justify-content:space-between;gap:12px;border-top:1px solid #e4e9df;padding-top:20px}#apply{background:#285a40;color:white}#stop{background:#edf1e9;color:#4b5d50}.status{background:#edf3e9;border:1px solid #dfe8d9;border-radius:12px;padding:15px;margin:22px 0}.status strong{font-size:14px}.status p{font-size:12px;margin:8px 0 0}.status small{display:block;font-size:11px;color:#65766a;margin-top:9px}#message{font-size:12px;color:#55705d;min-height:35px;white-space:pre-wrap;margin-bottom:16px}.note{font-size:11px;margin-top:25px}
+</style><main class="panel"><div class="brand"><span class="dot"></span>Common</div><h1>Your spare power.<br>Our shared network.</h1><p>Choose how much this computer contributes.</p><section class="status" aria-live="polite"><strong id="node-title">Checking your node…</strong><p id="node-detail"></p><small id="node-activity"></small></section><div id="sliders"></div><p class="note">Memory is a model-layer budget, not a total RAM cap. Compute share paces served inference; bandwidth paces downloads and peer payloads. Applying restarts your node.</p><div id="message" role="status">Your choices are saved across restarts.</div><div class="actions"><button id="stop">Stop contributing</button><button id="apply">Apply limits</button></div></main>
 <script>
 const base=location.pathname.replace(/\/$/,''),inputs={};
+async function refreshStatus(){try{const r=await fetch(base+'/status');if(!r.ok)throw Error();const s=await r.json();document.querySelector('#node-title').textContent=s.title;document.querySelector('#node-detail').textContent=s.detail;document.querySelector('#node-activity').textContent=s.activity;}catch(e){document.querySelector('#node-title').textContent='Status unavailable';document.querySelector('#node-detail').textContent='Reopen Common controls to reconnect.';document.querySelector('#node-activity').textContent='';}}
+refreshStatus();setInterval(refreshStatus,2000);
 const definitions=[['stage_gib','Model memory','RAM or GPU memory offered for model layers',0.5],['cpu_threads','CPU threads','Threads available to the model runtime',1],['compute_percent','Compute share','Paces served inference on the CPU or GPU',1],['bandwidth_mbps','Bandwidth','Shared download and peer payload budget',1]];
 const format=(name,value)=>!value?(name==='bandwidth_mbps'?'Unlimited':'Automatic'):value+({stage_gib:' GiB',cpu_threads:' threads',compute_percent:'%',bandwidth_mbps:' Mbps'}[name]);
 fetch(base+'/config').then(r=>r.json()).then(config=>{
@@ -265,7 +388,7 @@ document.querySelector('#apply').onclick=()=>change(false);document.querySelecto
 </script></html>'''
 
 
-def make_server(path):
+def make_server(path, status_path=DEFAULT_STATUS):
     token = secrets.token_urlsafe(32)
     base = "/" + token
     lock = threading.Lock()
@@ -297,6 +420,8 @@ def make_server(path):
                 return self.reply(403, {"error": "Invalid host"})
             if self.path in (base, base + "/"):
                 return self.reply(200, HTML, "text/html; charset=utf-8")
+            if self.path == base + "/status":
+                return self.reply(200, node_status(status_path))
             if self.path == base + "/config":
                 try:
                     config = load_config(path)
@@ -325,7 +450,7 @@ def make_server(path):
                     change_service(path, limits, stop=stop)
                 self.reply(200, {"message": "Contribution stopped." if stop else "Saved. Your node is reconnecting."})
             except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
-                self.reply(400, {"error": str(error)})
+                self.reply(400, {"error": actionable_error(error)})
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True

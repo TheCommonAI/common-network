@@ -10,6 +10,7 @@ ABSOLUTELY NO WARRANTY.
 Usage:
     common                         interactive session (type a question, or a /command)
     common join                    serve a slice of Qwen3.5-35B-A3B (beta default)
+    common join --foreground       optional terminal session; Ctrl+C stops it
     common join --check            can this machine join? checks only, installs nothing
     common join --model bonsai-8b  serve a different layer-network model
     common join --7                join the seven-node Qwen3.5-122B-A10B preset (--1 through --7)
@@ -23,7 +24,7 @@ Usage:
     common update                  check for and install CLI updates
     common help                    this text
 
-`common join` keeps running in its terminal. `common ask` talks to that node's
+`common join` runs in the background by default; use `--foreground` for a terminal session. `common ask` talks to that node's
 local API at http://127.0.0.1:11440/v1, so a machine needs join running before
 it can ask. Greedy asks (`temperature` 0, the default) use Common Flash
 speculative decoding on supported models. The Qwen3.5 beta default uses a
@@ -2797,9 +2798,15 @@ def cmd_join_or_serve(verb: str, gateway: str, args: argparse.Namespace, extra_m
         argv += ["--model", args.model]
     if args.region:
         argv += ["--region", args.region]
-    # Forward any remaining args (e.g. --permanent, --lan) to join.py
-    if args.rest:
-        argv += args.rest
+    # Only the user-facing CLI chooses the background default. Older installed services and
+    # desktop launchers invoke join.py directly, so an update must not make them reinstall themselves.
+    rest = args.rest or []
+    action_flags = {"--foreground", "--permanent", "--check", "--controls", "--remove-permanent", "--help", "-h",
+                    "--legacy", "--lan", "--list-catalogue"}
+    if verb == "join" and not action_flags.intersection(rest):
+        argv += ["--permanent"]
+    # Forward remaining flags intact, including presets and resource choices.
+    argv += rest
 
     _exec(argv)
 

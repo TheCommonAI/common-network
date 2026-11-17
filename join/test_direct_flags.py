@@ -29,7 +29,7 @@ class DirectFlags(unittest.TestCase):
         self.assertNotIn("--no-rtc", argv)
 
     def test_old_service_auto_direct_flag_remains_parseable(self):
-        with mock.patch.object(sys, "argv", ["join.py", "--no-update", "--auto-direct", "--network"]), \
+        with mock.patch.object(sys, "argv", ["join.py", "--no-update", "--foreground", "--auto-direct", "--network"]), \
                 mock.patch.object(join, "run_network_member") as run:
             join.main()
         run.assert_called_once_with(None, ["--api", "11440", "--auto-direct"], debug=False)

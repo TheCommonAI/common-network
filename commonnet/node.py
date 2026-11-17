@@ -513,11 +513,15 @@ class Node:
                           "state": r.get("state"), "age_s": round(max(0.0, age), 1), "me": r["peer"] == self.identity.peer})
         peers.sort(key=lambda p: (not p["me"], p["window"] or [99, 99], p["peer"]))
         download = self.progress.snapshot() if phase in ("downloading", "moving") else None
+        activity = self.metrics.snapshot()
         return {"v": 1, "state": phase, "network": manifest.id, "model": manifest.model.get("name", manifest.id),
                 "peer": self.identity.peer, "window": None if window is None else list(window),
                 "backend": self.hw.backend, "gib": self.hw.gib, "url": url, "download": download,
                 "stages": [list(w) for w in manifest.stages()], "coverage": placement.coverage(manifest, live),
-                "peers": peers, "error": error, "api": api, "pid": os.getpid(), "ts": time.time()}
+                "peers": peers, "error": error, "api": api, "pid": os.getpid(), "ts": time.time(),
+                "activity": {"window_seconds": 300,
+                             "stage_sessions": sum(b.get("stage_count", 0) for b in activity),
+                             "completed_requests": sum(b.get("completed", 0) for b in activity)}}
 
     def write_status(self) -> None:
         if self._status is None:

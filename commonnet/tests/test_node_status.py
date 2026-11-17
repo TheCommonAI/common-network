@@ -26,7 +26,7 @@ from commonnet.tests.test_serve import FakeStream, LetterTokenizer
 
 ROOT = Path(__file__).resolve().parents[2]
 FIELDS = {"v", "state", "network", "model", "peer", "window", "backend", "gib", "url", "download", "stages",
-          "coverage", "peers", "error", "api", "pid", "ts"}
+          "coverage", "peers", "error", "api", "pid", "ts", "activity"}
 PEER_FIELDS = {"peer", "window", "backend", "state", "age_s", "me"}
 
 
@@ -65,6 +65,13 @@ class StatusCase(unittest.TestCase):
 
 
 class Lifecycle(StatusCase):
+    def test_recent_activity_counts_real_stage_sessions(self):
+        n, _, _ = self.make(18980, "activity")
+        self.assertEqual(n.status_snapshot()["activity"]["stage_sessions"], 0)
+        n.metrics.record_stage(12.5)
+        activity = n.status_snapshot()["activity"]
+        self.assertEqual(activity, {"window_seconds": 300, "stage_sessions": 1, "completed_requests": 0})
+
     def test_the_file_goes_starting_loading_up_then_stopped_with_every_contract_field(self):
         n, path, status = self.make(18981, "a")
         n.start()
@@ -75,6 +82,7 @@ class Lifecycle(StatusCase):
         self.assertEqual((doc["window"], doc["peer"], doc["url"], doc["pid"]), ([0, 9], n.identity.peer, n.url, os.getpid()))
         self.assertEqual(doc["stages"], [[0, 9], [9, 18], [18, 27], [27, 36]])
         self.assertEqual(doc["coverage"], [1, 0, 0, 0])
+        self.assertEqual(doc["activity"], {"window_seconds": 300, "stage_sessions": 0, "completed_requests": 0})
         self.assertIsNone(doc["download"])
         self.assertIsNone(doc["error"])
         self.assertIsNone(doc["api"])

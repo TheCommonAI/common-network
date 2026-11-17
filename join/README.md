@@ -15,14 +15,14 @@ common join --model bonsai-8b    # a different layer-network model
 common join --permanent          # keep serving after reboots
 ```
 
-`common join` keeps running in its terminal. From a second terminal:
+`common join` starts a background node. Then run:
 
 ```bash
 common ask "What's a good way to learn recursion?"
 ```
 
 `common ask` talks to this node's local API at `http://127.0.0.1:11440/v1`.
-Ctrl+C leaves cleanly.
+Use `common leave` to stop. For a terminal session, use `common join --foreground`; Ctrl+C then leaves cleanly.
 
 The first run sets up a private Python environment, picks the layers the
 network needs most that fit this machine's memory, and downloads only those
@@ -38,7 +38,8 @@ The installer accepts Python 3.10 or newer and automatically downloads a private
 
 ## Background operation and resource controls
 
-`common join --permanent` installs the node plus desktop resource controls.
+`common join` installs the background node plus desktop resource controls by default.
+`--permanent` remains an explicit alias; `--foreground` opts into a terminal session.
 On macOS, click Common's menu-bar icon for native resource sliders; on Windows
 and Linux, the tray's **Resource controls…** action opens a local control panel.
 `common join --controls` reopens controls. `common leave` removes startup.

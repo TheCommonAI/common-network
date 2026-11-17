@@ -13,7 +13,7 @@ common status
 common help
 ```
 
-`common join` keeps running in its terminal; `common ask` needs that node's
+`common join` runs in the background by default (`--foreground` for a terminal session); `common ask` needs that node's
 local API (`http://127.0.0.1:11440/v1`). Greedy asks (`temperature` 0, the
 default) use Common Flash speculative decoding.
 

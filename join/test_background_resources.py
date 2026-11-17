@@ -49,7 +49,7 @@ class SavedResourceChoices(unittest.TestCase):
         self.assertIn("--no-draft", flags)
 
     def test_memory_alias_reaches_the_node(self):
-        argv = ["join.py", "--no-update", "--network=qwen3-8b", "--memory-gib=3.5"]
+        argv = ["join.py", "--no-update", "--foreground", "--network=qwen3-8b", "--memory-gib=3.5"]
         with mock.patch.object(sys, "argv", argv), \
                 mock.patch.object(join, "run_network_member") as run, \
                 mock.patch.object(join, "print"):
@@ -73,6 +73,90 @@ class SavedResourceChoices(unittest.TestCase):
                 self.assertEqual(error.exception.code, 2)
                 layers.assert_not_called()
                 update.assert_not_called()
+
+
+class DirectLauncherCompatibility(unittest.TestCase):
+    def test_old_direct_launcher_command_stays_foreground_without_reinstalling(self):
+        with mock.patch.object(sys, "argv", ["join.py", "--no-update"]), \
+                mock.patch.object(join, "choose_mode", return_value="network"), \
+                mock.patch.object(join, "install_permanent") as install, \
+                mock.patch.object(join, "run_network_member") as foreground, \
+                mock.patch.object(join, "print"):
+            join.main()
+        foreground.assert_called_once_with(None, ["--api", "11440", "--auto-direct"], debug=False)
+        install.assert_not_called()
+
+    def test_foreground_opts_out_of_service_and_background_controls(self):
+        with mock.patch.object(sys, "argv", ["join.py", "--no-update", "--foreground"]), \
+                mock.patch.object(join, "choose_mode", return_value="network"), \
+                mock.patch.object(join, "install_permanent") as install, \
+                mock.patch.object(join, "run_network_member") as foreground, \
+                mock.patch.object(join, "print"):
+            join.main()
+        foreground.assert_called_once_with(None, ["--api", "11440", "--auto-direct"], debug=False)
+        install.assert_not_called()
+
+    def test_service_command_runs_foreground_without_reinstalling_itself(self):
+        argv = join._service_argv(service_args(no_controls=True))
+        self.assertIn("--foreground", argv)
+        self.assertIn("--no-controls", argv)
+        with mock.patch.object(sys, "argv", argv[1:]), \
+                mock.patch.object(join, "install_permanent") as install, \
+                mock.patch.object(join, "run_network_member") as foreground, \
+                mock.patch.object(join, "print"):
+            join.main()
+        foreground.assert_called_once()
+        install.assert_not_called()
+
+    def test_foreground_and_permanent_are_mutually_exclusive_before_setup(self):
+        with mock.patch.object(sys, "argv", ["join.py", "--foreground", "--permanent"]), \
+                mock.patch.object(join, "_load_layers") as layers, \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                join.main()
+        self.assertEqual(error.exception.code, 2)
+        layers.assert_not_called()
+
+    def test_no_controls_is_kept_by_explicit_background_install(self):
+        with mock.patch.object(sys, "argv", ["join.py", "--no-update", "--permanent", "--no-controls"]), \
+                mock.patch.object(join, "choose_mode", return_value="network"), \
+                mock.patch.object(join, "install_permanent") as install, \
+                mock.patch.object(join, "print"):
+            join.main()
+        self.assertTrue(install.call_args.args[0].no_controls)
+
+    def test_check_only_never_installs_a_service(self):
+        layers = mock.Mock()
+        layers.report.return_value = 0
+        with mock.patch.object(sys, "argv", ["join.py", "--check"]), \
+                mock.patch.object(join, "_load_layers", return_value=layers), \
+                mock.patch.object(join, "install_permanent") as install:
+            with self.assertRaises(SystemExit) as error:
+                join.main()
+        self.assertEqual(error.exception.code, 0)
+        install.assert_not_called()
+
+    def test_remove_only_does_not_install_the_background_default(self):
+        with mock.patch.object(sys, "argv", ["join.py", "--no-update", "--remove-permanent"]), \
+                mock.patch.object(join, "remove_permanent") as remove, \
+                mock.patch.object(join, "install_permanent") as install, \
+                mock.patch.object(join, "print"):
+            join.main()
+        remove.assert_called_once()
+        install.assert_not_called()
+
+    def test_controls_only_opens_companion_without_reinstalling_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "service.json"
+            config.write_text("{}")
+            with mock.patch.object(sys, "argv", ["join.py", "--controls"]), \
+                    mock.patch.object(join, "service_config_path", return_value=config), \
+                    mock.patch.object(join, "_controls_command", return_value=["python", "controls.py"]), \
+                    mock.patch.object(join.subprocess, "Popen") as opened, \
+                    mock.patch.object(join, "install_permanent") as install:
+                join.main()
+        self.assertEqual(opened.call_args.args[0], ["python", "controls.py"])
+        install.assert_not_called()
 
 
 class NativeServiceRecovery(unittest.TestCase):

@@ -9,15 +9,17 @@ ABSOLUTELY NO WARRANTY.
 
 Serves a slice of the shared model's layers on this machine. First run sets
 up a private Python environment, picks the layers the network needs most that
-fit your memory, downloads only those layers, and starts serving. Ctrl+C
-leaves cleanly. `common ask` in another terminal talks to this node's local
-API at http://127.0.0.1:11440/v1.
+fit your memory, downloads only those layers, and starts serving. This internal
+launcher stays in the foreground; the `common join` CLI installs it as a background
+service. Ctrl+C leaves a foreground session cleanly. `common ask` talks to this
+node's local API at http://127.0.0.1:11440/v1.
 
 Usage:
-    python3 join.py                      # serve a slice of the default model
+    python3 join.py                      # serve a slice in this terminal
     python3 join.py --check              # can this machine join? installs nothing
     python3 join.py --model bonsai-8b    # a different layer-network model
-    python3 join.py --permanent          # keep serving after reboots
+    python3 join.py --foreground         # serve only while this terminal stays open
+    python3 join.py --permanent          # install as a background service
     python3 join.py --remove-permanent   # undo the above
 
 Joining is permissionless -- no account. Other peers reach this node through
@@ -1493,7 +1495,7 @@ def _resource_flags(args: argparse.Namespace) -> list[str]:
 def _service_argv(args: argparse.Namespace) -> list[str]:
     if getattr(args, "network", None) is not None:
         # A layer-network service: the spec goes last, as --network=SPEC, so it can never swallow another flag.
-        argv = [sys.executable, os.path.abspath(__file__)]
+        argv = [sys.executable, os.path.abspath(__file__), "--foreground"]
         if getattr(args, "nodes", None) is not None:
             argv += [f"--nodes={args.nodes}"]
         if args.no_update:
@@ -1503,8 +1505,6 @@ def _service_argv(args: argparse.Namespace) -> list[str]:
         argv += _resource_flags(args)
         if getattr(args, "api", None) is not None:
             argv += [f"--api={args.api}"]
-        if getattr(args, "no_api", False):
-            argv += ["--no-api"]
         if getattr(args, "no_controls", False):
             argv += ["--no-controls"]
         if getattr(args, "no_draft", False):
@@ -1925,8 +1925,9 @@ def choose_mode(args: argparse.Namespace, supported=None) -> str:
     return "network" if (supported or layer_network_supported)() else "legacy"
 
 
-LAYER_FIRST_NOTICE = ("`common join` serves a slice of the shared model on this machine. "
-                      "Leave this terminal running, then ask from another with `common ask`.")
+LAYER_FIRST_NOTICE = ("`common join` serves a slice of the shared model in the background. "
+                      "Use the menu-bar/tray controls to set your contribution, and ask with `common ask`. "
+                      "For a terminal session, run `common join --foreground`.")
 
 
 def announce_layer_first(marker: Path | None = None, printer=print) -> bool:
@@ -2022,7 +2023,9 @@ def main() -> None:
     parser.add_argument("--lan", action="store_true", help="Use a LAN worker address instead of a Cloudflare tunnel; still registers with --gateway (production by default).")
     parser.add_argument("--controls", action="store_true", help="Open the background node's menu-bar/tray resource controls")
     parser.add_argument("--no-controls", action="store_true", help="Install the background node without desktop controls (servers)")
-    parser.add_argument("--permanent", action="store_true", help="Install as a background service that starts at login/boot and restarts if it crashes, then exit")
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument("--permanent", action="store_true", help="Install as a background service: starts at login and recovers after crashes (the common join CLI default)")
+    operation.add_argument("--foreground", action="store_true", help="Serve in this terminal instead of installing the background service; Ctrl+C stops the node")
     parser.add_argument("--check", action="store_true", help="Check that this machine can join the layer network (reads only: nothing is installed, downloaded or started), then exit")
     parser.add_argument("--remove-permanent", action="store_true", help="Remove the background service installed by --permanent, then exit")
     args = parser.parse_args()

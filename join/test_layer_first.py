@@ -152,8 +152,11 @@ def dispatch(argv, supported=True):
 
 
 class Dispatch(unittest.TestCase):
-    def test_plain_join_goes_to_the_layer_network_quietly(self):
+    def test_direct_launcher_stays_foreground_for_existing_services(self):
         self.assertEqual(dispatch([]), [["network", None]])
+
+    def test_foreground_keeps_the_layer_network_in_the_terminal(self):
+        self.assertEqual(dispatch(["--foreground"]), [["network", None]])
 
     def test_legacy_flag_goes_to_the_gateway_path(self):
         self.assertEqual(dispatch(["--legacy"]), ["legacy"])
