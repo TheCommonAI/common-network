@@ -142,7 +142,7 @@ class ControlPanelHTTP(unittest.TestCase):
     def test_panel_and_saved_config_are_available_only_on_secret_path(self):
         status, raw = self.request("GET", self.base + "/")
         self.assertEqual(status, 200)
-        self.assertIn(b"Apply limits", raw)
+        self.assertIn(b"Apply changes", raw)
         status, raw = self.request("GET", self.base + "/config")
         self.assertEqual(json.loads(raw)["limits"]["stage_gib"], 4)
         self.assertEqual(self.request("GET", "/")[0], 404)
@@ -166,3 +166,26 @@ class ControlPanelHTTP(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class Presets(unittest.TestCase):
+    def test_hardware_relative_presets_and_maximum_preserve_memory_reserve(self):
+        quiet = controls.preset_limits('quiet', memory=16, threads=8)
+        balanced = controls.preset_limits('balanced', memory=16, threads=8)
+        maximum = controls.preset_limits('maximum', memory=16, threads=8)
+        self.assertEqual(quiet, dict(stage_gib=3, cpu_threads=2, compute_percent=25, bandwidth_mbps=5))
+        self.assertEqual(balanced, dict(stage_gib=5.5, cpu_threads=4, compute_percent=50, bandwidth_mbps=20))
+        self.assertEqual(maximum, dict(stage_gib=None, cpu_threads=8, compute_percent=100, bandwidth_mbps=None))
+        self.assertEqual(controls.preset_limits('automatic'), dict.fromkeys(controls.FLAGS))
+
+    def test_small_devices_keep_positive_budgets_and_matching_custom(self):
+        for name in controls.PRESET_NAMES:
+            limits = controls.preset_limits(name, memory=1, threads=1)
+            controls.validate_limits(limits)
+            self.assertEqual(controls.matching_preset(limits, memory=1, threads=1), name)
+        self.assertEqual(controls.matching_preset({'stage_gib': 7.5}, memory=16, threads=8), 'custom')
+        with self.assertRaises(ValueError):
+            controls.preset_limits('unknown')
+
+    def test_automatic_and_explicit_full_compute_are_not_dirty(self):
+        self.assertTrue(controls.limits_equal({}, {'compute_percent': 100}))
+        self.assertFalse(controls.limits_equal({}, {'compute_percent': 50}))

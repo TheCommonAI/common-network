@@ -62,10 +62,19 @@ common join --controls             # reopen menu-bar / tray controls
 common leave                       # stop and remove automatic startup
 ```
 
-Click the Common icon in the macOS menu bar for native resource sliders. On
+Click the Common icon in the macOS menu bar for a glass contribution panel.
+Choose **Quiet**, **Balanced**, **Maximum**, or **Automatic**, then **Apply changes**.
+Automatic lets the runtime size the contribution; Maximum keeps its memory reserve
+while offering all CPU threads and full inference duty cycle. Quiet and Balanced
+use smaller hardware-relative budgets. Use **Custom** to reveal the labeled sliders.
+Choosing a preset only stages a change: the node restarts when you apply it.
+
+The native macOS panel uses the supplied Common tray artwork and system glass
+where available, with a system-material fallback on older macOS versions.
+ On
 Windows/Linux, choose **Resource controls…** from the tray to open the local
 control panel. Set model memory, CPU threads, compute share and bandwidth,
-then **Apply limits**. This restarts the node and reconnects with the saved
+then **Apply changes**. This restarts the node and reconnects with the saved
 limits. **Stop contributing** removes automatic startup. The panel refreshes
 live node status every two seconds: it distinguishes model loading, stopped or
 unresponsive nodes, and online nodes waiting for enough peers to cover the

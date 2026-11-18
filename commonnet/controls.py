@@ -6,6 +6,7 @@ resource changes therefore survive a crash or login just like CLI-installed limi
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 import json
 import math
 import os
@@ -171,6 +172,7 @@ def node_status(path=DEFAULT_STATUS, *, now=None, pid_alive=pid_is_alive):
     return {"state": "online" if complete else "waiting", "title": "Online" + hosting, "detail": detail, "activity": activity}
 
 
+@lru_cache(maxsize=1)
 def memory_gib():
     try:
         if sys.platform == "darwin":
@@ -200,192 +202,77 @@ SLIDERS = (("stage_gib", "Model memory", "RAM or GPU memory offered for model la
            ("bandwidth_mbps", "Bandwidth", "Shared download and peer payload budget"))
 
 
+PRESET_NAMES = ("quiet", "balanced", "maximum", "automatic")
+PRESET_DETAILS = {"quiet": "A lighter contribution while you work.",
+                  "balanced": "Share spare capacity, with room for your day.",
+                  "maximum": "Use the runtime’s available capacity.",
+                  "automatic": "Let Common size your contribution."}
+
+
+def preset_limits(name, memory=None, threads=None):
+    """Hardware-relative layer budgets; Maximum retains the runtime's memory reserve."""
+    if name not in PRESET_NAMES:
+        raise ValueError("Unknown contribution preset")
+    if name == "automatic":
+        return dict.fromkeys(FLAGS)
+    memory = memory_gib() if memory is None else memory
+    threads = max(1, os.cpu_count() or 1) if threads is None else max(1, threads)
+    if name == "maximum":
+        return dict(stage_gib=None, cpu_threads=threads, compute_percent=100, bandwidth_mbps=None)
+    fraction, compute, bandwidth = (0.20, 25, 5) if name == "quiet" else (0.35, 50, 20)
+    return dict(stage_gib=max(0.5, math.floor(memory * fraction * 2) / 2),
+                cpu_threads=max(1, math.floor(threads * (0.25 if name == "quiet" else 0.5))),
+                compute_percent=compute, bandwidth_mbps=bandwidth)
+
+
+def limits_equal(left, right):
+    def normalized(value):
+        result = {name: value.get(name) for name in FLAGS}
+        # An omitted compute budget already means full duty cycle.
+        result["compute_percent"] = result["compute_percent"] or 100
+        return result
+    return normalized(left) == normalized(right)
+
+
+def matching_preset(limits, memory=None, threads=None):
+    for name in PRESET_NAMES:
+        if limits_equal(limits, preset_limits(name, memory, threads)):
+            return name
+    return "custom"
+
+
 def run_macos(path, status_path=DEFAULT_STATUS):
-    import AppKit as A
-    import objc
-    from Foundation import NSObject, NSTimer
-
-    class Controls(NSObject):
-        def applicationDidFinishLaunching_(self, notification):
-            self.config = load_config(path)
-            self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(2.0, self, "checkConfig:", None, True)
-            self.sliders, self.readouts = {}, {}
-            self.item = A.NSStatusBar.systemStatusBar().statusItemWithLength_(A.NSVariableStatusItemLength)
-            button = self.item.button()
-            image = A.NSImage.imageWithSystemSymbolName_accessibilityDescription_("circle.hexagongrid.fill", "Common resource controls")
-            if image:
-                image.setTemplate_(True)
-                button.setImage_(image)
-            else:
-                button.setTitle_("Common")
-            button.setToolTip_("Common — choose the resources you share")
-            button.setTarget_(self)
-            button.setAction_("toggle:")
-            controller = A.NSViewController.alloc().init()
-            view = A.NSVisualEffectView.alloc().initWithFrame_(((0, 0), (400, 680)))
-            view.setMaterial_(A.NSVisualEffectMaterialPopover)
-            view.setState_(A.NSVisualEffectStateActive)
-            controller.setView_(view)
-            self.popover = A.NSPopover.alloc().init()
-            self.popover.setContentViewController_(controller)
-            self.popover.setBehavior_(A.NSPopoverBehaviorTransient)
-            self.popover.setContentSize_((400, 680))
-
-            def label(text, x, y, width, height, size=13, bold=False, secondary=False):
-                item = A.NSTextField.labelWithString_(text)
-                item.setFrame_(((x, y), (width, height)))
-                item.setFont_((A.NSFont.boldSystemFontOfSize_ if bold else A.NSFont.systemFontOfSize_)(size))
-                if secondary:
-                    item.setTextColor_(A.NSColor.labelColor().colorWithAlphaComponent_(0.72))
-                view.addSubview_(item)
-                return item
-
-            label("Common", 24, 627, 260, 32, 24, True)
-            label("A little spare power. A shared network.", 24, 601, 352, 24, secondary=True)
-            self.status_title = label("Checking your node…", 24, 565, 352, 22, 14, True)
-            self.status_detail = label("", 24, 522, 352, 36, 11, secondary=True)
-            self.status_detail.setLineBreakMode_(A.NSLineBreakByWordWrapping)
-            self.status_detail.setMaximumNumberOfLines_(3)
-            self.activity = label("", 24, 493, 352, 26, 11, secondary=True)
-            self.activity.setLineBreakMode_(A.NSLineBreakByWordWrapping)
-            self.activity.setMaximumNumberOfLines_(2)
-            limits = self.config.get("limits", {})
-            maximums = {"stage_gib": max(memory_gib(), limits.get("stage_gib") or 0),
-                        "cpu_threads": os.cpu_count() or 1, "compute_percent": 100,
-                        "bandwidth_mbps": max(1000, limits.get("bandwidth_mbps") or 0)}
-            for index, (name, title, detail) in enumerate(SLIDERS):
-                y = 447 - index * 80
-                label(title, 24, y, 210, 22, 14, True)
-                readout = label("", 234, y, 142, 22, 13)
-                readout.setAlignment_(A.NSTextAlignmentRight)
-                label(detail, 24, y - 21, 352, 20, 11, secondary=True)
-                slider = A.NSSlider.alloc().initWithFrame_(((24, y - 51), (352, 24)))
-                slider.setMinValue_(1 if name == "compute_percent" else 0)
-                slider.setMaxValue_(maximums[name])
-                slider.setDoubleValue_(limits.get(name) or (100 if name == "compute_percent" else 0))
-                slider.setContinuous_(True)
-                slider.setTarget_(self)
-                slider.setAction_("slide:")
-                view.addSubview_(slider)
-                self.sliders[name], self.readouts[name] = slider, readout
-            label("Memory is a model-layer budget, not a total RAM cap.", 24, 130, 352, 20, 11, secondary=True)
-            label("Applying restarts your node. Other peers may take over.", 24, 110, 352, 20, 11, secondary=True)
-            self.message = label("Your choices are saved across restarts.", 24, 67, 352, 36, 11, secondary=True)
-            self.message.setLineBreakMode_(A.NSLineBreakByWordWrapping)
-            self.message.setMaximumNumberOfLines_(3)
-            self.apply = A.NSButton.buttonWithTitle_target_action_("Apply limits", self, "apply:")
-            self.apply.setFrame_(((240, 20), (136, 36)))
-            self.apply.setBezelStyle_(A.NSBezelStyleRounded)
-            self.apply.setKeyEquivalent_("\r")
-            view.addSubview_(self.apply)
-            self.stop = A.NSButton.buttonWithTitle_target_action_("Stop contributing", self, "stop:")
-            self.stop.setFrame_(((20, 20), (180, 36)))
-            self.stop.setBezelStyle_(A.NSBezelStyleRounded)
-            view.addSubview_(self.stop)
-            self.slide_(None)
-            self.updateStatus()
-
-        @objc.python_method
-        def updateStatus(self):
-            status = node_status(status_path)
-            self.status_title.setStringValue_(status["title"])
-            self.status_detail.setStringValue_(status["detail"])
-            self.status_detail.setToolTip_(status["detail"])
-            self.activity.setStringValue_(status["activity"])
-            self.item.button().setToolTip_("Common — " + status["title"] + ". " + status["detail"])
-
-        def checkConfig_(self, timer):
-            if not path.exists():
-                A.NSApplication.sharedApplication().terminate_(None)
-            else:
-                self.updateStatus()
-
-        def toggle_(self, sender):
-            if self.popover.isShown():
-                self.popover.performClose_(sender)
-            else:
-                try:
-                    self.config = load_config(path)
-                    for name, slider in self.sliders.items():
-                        value = self.config.get("limits", {}).get(name)
-                        slider.setMaxValue_(max(slider.maxValue(), value or 0))
-                        slider.setDoubleValue_(value or (100 if name == "compute_percent" else 0))
-                    self.slide_(None)
-                except (OSError, ValueError):
-                    self.message.setStringValue_("Could not reload your saved limits.")
-                self.popover.showRelativeToRect_ofView_preferredEdge_(self.item.button().bounds(), self.item.button(), A.NSMinYEdge)
-                A.NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-
-        @objc.python_method
-        def values(self):
-            values = {}
-            for name, slider in self.sliders.items():
-                value = slider.doubleValue()
-                value = round(value * 2) / 2 if name == "stage_gib" else round(value)
-                values[name] = value or None
-            return values
-
-        def slide_(self, sender):
-            for name, value in self.values().items():
-                self.readouts[name].setStringValue_(display_value(name, value))
-
-        def apply_(self, sender):
-            self.begin(False)
-
-        def stop_(self, sender):
-            self.begin(True)
-
-        @objc.python_method
-        def begin(self, stop):
-            self.apply.setEnabled_(False)
-            self.stop.setEnabled_(False)
-            self.message.setStringValue_("Stopping…" if stop else "Saving limits and reconnecting…")
-            values = self.values()
-            def work():
-                try:
-                    change_service(path, values, stop=stop)
-                    message = "Contribution stopped." if stop else "Saved. Your node is reconnecting."
-                except Exception as error:
-                    message = actionable_error(error)
-                self.performSelectorOnMainThread_withObject_waitUntilDone_("finished:", message, False)
-            threading.Thread(target=work, daemon=True).start()
-
-        def finished_(self, message):
-            self.apply.setEnabled_(True)
-            self.stop.setEnabled_(True)
-            self.message.setStringValue_(message)
-            self.message.setToolTip_(message)
-            self.updateStatus()
-            if "could not" in message.lower() or "failed" in message.lower():
-                alert = A.NSAlert.alloc().init()
-                alert.setMessageText_("Common could not update your node")
-                alert.setInformativeText_(message)
-                alert.addButtonWithTitle_("OK")
-                alert.runModal()
-
-    app = A.NSApplication.sharedApplication()
-    app.setActivationPolicy_(A.NSApplicationActivationPolicyAccessory)
-    delegate = Controls.alloc().init()
-    app.setDelegate_(delegate)
-    app.run()
+    from commonnet.controls_macos import run_macos as native_controls
+    return native_controls(path, status_path)
 
 
-HTML = r'''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Common · Your contribution</title>
+HTML = r'''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Common · Contribution</title>
 <style>
-:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#193b31;background:#f2f5ef}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.panel{width:440px;max-width:100%;background:#fffef9;padding:32px;border:1px solid #dde5d8;border-radius:24px;box-shadow:0 18px 70px #24422b12}.brand{font-size:12px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;display:flex;align-items:center;gap:9px}.dot{height:9px;width:9px;background:#4b8c67;border-radius:50%}h1{font-size:30px;letter-spacing:-.04em;margin:20px 0 8px}p{color:#63746b;font-size:13px;line-height:1.5;margin:0 0 24px}.row{margin:27px 0}.line{display:flex;justify-content:space-between;gap:10px;font-size:14px;font-weight:650}output{font-variant-numeric:tabular-nums;color:#477458;font-weight:500}.detail{font-size:11px;color:#728078;margin:7px 0 12px}input{width:100%;accent-color:#397453;cursor:pointer}button{font:inherit;font-size:13px;border:0;border-radius:10px;padding:12px 16px;cursor:pointer}button:disabled{opacity:.5;cursor:wait}.actions{display:flex;justify-content:space-between;gap:12px;border-top:1px solid #e4e9df;padding-top:20px}#apply{background:#285a40;color:white}#stop{background:#edf1e9;color:#4b5d50}.status{background:#edf3e9;border:1px solid #dfe8d9;border-radius:12px;padding:15px;margin:22px 0}.status strong{font-size:14px}.status p{font-size:12px;margin:8px 0 0}.status small{display:block;font-size:11px;color:#65766a;margin-top:9px}#message{font-size:12px;color:#55705d;min-height:35px;white-space:pre-wrap;margin-bottom:16px}.note{font-size:11px;margin-top:25px}
-</style><main class="panel"><div class="brand"><span class="dot"></span>Common</div><h1>Your spare power.<br>Our shared network.</h1><p>Choose how much this computer contributes.</p><section class="status" aria-live="polite"><strong id="node-title">Checking your node…</strong><p id="node-detail"></p><small id="node-activity"></small></section><div id="sliders"></div><p class="note">Memory is a model-layer budget, not a total RAM cap. Compute share paces served inference; bandwidth paces downloads and peer payloads. Applying restarts your node.</p><div id="message" role="status">Your choices are saved across restarts.</div><div class="actions"><button id="stop">Stop contributing</button><button id="apply">Apply limits</button></div></main>
+:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#fff;color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:28px;background:radial-gradient(ellipse at 90% 5%,#a49b91 0,transparent 45%),radial-gradient(ellipse at 10% 90%,#57615a 0,transparent 55%),#252320}.panel{width:420px;max-width:100%;padding:25px;background:linear-gradient(140deg,#302a26c9,#282724bd);backdrop-filter:blur(40px) saturate(130%);border:1px solid #ffffff38;border-radius:30px;box-shadow:inset 0 1px #ffffff29,0 18px 70px #0005}header{display:flex;justify-content:space-between;align-items:center}.brand{font-size:24px;letter-spacing:-.04em;font-weight:800;display:flex;align-items:center;gap:9px}.brand svg{width:21px;height:21px}.state{font-size:12px;display:flex;align-items:center;gap:8px}.dot{height:8px;width:8px;background:#9b9b9b;border-radius:50%}.dot.online{background:#4bd467}.dot.waiting,.dot.loading,.dot.downloading,.dot.starting{background:#efbb60}.status{padding:18px 0 17px;border-bottom:1px solid #ffffff19;margin-bottom:18px}.status strong{font-size:13px;font-weight:550}.status p{font-size:12px;line-height:1.5;color:#d7d5d2;margin:7px 0}.status small{font-size:11px;color:#bbb9b6}h1{font-size:15px;font-weight:600;margin:0 0 12px}.presets{display:grid;grid-template-columns:1fr 1fr;gap:9px}button{font:inherit;cursor:pointer;color:inherit}button:focus-visible,input:focus-visible{outline:3px solid #69b4ff;outline-offset:3px}.preset{text-align:left;padding:14px;border-radius:16px;border:1px solid #ffffff24;background:linear-gradient(#ffffff0b,#ffffff04);box-shadow:inset 0 1px #ffffff0b;min-height:85px}.preset[aria-pressed=true]{border-color:#57aaff;background:linear-gradient(135deg,#237cce50,#248ef023);box-shadow:inset 0 0 0 1px #5aafff38}.preset .name{display:flex;align-items:center;justify-content:space-between;font-size:14px;font-weight:650}.check{font-size:12px;color:#70baff;visibility:hidden}.preset[aria-pressed=true] .check{visibility:visible}.preset small{display:block;margin-top:7px;font-size:11px;color:#c4c2bf;line-height:1.4}.preset[aria-pressed=true] small{color:#dcecff}.custom{display:block;margin:16px auto 0;border:0;background:none;color:#bcdcff;padding:8px;font-size:12px}#sliders{margin-top:15px;padding-top:4px;border-top:1px solid #ffffff19}.row{margin:17px 0}.line{display:flex;justify-content:space-between;gap:10px;font-size:13px;font-weight:550}output{font-variant-numeric:tabular-nums;color:#d8eaff;font-size:12px}.detail{font-size:10px;color:#bcb9b6;margin:5px 0 10px}input{width:100%;accent-color:#168eff;cursor:pointer}.note{font-size:10px;color:#bcb9b6;line-height:1.5;margin:15px 0}.actions{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-top:14px}#apply{border:1px solid #86c0ff66;background:linear-gradient(#208fff,#086fd6);border-radius:13px;padding:11px 18px;font-size:12px;font-weight:600;box-shadow:inset 0 1px #ffffff38}#apply:disabled{background:#ffffff12;border-color:#ffffff19;color:#ffffff60;box-shadow:none;cursor:default}#stop{border:0;background:none;color:#dcb9b5;font-size:12px;padding:10px 0}button:disabled{cursor:wait;opacity:.6}#message{font-size:11px;color:#c7c4c0;line-height:1.5;min-height:17px;margin-top:13px}[hidden]{display:none!important}@media(prefers-reduced-transparency:reduce){.panel{background:#302e2b;backdrop-filter:none}}@media(prefers-reduced-motion:no-preference){button{transition:background .15s,border-color .15s}}
+</style>
+<main class="panel"><header><span class="brand"><svg aria-hidden="true" width="21" height="21" viewBox="0 0 21 21" fill="none" xmlns="http://www.w3.org/2000/svg">
+<line x1="9.01989" y1="3.56359" x2="4.17374" y2="17.2944" stroke-width="2" stroke="white"/>
+<circle cx="8.07704" cy="4.03846" r="4.03846" fill="white"/>
+<circle cx="16.9616" cy="11.3077" r="4.03846" fill="white"/>
+<circle cx="4.03846" cy="16.9615" r="4.03846" fill="white"/>
+</svg>
+COMMON.</span><span class="state"><span id="state-label">Checking</span><span class="dot" id="dot"></span></span></header><section class="status" aria-live="polite"><strong id="node-title">Checking your node…</strong><p id="node-detail"></p><small id="node-activity"></small></section><h1>Choose your contribution</h1><div class="presets" role="group" aria-label="Contribution presets"></div><button class="custom" id="custom" aria-expanded="false" aria-controls="sliders">Custom settings ⌄</button><section id="sliders" hidden aria-label="Custom resource limits"></section><p class="note" id="budget-note">Settings apply after your node restarts. Quiet limits may not fit every model.</p><div class="actions"><button id="stop">Leave network</button><button id="apply" disabled>Apply changes</button></div><div id="message" role="status">Your choices are saved across restarts.</div></main>
 <script>
-const base=location.pathname.replace(/\/$/,''),inputs={};
-async function refreshStatus(){try{const r=await fetch(base+'/status');if(!r.ok)throw Error();const s=await r.json();document.querySelector('#node-title').textContent=s.title;document.querySelector('#node-detail').textContent=s.detail;document.querySelector('#node-activity').textContent=s.activity;}catch(e){document.querySelector('#node-title').textContent='Status unavailable';document.querySelector('#node-detail').textContent='Reopen Common controls to reconnect.';document.querySelector('#node-activity').textContent='';}}
+const base=location.pathname.replace(/\/$/,''),inputs={},outputs={};let presets={},saved={},working={},busy=false,loaded=false;
+const clone=v=>JSON.parse(JSON.stringify(v)),normalized=v=>({...v,compute_percent:v.compute_percent??100}),equal=(a,b)=>['stage_gib','cpu_threads','compute_percent','bandwidth_mbps'].every(k=>(normalized(a)[k]??null)===(normalized(b)[k]??null));
+const definitions=[['stage_gib','Model memory','RAM or GPU memory for model layers',.5],['cpu_threads','CPU threads','Threads available to the model runtime',1],['compute_percent','Compute share','Paces served inference on CPU or GPU',1],['bandwidth_mbps','Bandwidth','Shared download and peer payload budget',1]];
+const format=(name,value)=>value==null?(name==='bandwidth_mbps'?'Unlimited':'Automatic'):value+({stage_gib:' GiB',cpu_threads:' threads',compute_percent:'%',bandwidth_mbps:' Mbps'}[name]);
+function redraw(){let selected=Object.keys(presets).find(k=>equal(working,presets[k].limits));document.querySelectorAll('.preset').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.preset===selected)));document.querySelector('#apply').disabled=busy||!loaded||equal(saved,working);document.querySelector('#stop').disabled=busy||!loaded;document.querySelector('#custom').disabled=busy||!loaded;for(const[k,input]of Object.entries(inputs)){input.disabled=busy;input.value=working[k]??(k==='compute_percent'?100:0);outputs[k].textContent=format(k,working[k]);}}
+async function refreshStatus(){try{const r=await fetch(base+'/status');if(!r.ok)throw Error();const s=await r.json();document.querySelector('#node-title').textContent=s.title;document.querySelector('#node-detail').textContent=s.detail;document.querySelector('#node-activity').textContent=s.activity;document.querySelector('#dot').className='dot '+s.state;document.querySelector('#state-label').textContent=({online:'Online',waiting:'Online',stopped:'Offline',stale:'Check node',error:'Attention'})[s.state]??'Joining';}catch(e){document.querySelector('#state-label').textContent='Unavailable';document.querySelector('#dot').className='dot';}}
 refreshStatus();setInterval(refreshStatus,2000);
-const definitions=[['stage_gib','Model memory','RAM or GPU memory offered for model layers',0.5],['cpu_threads','CPU threads','Threads available to the model runtime',1],['compute_percent','Compute share','Paces served inference on the CPU or GPU',1],['bandwidth_mbps','Bandwidth','Shared download and peer payload budget',1]];
-const format=(name,value)=>!value?(name==='bandwidth_mbps'?'Unlimited':'Automatic'):value+({stage_gib:' GiB',cpu_threads:' threads',compute_percent:'%',bandwidth_mbps:' Mbps'}[name]);
-fetch(base+'/config').then(r=>r.json()).then(config=>{
-for(const [name,title,detail,step] of definitions){const row=document.createElement('div');row.className='row';const line=document.createElement('div');line.className='line';const label=document.createElement('label');label.htmlFor=name;label.textContent=title;const output=document.createElement('output');output.htmlFor=name;line.append(label,output);const desc=document.createElement('div');desc.className='detail';desc.textContent=detail;const input=document.createElement('input');input.type='range';input.id=name;input.min=name==='compute_percent'?1:0;input.max=config.maximums[name];input.step=step;input.value=config.limits[name]??(name==='compute_percent'?100:0);input.oninput=()=>output.textContent=format(name,Number(input.value));input.oninput();row.append(line,desc,input);document.querySelector('#sliders').append(row);inputs[name]=input;}
-}).catch(()=>document.querySelector('#message').textContent='Could not load the background service. Run common join --permanent again.');
-async function change(stop){const buttons=document.querySelectorAll('button');buttons.forEach(b=>b.disabled=true);const message=document.querySelector('#message');message.textContent=stop?'Stopping…':'Saving limits and reconnecting…';try{const limits=Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,Number(v.value)||null]));const r=await fetch(base+(stop?'/stop':'/apply'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(limits)});const result=await r.json();if(!r.ok)throw Error(result.error);message.textContent=result.message;}catch(e){message.textContent=e.message;}finally{buttons.forEach(b=>b.disabled=false);}}
+fetch(base+'/config').then(r=>{if(!r.ok)throw Error();return r.json()}).then(config=>{presets=config.presets;saved=clone(config.limits);working=clone(saved);for(const[name,preset]of Object.entries(presets)){const button=document.createElement('button');button.className='preset';button.dataset.preset=name;button.setAttribute('aria-pressed','false');const label=document.createElement('span');label.className='name';label.textContent=name[0].toUpperCase()+name.slice(1);const check=document.createElement('span');check.className='check';check.textContent='✓';check.setAttribute('aria-hidden','true');label.append(check);const detail=document.createElement('small');detail.textContent=preset.detail;button.append(label,detail);button.onclick=()=>{if(busy)return;working=clone(preset.limits);redraw();document.querySelector('#message').textContent='Apply changes to use '+label.firstChild.textContent+'.'};document.querySelector('.presets').append(button);}
+for(const[name,title,detail,step]of definitions){const row=document.createElement('div');row.className='row';const line=document.createElement('div');line.className='line';const label=document.createElement('label');label.htmlFor=name;label.textContent=title;const output=document.createElement('output');output.htmlFor=name;line.append(label,output);const desc=document.createElement('div');desc.className='detail';desc.textContent=detail;const input=document.createElement('input');input.type='range';input.id=name;input.min=name==='compute_percent'?1:0;input.max=config.maximums[name];input.step=step;input.oninput=()=>{working[name]=Number(input.value)||null;redraw();document.querySelector('#message').textContent='Custom limits · apply to restart your node.'};row.append(line,desc,input);document.querySelector('#sliders').append(row);inputs[name]=input;outputs[name]=output;}
+loaded=true;redraw();}).catch(()=>{document.querySelector('#message').textContent='Could not load saved settings. Reopen Common controls.';redraw();});
+document.querySelector('#custom').onclick=()=>{const button=document.querySelector('#custom'),open=button.getAttribute('aria-expanded')!=='true';button.setAttribute('aria-expanded',String(open));document.querySelector('#sliders').hidden=!open;button.textContent=open?'Hide custom settings ⌃':'Custom settings ⌄';document.querySelector('#budget-note').textContent=open?'Memory is a model-layer budget, not a total RAM cap. Compute and bandwidth are cooperative limits. Applying restarts your node.':'Settings apply after your node restarts. Quiet limits may not fit every model.';};
+async function change(stop){if(busy||!loaded)return;if(stop&&!confirm('Leave the network and remove automatic startup?'))return;busy=true;redraw();document.querySelectorAll('.preset').forEach(b=>b.disabled=true);const message=document.querySelector('#message');message.textContent=stop?'Leaving the network…':'Applying changes and reconnecting…';try{const r=await fetch(base+(stop?'/stop':'/apply'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(working)});const result=await r.json();if(!r.ok)throw Error(result.error);if(!stop)saved=clone(working);message.textContent=result.message;}catch(e){message.textContent=e.message;}finally{busy=false;redraw();document.querySelectorAll('.preset').forEach(b=>b.disabled=false);}}
 document.querySelector('#apply').onclick=()=>change(false);document.querySelector('#stop').onclick=()=>change(true);
-</script></html>'''
+</script></html>
+'''
 
 
 def make_server(path, status_path=DEFAULT_STATUS):
@@ -426,7 +313,7 @@ def make_server(path, status_path=DEFAULT_STATUS):
                 try:
                     config = load_config(path)
                     limits = config.get("limits", {})
-                    return self.reply(200, {"limits": limits, "maximums": {
+                    return self.reply(200, {"limits": limits, "presets": {name: {"limits": preset_limits(name), "detail": PRESET_DETAILS[name]} for name in PRESET_NAMES}, "selected": matching_preset(limits), "maximums": {
                         "stage_gib": max(memory_gib(), limits.get("stage_gib") or 0),
                         "cpu_threads": os.cpu_count() or 1, "compute_percent": 100,
                         "bandwidth_mbps": max(1000, limits.get("bandwidth_mbps") or 0)}})
@@ -462,11 +349,8 @@ def run_portable(path):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         import pystray
-        from PIL import Image, ImageDraw
-        image = Image.new("RGBA", (64, 64))
-        draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((4, 4, 60, 60), radius=17, fill="#285a40")
-        draw.arc((17, 17, 47, 47), 45, 315, fill="white", width=7)
+        from PIL import Image
+        image = Image.open(Path(__file__).with_name("assets") / "tray-white.png").convert("RGBA")
         icon = pystray.Icon("Common", image, "Common resource controls", menu=pystray.Menu(
             pystray.MenuItem("Resource controls…", lambda *_: webbrowser.open(url), default=True),
             pystray.MenuItem("Hide icon", lambda *_: icon.stop())))
