@@ -242,8 +242,13 @@ def matching_preset(limits, memory=None, threads=None):
 
 
 def run_macos(path, status_path=DEFAULT_STATUS):
-    from commonnet.controls_macos import run_macos as native_controls
-    return native_controls(path, status_path)
+    import platform
+    version = tuple(int(part) for part in platform.mac_ver()[0].split('.')[:2])
+    if version >= (14, 0):
+        from commonnet.native_tray import run
+        return run(path, status_path)
+    from commonnet.controls_macos import run_macos as legacy_controls
+    return legacy_controls(path, status_path)
 
 
 HTML = r'''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Common · Contribution</title>

@@ -69,8 +69,11 @@ while offering all CPU threads and full inference duty cycle. Quiet and Balanced
 use smaller hardware-relative budgets. Use **Custom** to reveal the labeled sliders.
 Choosing a preset only stages a change: the node restarts when you apply it.
 
-The native macOS panel uses the supplied Common tray artwork and system glass
-where available, with a system-material fallback on older macOS versions.
+The native macOS panel uses a compiled SwiftUI menu-bar app on macOS 14+,
+standard system controls and automatic layout, with macOS 26 glass button styles.
+It keeps the supplied Common tray artwork. Its universal executable is bundled,
+so Xcode and PyObjC are not needed on supported Macs. Older Macs retain the
+legacy AppKit fallback. See [native build notes](commonnet/native/README.md).
  On
 Windows/Linux, choose **Resource controls…** from the tray to open the local
 control panel. Set model memory, CPU threads, compute share and bandwidth,

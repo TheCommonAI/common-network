@@ -1764,12 +1764,15 @@ def _controls_command() -> list[str]:
         raise RuntimeError("layers.py is missing; run the installer again")
     source = layers.ensure_source()
     python = layers.ensure_runtime(layers.platform_kind(), source=source)
-    module = "AppKit" if platform.system() == "Darwin" else "pystray, PIL"
-    check = subprocess.run([str(python), "-c", "import " + module], capture_output=True)
-    if check.returncode:
-        packages = (["pyobjc-framework-Cocoa>=10"] if platform.system() == "Darwin"
-                    else ["pystray>=0.19", "Pillow>=10"])
-        subprocess.run([str(python), "-m", "pip", "install", *packages], check=True)
+    native_mac = (platform.system() == "Darwin" and
+                  tuple(int(part) for part in platform.mac_ver()[0].split('.')[:2] if part) >= (14, 0))
+    if not native_mac:
+        module = "AppKit" if platform.system() == "Darwin" else "pystray, PIL"
+        check = subprocess.run([str(python), "-c", "import " + module], capture_output=True)
+        if check.returncode:
+            packages = (["pyobjc-framework-Cocoa>=10"] if platform.system() == "Darwin"
+                        else ["pystray>=0.19", "Pillow>=10"])
+            subprocess.run([str(python), "-m", "pip", "install", *packages], check=True)
     return [str(python), "-c", layers._source_prefix(source, python)
             + "import runpy; runpy.run_module('commonnet.controls', run_name='__main__', alter_sys=True)",
             "--config", str(service_config_path())]

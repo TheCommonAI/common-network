@@ -254,6 +254,7 @@ class CompanionIntegration(unittest.TestCase):
         layers._source_prefix.return_value = "SOURCE_PREFIX; "
         with mock.patch.object(join, "_load_layers", return_value=layers), \
                 mock.patch.object(join.platform, "system", return_value="Darwin"), \
+                mock.patch.object(join.platform, "mac_ver", return_value=("26.3", (), "")), \
                 mock.patch.object(join, "service_config_path", return_value=Path("/private/service.json")), \
                 mock.patch.object(join.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
             command = join._controls_command()
@@ -262,7 +263,7 @@ class CompanionIntegration(unittest.TestCase):
         self.assertTrue(command[2].startswith("SOURCE_PREFIX; "))
         self.assertIn("commonnet.controls", command[2])
         self.assertEqual(command[-2:], ["--config", "/private/service.json"])
-        self.assertEqual(run.call_args.args[0], ["/private/python", "-c", "import AppKit"])
+        run.assert_not_called()  # modern macOS uses the packaged SwiftUI app, without PyObjC/pip
 
     def test_successful_install_persists_exact_argv_and_limits_before_controls(self):
         with tempfile.TemporaryDirectory() as tmp:

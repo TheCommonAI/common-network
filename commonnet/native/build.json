@@ -1,0 +1,10 @@
+{
+  "source_sha256": "8bc34b06ab4cb7077b64cacb2b43dd0d98bf0b4aad6c018aec6e928d3e45ba81",
+  "binary_sha256": "8b5087136446bb42d7526d8a922cb1b6882eb95c854c1648d0ce595622a4b43e",
+  "sdk": "26.5",
+  "architectures": [
+    "arm64",
+    "x86_64"
+  ],
+  "minimum_macos": "14.0"
+}
