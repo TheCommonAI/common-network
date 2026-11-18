@@ -280,12 +280,20 @@ private struct ResourceSlider: View {
     let maximum: Double
     var step: Double = 1
     var automaticLabel = "Automatic"
+    // A stepped native slider draws a stop for every increment. Bandwidth's
+    // 0...1000 range produced a solid strip of overlapping stops on macOS 26.
+    // Keep the system slider continuous and quantize only the bound setting.
+    private var continuousValue: Binding<Double> {
+        Binding(get: { value }, set: { newValue in
+            value = min(maximum, max(0, (newValue / step).rounded() * step))
+        })
+    }
     private var readout: String { value == 0 ? automaticLabel : "\(value.formatted(.number.precision(.fractionLength(0...1))))\(unit)" }
     var body: some View {
         VStack(spacing: 2) {
             HStack { Text(title); Spacer(); Text(readout).monospacedDigit().foregroundStyle(.secondary) }
                 .font(.caption)
-            Slider(value: $value, in: 0...maximum, step: step) { Text(title) }
+            Slider(value: continuousValue, in: 0...maximum) { Text(title) }
                 .labelsHidden()
                 .accessibilityLabel(title)
                 .accessibilityValue(readout)
