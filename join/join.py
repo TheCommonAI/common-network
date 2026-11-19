@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import importlib
+import inspect
 import importlib.util
 import json
 import os
@@ -1688,6 +1689,19 @@ if os.name == 'nt':
 """
 
 
+def _hidden_windows_console():
+    # Descendants inherit the private, hidden console during setup and serving.
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = subprocess.SW_HIDE
+    return dict(startupinfo=startup, creationflags=subprocess.CREATE_NEW_CONSOLE)
+
+
+def _windows_pythonw(python: str) -> str:
+    import ntpath
+    return ntpath.join(ntpath.dirname(python), "pythonw.exe")
+
+
 def _windows_task_xml(argv: list[str], log_path: Path, user: str) -> bytes:
     ns = "http://schemas.microsoft.com/windows/2004/02/mit/task"
     ET.register_namespace("", ns)
@@ -1717,15 +1731,20 @@ def _windows_task_xml(argv: list[str], log_path: Path, user: str) -> bytes:
     action = add(actions, "Exec")
     # No cmd.exe: paths, model URLs and metacharacters stay literal arguments. The wrapper preserves
     # the node's exit code for Task Scheduler and sends both streams to a persistent log.
-    wrapper = (_WINDOWS_JOB_GUARD + "\nimport subprocess,sys; "
-               f"f=open({str(log_path)!r},'ab',buffering=0); "
-               f"sys.exit(subprocess.call({argv!r},stdout=f,stderr=subprocess.STDOUT))")
-    add(action, "Command", argv[0])
+    wrapper = (
+        _WINDOWS_JOB_GUARD + "\nimport subprocess, sys\n" + inspect.getsource(_hidden_windows_console) + "\n"
+        + f"with open({str(log_path)!r}, 'ab', buffering=0) as log:\n"
+        f"    sys.exit(subprocess.call({argv!r}, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, "
+        "**(_hidden_windows_console() if os.name == 'nt' else {})))\n"
+    )
+    add(action, "Command", _windows_pythonw(argv[0]))
     add(action, "Arguments", subprocess.list2cmdline(["-c", wrapper]))
     return ET.tostring(task, encoding="utf-16", xml_declaration=True)
 
 
 def install_windows_service(argv: list[str], *, name: str = SCHTASKS_NAME) -> None:
+    if os.name == "nt" and not Path(_windows_pythonw(argv[0])).is_file():
+        die("Could not find pythonw.exe beside Python. Install a Windows Python distribution that includes pythonw.exe.")
     log_path = Path.home() / ".common-network" / "join.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     user = subprocess.run(["whoami"], capture_output=True, text=True, check=True).stdout.strip()
@@ -2052,7 +2071,13 @@ def main() -> None:
         if not service_config_path().is_file():
             parser.error("Install a background node with common join --permanent first")
         command = _controls_command()
-        subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=(os.name != "nt"))
+        if os.name == "nt":
+            log_path = Path.home() / ".common-network" / "join.log"
+            with log_path.open("ab") as log:
+                subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
+                                 stderr=subprocess.STDOUT, **_hidden_windows_console())
+        else:
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True)
         return
 
     if args.check:

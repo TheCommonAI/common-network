@@ -209,7 +209,7 @@ class NativeServiceRecovery(unittest.TestCase):
         self.assertEqual(find("t:Principals/t:Principal/t:RunLevel"), "LeastPrivilege")
         self.assertEqual(find("t:Principals/t:Principal/t:LogonType"), "InteractiveToken")
         self.assertEqual(find("t:Triggers/t:LogonTrigger/t:UserId"), r"DOMAIN\Donor & Co")
-        self.assertEqual(find("t:Actions/t:Exec/t:Command"), argv[0])
+        self.assertEqual(find("t:Actions/t:Exec/t:Command"), r"C:\Users\Donor Name\Python\pythonw.exe")
 
     def test_windows_wrapper_preserves_argv_logs_and_nonzero_exit(self):
         argv = [r"C:\path with spaces\python.exe", r"C:\Common\join.py",
