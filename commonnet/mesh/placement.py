@@ -65,6 +65,22 @@ def replica_counts(manifest: Manifest, live) -> dict[tuple[int, int], int]:
     return counts
 
 
+def _hop_counts(boundaries, windows, *, reverse=False):
+    """Shortest route distances from the model start, or to the model end."""
+    order = tuple(reversed(boundaries)) if reverse else boundaries
+    distances = {order[0]: 0}
+    for boundary in order:
+        if boundary not in distances:
+            continue
+        for first, last in windows:
+            source, target = (last, first) if reverse else (first, last)
+            if source == boundary:
+                distance = distances[boundary] + 1
+                if target not in distances or distance < distances[target]:
+                    distances[target] = distance
+    return distances
+
+
 def choose_window(manifest: Manifest, live, gib: float, backend: str, me: str | None = None,
                   cached: dict | None = None) -> tuple[int, int]:
     """The window a joining peer with `gib` of memory should serve.
@@ -101,6 +117,22 @@ def choose_window(manifest: Manifest, live, gib: float, backend: str, me: str | 
                 starts.add(b)
             if b in ends:
                 ends.add(a)
+    # A node with enough memory to merge stages can shorten a fragmented
+    # route. Prefer that over a replica or cached slice while above the target.
+    target_hops = manifest.model.get("target_route_hops")
+    if type(target_hops) is int and target_hops > 0:
+        windows = set(replicas)
+        prefix = _hop_counts(manifest.boundaries, windows)
+        suffix = _hop_counts(manifest.boundaries, windows, reverse=True)
+        current = prefix.get(manifest.num_layers, float("inf"))
+        if current > target_hops:
+            routes = {w: prefix[w[0]] + 1 + suffix[w[1]] for w in candidates
+                      if w[0] in prefix and w[1] in suffix}
+            shortest = min(routes.values(), default=current)
+            if shortest < current:
+                candidates = [w for w in candidates if routes.get(w) == shortest]
+                return min(candidates, key=lambda w: (-cached.get(w, 0), w))
+
     repeatable = []
     if planned and manifest.num_layers in starts:
         repeatable = [w for w in candidates if replicas.get(w, 0)]

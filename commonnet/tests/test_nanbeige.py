@@ -19,6 +19,26 @@ class Nanbeige(unittest.TestCase):
                 self.assertTrue(all(placement.coverage(manifest, peers)))
                 self.assertEqual(len(placement.best_route(manifest, peers)), count)
 
+    def test_compacts_a_fragmented_network_before_adding_replicas(self):
+        manifest, _ = resolve_network("dht", [], {})
+        windows = [(0, 18), (18, 26), (26, 35), (35, 44), (44, 52)]
+        peers = [dict(peer=str(i), backend="mlx", window=window, state="up")
+                 for i, window in enumerate(windows)]
+        for count in (4, 3):
+            window = placement.choose_window(manifest, peers, 7.7, "mlx",
+                                             cached={(18, 26): 1024})
+            peers.append(dict(peer=str(len(peers)), backend="mlx", window=window, state="up"))
+            self.assertEqual(len(placement.best_route(manifest, peers)), count)
+
+    def test_joins_existing_prefix_with_mixed_memory_budgets(self):
+        manifest, _ = resolve_network("dht", [], {})
+        peers = []
+        for i, budget in enumerate((9.92, 6.65, 7.36)):
+            window = placement.choose_window(manifest, peers, budget, "mlx")
+            peers.append(dict(peer=str(i), backend="mlx", window=window, state="up"))
+        self.assertEqual([hop.window for hop in placement.best_route(manifest, peers)],
+                         [(0, 18), (18, 35), (35, 52)])
+
     def test_llama_split_matches_full_logits(self):
         import torch
         from transformers import LlamaConfig, LlamaForCausalLM

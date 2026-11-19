@@ -134,7 +134,7 @@ The default network is Nanbeige4.3-33B. Other available layer-network manifests 
 | `bonsai-2-9b` | Ternary Bonsai 2 9B |
 | `bonsai-2-27b` | Ternary Bonsai 2 27B |
 
-For Nanbeige, two 4-bit MLX peers need about 10.5 GiB each in Common’s offered model budget. Three peers can cover the model with about 7.7 GiB each. These are placement estimates; leave room for runtime memory and the KV cache. On separate machines, join one at a time and wait for each to appear before starting the next.
+For Nanbeige, two 4-bit MLX peers need about 10.5 GiB each in Common’s offered model budget. Three peers can cover the model with about 7.7 GiB each. Common aims for a complete three-peer route and can use four or more when memory is tighter. If the current route needs more than three peers, joining peers prefer a memory-fitting slice that shortens it. These are placement estimates. Leave room for runtime memory and the KV cache. On separate machines, join one at a time and wait for each to appear before starting the next.
 
 Join a named network or a network someone else is hosting:
 

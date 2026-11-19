@@ -11,6 +11,7 @@
     },
     "client_repo": "pratikgx/Nanbeige4.3-33B-MLX-4bit",
     "max_window_layers": 26,
+    "target_route_hops": 3,
     "no_speculation": "No matching drafter configured for Nanbeige"
   },
   "boundaries": [
