@@ -1,0 +1,38 @@
+{
+  "id": "common-nanbeige4-3-33b-v1",
+  "version": 1,
+  "model": {
+    "name": "Nanbeige4.3-33B",
+    "num_layers": 52,
+    "repos": {
+      "mlx": "pratikgx/Nanbeige4.3-33B-MLX-4bit",
+      "nf4": "Nanbeige/Nanbeige4.3-33B",
+      "cpu": "Nanbeige/Nanbeige4.3-33B"
+    },
+    "client_repo": "pratikgx/Nanbeige4.3-33B-MLX-4bit",
+    "max_window_layers": 26,
+    "no_speculation": "No matching drafter configured for Nanbeige"
+  },
+  "boundaries": [
+    0,
+    9,
+    18,
+    26,
+    35,
+    44,
+    52
+  ],
+  "gib_per_layer": {
+    "mlx": 0.35,
+    "nf4": 0.45,
+    "cpu": 2
+  },
+  "fixed_gib": 0.7,
+  "io_gib": {
+    "mlx": 0.7,
+    "nf4": 2.3,
+    "cpu": 2.3
+  },
+  "min_replicas": 1,
+  "seeds": []
+}

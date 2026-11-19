@@ -32,6 +32,8 @@ def load_text_config(checkpoint_dir: str):
         cfg.quantization = raw.get("quantization")
         cfg.hadamard_modules = raw.get("modules")  # the packed projections (path, block); marks a Hadamard pack
         return cfg
+    if mt == "llama":
+        return AutoConfig.from_pretrained(checkpoint_dir)
     if mt.startswith("qwen3_5"):
         cfg = AutoConfig.from_pretrained(checkpoint_dir)
         return getattr(cfg, "text_config", cfg)
@@ -62,7 +64,7 @@ class CheckpointReader:
         self.head_name = next((n for n in ("lm_head.weight", "language_model.lm_head.weight")
                                if n in self.weight_map), self.prefix + "embed_tokens.weight")  # else tied
         model_type = getattr(self.config, "model_type", "")
-        self.arch = "qwen3_5_moe" if model_type.startswith("qwen3_5_moe") else "qwen3_5" if model_type.startswith("qwen3_5") else "qwen3"
+        self.arch = "qwen3_5_moe" if model_type.startswith("qwen3_5_moe") else "qwen3_5" if model_type.startswith("qwen3_5") else model_type if model_type == "llama" else "qwen3"
         # Names actually read by load(), in order. Tests use it to prove that a
         # block never touches tensors outside its layer range.
         self.read_names: list[str] = []

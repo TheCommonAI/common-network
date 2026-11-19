@@ -351,7 +351,7 @@ class CliTests(unittest.TestCase):
         from commonnet import node
         manifest, seeds = node.resolve_network("dht", [], environ={})
         self.assertEqual(seeds, [])
-        self.assertEqual(manifest.id, "common-main-8b-v1")
+        self.assertEqual(manifest.id, "common-nanbeige4-3-33b-v1")
 
 
 if __name__ == "__main__":

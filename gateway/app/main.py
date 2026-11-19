@@ -68,7 +68,7 @@ def health() -> dict:
 
 @app.get("/manifest")
 def manifest() -> dict:
-    return _load("main.json")
+    return _load("nanbeige4.3-33b.json")
 
 
 @app.get("/seeds")

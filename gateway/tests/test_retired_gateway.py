@@ -19,7 +19,7 @@ class Retired(unittest.TestCase):
 
     def test_health_manifest_seeds_and_home(self):
         self.assertEqual(self.client.get("/health").json()["mode"], "retired")
-        self.assertEqual(self.client.get("/manifest").json()["id"], "common-main-8b-v1")
+        self.assertEqual(self.client.get("/manifest").json()["id"], "common-nanbeige4-3-33b-v1")
         self.assertIn("seeds", self.client.get("/seeds").json())
         self.assertIn("common join", self.client.get("/").text)
 

@@ -9,7 +9,7 @@ ABSOLUTELY NO WARRANTY.
 
 Usage:
     common                         interactive session (type a question, or a /command)
-    common join                    serve a slice of Qwen3.5-35B-A3B (beta default)
+    common join                    serve a slice of Nanbeige4.3-33B (default)
     common join --foreground       optional terminal session; Ctrl+C stops it
     common join --check            can this machine join? checks only, installs nothing
     common join --model bonsai-8b  serve a different layer-network model
@@ -27,7 +27,7 @@ Usage:
 `common join` runs in the background by default; use `--foreground` for a terminal session. `common ask` talks to that node's
 local API at http://127.0.0.1:11440/v1, so a machine needs join running before
 it can ask. Greedy asks (`temperature` 0, the default) use Common Flash
-speculative decoding on supported models. The Qwen3.5 beta default uses a
+speculative decoding on supported models. The optional Qwen3.5 network uses a
 matching-family drafter when every peer supports recurrent-state rollback.
 
 This CLI checks GitHub for newer launcher files on every run and updates

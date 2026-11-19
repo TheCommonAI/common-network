@@ -24,6 +24,9 @@ from commonnet.weights import CheckpointReader, build_module
 
 def layer_classes(arch: str):
     """(decoder layer class, rotary class) for an architecture name."""
+    if arch == "llama":
+        from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRotaryEmbedding
+        return LlamaDecoderLayer, LlamaRotaryEmbedding
     if arch.startswith("qwen3_5"):
         import transformers
         if not transformers.__version__.startswith("5.8."):

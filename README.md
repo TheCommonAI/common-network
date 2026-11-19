@@ -41,7 +41,7 @@ common join --check
 common join
 ```
 
-The built-in beta network is **Qwen3.5-35B-A3B**. A peer chooses a layer window that fits its available memory, downloads only the weights for that window, and starts serving it. `common join` starts a background service and returns to your terminal. Then ask the network:
+The built-in network is **Nanbeige4.3-33B**. A peer chooses a layer window that fits its available memory, downloads only the weights for that window, and starts serving it. `common join` starts a background service and returns to your terminal. Then ask the network:
 
 ```bash
 common ask "What's a good way to learn recursion?"
@@ -121,17 +121,20 @@ live under `~/.common-network/logs/`.
 
 ## Models and network selection
 
-The default beta network is Qwen3.5-35B-A3B. Other available layer-network manifests include:
+The default network is Nanbeige4.3-33B. Other available layer-network manifests include:
 
 | Network name | Model |
 |---|---|
-| `qwen3.5-35b-a3b` | Qwen3.5-35B-A3B (beta default) |
+| `nanbeige4.3-33b` | Nanbeige4.3-33B (default) |
+| `qwen3.5-35b-a3b` | Qwen3.5-35B-A3B |
 | `qwen3.5-122b-a10b` | Qwen3.5-122B-A10B |
 | `qwen3-8b` | Qwen3-8B (smaller fallback) |
 | `bonsai-8b` | Ternary Bonsai 8B |
 | `bonsai-27b` | Ternary Bonsai 27B |
 | `bonsai-2-9b` | Ternary Bonsai 2 9B |
 | `bonsai-2-27b` | Ternary Bonsai 2 27B |
+
+For Nanbeige, two 4-bit MLX peers need about 10.5 GiB each in Common’s offered model budget. Three peers can cover the model with about 7.7 GiB each. These are placement estimates; leave room for runtime memory and the KV cache. On separate machines, join one at a time and wait for each to appear before starting the next.
 
 Join a named network or a network someone else is hosting:
 

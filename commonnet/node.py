@@ -51,7 +51,7 @@ NETWORK_ENV = "COMMONNET_NETWORK"
 # The operator fills in always-on peers here once there are any; --seed and the manifest add more.
 DEFAULT_SEEDS: tuple[str, ...] = ()
 # Beta flagship. Keep main.json as the explicit Qwen3-8B fallback network.
-DEFAULT_MANIFEST = Path(__file__).resolve().parent / "networks" / "qwen3.5-35b-a3b.json"
+DEFAULT_MANIFEST = Path(__file__).resolve().parent / "networks" / "nanbeige4.3-33b.json"
 # Short names accepted by common join --network NAME. Keep this explicit so test
 # manifests in the same directory are never exposed as user choices.
 NETWORK_MODELS = {
@@ -60,6 +60,7 @@ NETWORK_MODELS = {
     "bonsai-27b": "bonsai-27b.json",
     "bonsai-2-9b": "bonsai-2-9b.json",
     "bonsai-2-27b": "bonsai-2-27b.json",
+    "nanbeige4.3-33b": "nanbeige4.3-33b.json",
     "qwen3.5-35b-a3b": "qwen3.5-35b-a3b.json",
     "qwen3.5-122b-a10b": "qwen3.5-122b-a10b.json",
 }

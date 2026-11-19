@@ -1896,7 +1896,7 @@ def layer_network_supported() -> bool:
 
 # The layer-network models, by name. Must match NETWORK_MODELS in commonnet/node.py (a test checks it).
 NETWORK_MODEL_NAMES = ("qwen3-8b", "bonsai-8b", "bonsai-27b", "bonsai-2-9b", "bonsai-2-27b",
-                       "qwen3.5-35b-a3b", "qwen3.5-122b-a10b")
+                       "nanbeige4.3-33b", "qwen3.5-35b-a3b", "qwen3.5-122b-a10b")
 
 
 def model_names_a_network(args: argparse.Namespace) -> None:

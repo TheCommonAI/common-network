@@ -108,6 +108,11 @@ class MlxBlockRange(RecurrentRollback):
             lp = next((p for p in ("model.language_model.", "language_model.model.")
                        if any(k.startswith(p) for k in files)), "model.")
             make_block = lambda glob: DecoderLayer(args, glob)
+        elif model_type == "llama":
+            from mlx_lm.models.llama import ModelArgs as LlamaArgs, TransformerBlock as LlamaBlock
+            args = LlamaArgs.from_dict(cfg)
+            lp = "model."
+            make_block = lambda glob: LlamaBlock(args)
         else:
             args = ModelArgs.from_dict(cfg)
             lp = "model."
