@@ -1,6 +1,6 @@
 {
-  "source_sha256": "9f77320525cadb78b107e0835297062cbf157bad12cf19a777921c3e58e041a3",
-  "binary_sha256": "14881e0030ec49a01b7fd3c9004e55c9410a5aab835067c6540825514b95a1ce",
+  "source_sha256": "7fe7f3f8f4cdde466de581945dbd747be15b963744f96ab5e6950d08de01a11b",
+  "binary_sha256": "6230bf1a65743cd0d8f71c9a76c56e506053fbff151838d7f32f3aa38d3fe993",
   "sdk": "26.5",
   "architectures": [
     "arm64",

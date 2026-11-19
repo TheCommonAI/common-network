@@ -2,7 +2,7 @@
 
 ![Common.](assets/common-banner.png)
 
-**v0.4**
+**v0.5 Beta** · [Release notes](RELEASE-v0.5.md)
 
 Common is an open, peer-to-peer network for running a language model across multiple computers. Instead of requiring every machine to hold the whole model, each participating peer downloads and serves a window of consecutive model layers. A request is processed by routing it through peers that collectively cover the model.
 

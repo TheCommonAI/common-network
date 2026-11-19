@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the Common Network CLI tools (macOS / Linux).
-# The Common Network (v0.4).
+# The Common Network (v0.5 Beta).
 #
 #   curl -fsSL https://commonai.com.au/install.sh | sh
 #
@@ -18,7 +18,7 @@ INSTALL_DIR="$HOME/.common-network"
 BIN_DIR="$INSTALL_DIR/bin"
 RAW="https://raw.githubusercontent.com/$REPO/main"
 
-echo "Installing the Common Network (v0.4)..."
+echo "Installing the Common Network (v0.5 Beta)..."
 mkdir -p "$BIN_DIR"
 
 OS="$(uname -s)"
@@ -177,11 +177,11 @@ if [ -n "$SHELL_RC" ] && ! grep -qs "$BIN_DIR" "$SHELL_RC" 2>/dev/null; then
 fi
 
 echo ""
-echo "Done! Open a new terminal, then try:"
+echo "Common v0.5 Beta is installed. Open a new terminal, then run:"
 echo ""
 echo "    common join --check  # can this machine join? checks only"
 if [ "$JOIN_INSTALLED" = "1" ]; then
-  echo "    common join          # serve a slice of the shared model"
+  echo "    common join          # start your background node and tray"
   echo "    common ask \"...\"     # ask the network (needs join running)"
   echo ""
   echo "(The first join sets up a private Python environment and downloads"

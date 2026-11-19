@@ -36,7 +36,7 @@ def install_app(source=None, destination=None):
     info = {'CFBundleIdentifier': BUNDLE_ID, 'CFBundleName': 'Common',
             'CFBundleDisplayName': 'Common', 'CFBundleExecutable': 'CommonTray',
             'CFBundlePackageType': 'APPL', 'CFBundleInfoDictionaryVersion': '6.0',
-            'CFBundleShortVersionString': '0.4.0', 'CFBundleVersion': '1',
+            'CFBundleShortVersionString': '0.5.0', 'CFBundleVersion': '1',
             'CommonBuildSource': manifest['source_sha256'],
             'LSUIElement': True, 'LSMinimumSystemVersion': manifest['minimum_macos'],
             'NSHighResolutionCapable': True}

@@ -308,7 +308,10 @@ private struct TrayView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("COMMON.").font(.system(.title3, design: .default, weight: .bold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("COMMON.").font(.system(.title3, design: .default, weight: .bold))
+                    Text("v0.5 Beta").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                }
                 Spacer()
                 HStack(spacing: 6) { Circle().fill(model.summary.color).frame(width: 7, height: 7); Text(model.summary.badge).font(.caption) }
                 .accessibilityElement(children: .combine)

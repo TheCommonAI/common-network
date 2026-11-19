@@ -100,7 +100,8 @@ def run_macos(path, status_path):
             self.popover.setContentViewController_(controller)
             self.popover.setBehavior_(A.NSPopoverBehaviorTransient)
 
-            self.label("COMMON.", 24, 20, 210, 28, 19, True)
+            self.label("COMMON.", 24, 15, 210, 26, 19, True)
+            self.label("v0.5 Beta", 24, 39, 210, 16, 10, True, secondary=True)
             self.dot = StatusDot.alloc().initWithFrame_(((284, 28), (9, 9)))
             self.view.addSubview_(self.dot)
             self.badge = self.label("Connecting", 298, 22, 75, 20, 11, True)

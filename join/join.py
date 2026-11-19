@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join the Common Network as a peer.
 
-The Common Network (v0.4).
+The Common Network (v0.5 Beta).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -122,7 +122,7 @@ TUNNEL_RATE_LIMITED_PATTERN = re.compile(r"\b1015\b|\b429\b|too many requests", 
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 RELEASE = "The Common Network"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
@@ -2141,6 +2141,7 @@ def main() -> None:
             apply_update_and_restart(remote)
 
     print(paper(BANNER, bold=True))
+    print(f"{RELEASE} · v0.5 Beta")
 
     if args.remove_permanent:
         remove_permanent()
