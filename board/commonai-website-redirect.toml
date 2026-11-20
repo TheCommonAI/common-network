@@ -1,0 +1,8 @@
+# Paste into the commonai-website netlify.toml, ABOVE any catch-all rule.
+# Use this when the board is a separate Netlify site. Replace YOUR-SITE.
+
+[[redirects]]
+  from = "/admin-mes/*"
+  to = "https://YOUR-SITE.netlify.app/admin-mes/:splat"
+  status = 200
+  force = true
