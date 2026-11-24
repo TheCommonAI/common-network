@@ -92,7 +92,7 @@ except ImportError:  # pragma: no cover - Windows
 # This CLI only reads it.
 IDENTITY_PATH = Path.home() / ".common-network" / "identity.json"
 
-VERSION = "0.5.0"
+VERSION = "0.5.0.1"
 RELEASE = "The Common Network"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
@@ -3572,7 +3572,7 @@ def main() -> None:
 
     if args.version:
         print_wordmark()
-        print(dim(f"  {RELEASE} · v0.5 Beta"))
+        print(dim(f"  {RELEASE} · v{VERSION} Beta"))
         print(dim("  Copyright (C) 2026 Common AI Inc — AGPL-3.0, no warranty"))
         return
 

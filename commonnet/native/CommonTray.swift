@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Combine
 import Darwin
+import Carbon
 
 private struct Limits: Codable, Equatable {
     var stageGib: Double?
@@ -151,6 +152,8 @@ private struct NodeSnapshot: Decodable {
     var error: String?
     var activity: Activity?
     var download: Download?
+    var api: API?
+    struct API: Decodable { var port: Int; var ready: Bool? }
     struct Download: Decodable { var bytes: Double?; var total: Double? }
     func summary(now: Double = Date().timeIntervalSince1970) -> NodeSummary {
         var value = NodeSummary()
@@ -304,17 +307,29 @@ private struct ResourceSlider: View {
 @MainActor
 private struct TrayView: View {
     @ObservedObject var model: TrayModel
+    var openChat: (() -> Void)? = nil
+    var shortcutAvailable = false
     private var presetBinding: Binding<Preset?> { Binding(get: { model.selectedPreset }, set: { model.choose($0) }) }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("COMMON.").font(.system(.title3, design: .default, weight: .bold))
-                    Text("v0.5 Beta").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(versionLabel).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 HStack(spacing: 6) { Circle().fill(model.summary.color).frame(width: 7, height: 7); Text(model.summary.badge).font(.caption) }
                 .accessibilityElement(children: .combine)
+            }
+            if let openChat {
+                Button(action: openChat) {
+                    HStack {
+                        Label("Quick Chat", systemImage: "bubble.left")
+                        Spacer()
+                        if shortcutAvailable { Text("⇧ Space").foregroundStyle(.secondary) }
+                    }
+                }
+                .help(shortcutAvailable ? "Open Quick Chat" : "Shift–Space is unavailable. Click to open Quick Chat.")
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text(model.summary.title).font(.subheadline.weight(.medium))
@@ -369,6 +384,12 @@ private struct TrayView: View {
             Button("OK", role: .cancel) { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
     }
+
+    private var versionLabel: String {
+        guard let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+              let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String else { return "v0.5 Beta" }
+        return "v\(version).\(build) Beta"
+    }
     @ViewBuilder private var applyButton: some View {
         if #available(macOS 26.0, *) {
             Button(model.summary.badge == "Offline" ? "Join network" : "Apply changes") { model.change() }
@@ -382,11 +403,471 @@ private struct TrayView: View {
     }
 }
 
+private struct ChatMessage: Codable, Identifiable {
+    var id = UUID()
+    let role: String
+    let content: String
+}
+
+private struct Conversation: Codable, Identifiable {
+    var id = UUID()
+    var messages: [ChatMessage] = []
+    var updatedAt: Date?
+    var title: String { messages.first.map { String($0.content.prefix(45)) } ?? "New conversation" }
+    var preview: String { messages.last(where: { $0.role == "assistant" })?.content ?? "" }
+}
+
 @MainActor
-private final class TrayDelegate: NSObject, NSApplicationDelegate {
+private final class QuickChat: ObservableObject {
+    @Published var conversations: [Conversation]
+    @Published var selection: UUID
+    @Published var draft = ""
+    @Published var busy = false
+    @Published var reply = ""
+    @Published var notice: String?
+    @Published var focusRequest = 0
+    @Published var showsHistory = false
+    @Published var showsConversation = false
+    private let statusPath: URL
+    private let historyPath: URL
+
+    init(statusPath: URL, historyPath: URL) {
+        self.statusPath = statusPath
+        self.historyPath = historyPath
+        let saved = (try? JSONDecoder().decode([Conversation].self, from: Data(contentsOf: historyPath))) ?? []
+        let initial = saved.isEmpty ? [Conversation()] : saved
+        conversations = initial
+        selection = initial[0].id
+    }
+
+    var messages: [ChatMessage] { conversations.first { $0.id == selection }?.messages ?? [] }
+    var panelSize: NSSize {
+        NSSize(width: 500, height: showsHistory ? 382 : showsConversation ? 330 : 88)
+    }
+
+    func openConversation(_ id: UUID) {
+        guard !busy else { return }
+        selection = id
+        showsHistory = false
+        showsConversation = !messages.isEmpty
+        notice = nil
+        focusRequest += 1
+    }
+
+    func newConversation() {
+        guard !busy else { return }
+        if !conversations.contains(where: { $0.messages.isEmpty }) {
+            let conversation = Conversation()
+            conversations.insert(conversation, at: 0)
+        }
+        draft = ""
+        if let empty = conversations.first(where: { $0.messages.isEmpty }) { openConversation(empty.id) }
+    }
+
+    func send() {
+        let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !busy, !prompt.isEmpty, let index = conversations.firstIndex(where: { $0.id == selection }) else { return }
+        showsConversation = true
+        let status = try? JSONDecoder().decode(NodeSnapshot.self, from: Data(contentsOf: statusPath))
+        guard let api = status?.api, api.ready != false, (1...65535).contains(api.port),
+              let url = URL(string: "http://127.0.0.1:\(api.port)/v1/chat/completions") else {
+            notice = "Start the local chat API with common join --network --api."
+            return
+        }
+        var request = URLRequest(url: url, timeoutInterval: 240)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let message = ChatMessage(role: "user", content: prompt)
+        let context = (messages + [message]).map { ["role": $0.role, "content": $0.content] }
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["model": "auto", "messages": context, "stream": true])
+        } catch {
+            notice = error.localizedDescription
+            return
+        }
+        conversations[index].messages.append(message)
+        draft = ""
+        notice = nil
+        reply = ""
+        busy = true
+        Task {
+            defer { busy = false; reply = "" }
+            do {
+                let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                    var lines: [String] = []
+                    for try await line in bytes.lines { lines.append(line) }
+                    let body = Data(lines.joined().utf8)
+                    let detail = (try? JSONDecoder().decode(ChatChunk.self, from: body))?.error?.message
+                    throw TrayError.settings(detail ?? "The local chat API could not answer. Check common status.")
+                }
+                for try await line in bytes.lines where line.hasPrefix("data:") {
+                    let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                    if payload == "[DONE]" {
+                        conversations[index].messages.append(ChatMessage(role: "assistant", content: reply))
+                        conversations[index].updatedAt = Date()
+                        do {
+                            try JSONEncoder().encode(conversations.filter { !$0.messages.isEmpty }).write(to: historyPath, options: .atomic)
+                        } catch {
+                            notice = "Couldn’t save this conversation to disk."
+                        }
+                        return
+                    }
+                    guard let chunk = try? JSONDecoder().decode(ChatChunk.self, from: Data(payload.utf8)) else { continue }
+                    if let error = chunk.error { throw TrayError.settings(error.message) }
+                    reply += chunk.choices?.first?.delta.content ?? ""
+                }
+                throw TrayError.settings("The answer was interrupted. Try sending again.")
+            } catch {
+                conversations[index].messages.removeLast()
+                draft = prompt
+                notice = error.localizedDescription
+            }
+        }
+    }
+
+    private struct ChatChunk: Decodable {
+        struct Choice: Decodable { var delta: Delta }
+        struct Delta: Decodable { var content: String? }
+        struct Failure: Decodable { var message: String }
+        var choices: [Choice]?
+        var error: Failure?
+    }
+}
+
+@MainActor
+private struct QuickChatView: View {
+    @ObservedObject var chat: QuickChat
+    let shortcutAvailable: Bool
+    let close: () -> Void
+    let resize: (NSSize) -> Void
+    @FocusState private var focus: Field?
+    @State private var search = ""
+    @State private var copied: UUID?
+    private enum Field { case message, search }
+    private let panelColor = Color(white: 0.10).opacity(0.94)
+    private let insetColor = Color.white.opacity(0.075)
+    private let accent = Color(red: 0.27, green: 0.32, blue: 0.97)
+
+    var body: some View {
+        Group {
+            if chat.showsHistory { history }
+            else if chat.showsConversation { conversation }
+            else { quick }
+        }
+        .frame(width: chat.panelSize.width, height: chat.panelSize.height, alignment: .top)
+        .preferredColorScheme(.dark)
+        .foregroundStyle(.white)
+        .onAppear { focus = .message }
+        .onChange(of: chat.focusRequest) { _, _ in focus = chat.showsHistory ? .search : .message }
+        .onChange(of: chat.panelSize) { _, size in resize(size) }
+        .onChange(of: chat.showsHistory) { _, visible in
+            if visible { search = "" }
+            focus = visible ? .search : .message
+        }
+        .onExitCommand {
+            if chat.showsHistory { chat.showsHistory = false }
+            else { close() }
+        }
+    }
+
+    private var quick: some View {
+        VStack(spacing: 8) {
+            composer(compact: true)
+                .background(panelColor, in: RoundedRectangle(cornerRadius: 17))
+                .overlay { RoundedRectangle(cornerRadius: 17).strokeBorder(.white.opacity(0.09)) }
+            if shortcutAvailable {
+                Text("Shift + Space to open Common")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.76))
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .background(panelColor, in: Capsule())
+            }
+        }
+    }
+
+    private var conversation: some View {
+        VStack(spacing: 0) {
+            header
+            ScrollViewReader { scroll in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 15) {
+                        ForEach(chat.messages) { message in
+                            if message.role == "user" {
+                                Text(message.content)
+                                    .padding(.horizontal, 12).padding(.vertical, 8)
+                                    .background(accent, in: RoundedRectangle(cornerRadius: 13))
+                                    .frame(maxWidth: .infinity, alignment: .trailing)
+                            } else {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(message.content).textSelection(.enabled)
+                                    HStack {
+                                        icon(copied == message.id ? "checkmark" : "document.on.document", "Copy reply") {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(message.content, forType: .string)
+                                            copied = message.id
+                                        }
+                                        Spacer()
+                                    }
+                                }
+                            }
+                        }
+                        if chat.busy {
+                            Text(chat.reply.isEmpty ? "Thinking…" : chat.reply)
+                                .foregroundStyle(chat.reply.isEmpty ? .secondary : .primary)
+                                .textSelection(.enabled)
+                        }
+                        if let notice = chat.notice {
+                            Text(notice).foregroundStyle(.secondary)
+                        }
+                        Color.clear.frame(height: 1).id("latest")
+                    }
+                    .font(.callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(15)
+                }
+                .onAppear { scroll.scrollTo("latest", anchor: .bottom) }
+                .onChange(of: chat.messages.count) { _, _ in scroll.scrollTo("latest", anchor: .bottom) }
+                .onChange(of: chat.reply) { _, _ in scroll.scrollTo("latest", anchor: .bottom) }
+            }
+            Divider()
+            composer(compact: false)
+                .background(insetColor, in: RoundedRectangle(cornerRadius: 12))
+                .padding(9)
+        }
+        .background(panelColor, in: RoundedRectangle(cornerRadius: 17))
+        .clipShape(RoundedRectangle(cornerRadius: 17))
+        .overlay { RoundedRectangle(cornerRadius: 17).strokeBorder(.white.opacity(0.09)) }
+    }
+
+    private var history: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            VStack(alignment: .leading, spacing: 9) {
+                Text("Your chats").font(.headline)
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Search past chats…", text: $search)
+                        .textFieldStyle(.plain).focused($focus, equals: .search)
+                }
+                .padding(9)
+                .background(insetColor, in: RoundedRectangle(cornerRadius: 9))
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 5) {
+                        if matchingChats.isEmpty {
+                            Text(search.isEmpty ? "No conversations yet." : "No matching conversations.")
+                                .font(.callout).foregroundStyle(.secondary).padding(.vertical, 7)
+                        }
+                        historyGroup("Today", matchingChats.filter { $0.updatedAt.map(Calendar.current.isDateInToday) ?? false })
+                        historyGroup("Earlier", matchingChats.filter { !($0.updatedAt.map(Calendar.current.isDateInToday) ?? false) })
+                    }
+                }
+            }
+            .padding(15)
+        }
+        .background(panelColor, in: RoundedRectangle(cornerRadius: 17))
+        .clipShape(RoundedRectangle(cornerRadius: 17))
+        .overlay { RoundedRectangle(cornerRadius: 17).strokeBorder(.white.opacity(0.09)) }
+    }
+
+    private var matchingChats: [Conversation] {
+        chat.conversations.filter { conversation in
+            !conversation.messages.isEmpty && (search.isEmpty || conversation.messages.contains {
+                $0.content.localizedCaseInsensitiveContains(search)
+            })
+        }.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
+    }
+
+    private func historyGroup(_ title: String, _ conversations: [Conversation]) -> some View {
+        Group {
+            if !conversations.isEmpty {
+                Text(title).font(.caption2).foregroundStyle(.secondary).padding(.top, 4)
+                ForEach(conversations) { item in
+                    Button { chat.openConversation(item.id) } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "bubble.left").foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(item.title).font(.callout).lineLimit(1)
+                                if !item.preview.isEmpty {
+                                    Text(item.preview).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                            if let date = item.updatedAt {
+                                Text(date, format: .dateTime.hour().minute())
+                                    .font(.caption2).foregroundStyle(.secondary).fixedSize()
+                            }
+                            Image(systemName: "chevron.right").font(.caption2)
+                        }
+                        .padding(8)
+                        .contentShape(Rectangle())
+                        .background(item.id == chat.selection ? accent.opacity(0.19) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain).disabled(chat.busy)
+                }
+            }
+        }
+    }
+
+    private var header: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Text("COMMON.").font(.caption.weight(.bold)).tracking(0.6)
+                Spacer()
+                if chat.showsHistory {
+                    Button { chat.newConversation() } label: {
+                        Label("New chat", systemImage: "plus")
+                            .font(.caption)
+                            .padding(.horizontal, 8).padding(.vertical, 5)
+                            .background(insetColor, in: RoundedRectangle(cornerRadius: 6))
+                    }.buttonStyle(.plain).disabled(chat.busy)
+                } else {
+                    icon("square.and.pencil", "New chat") { chat.newConversation() }.disabled(chat.busy)
+                }
+                icon("xmark", chat.showsHistory ? "Close history" : "Close Quick Chat") {
+                    if chat.showsHistory { chat.showsHistory = false }
+                    else { close() }
+                }
+            }
+            .padding(.horizontal, 15).frame(height: 45)
+            Divider()
+        }
+    }
+
+    private func composer(compact: Bool) -> some View {
+        HStack(spacing: 12) {
+            if !compact { historyButton }
+            TextField("Ask me something…", text: $chat.draft)
+                .textFieldStyle(.plain)
+                .font(.callout)
+                .focused($focus, equals: .message)
+                .onSubmit { chat.send() }
+            if compact { historyButton }
+            Button { chat.send() } label: {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.black.opacity(0.8))
+                    .frame(width: 29, height: 29)
+                    .background(.white, in: Circle())
+            }
+            .buttonStyle(.plain).accessibilityLabel("Send message")
+            .disabled(chat.busy || chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(.horizontal, compact ? 17 : 12)
+        .frame(height: compact ? 58 : 42)
+    }
+
+    private var historyButton: some View {
+        icon("clock", "Past chats") { chat.showsHistory = true }
+    }
+
+    private func icon(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white.opacity(0.70))
+                .frame(width: 22, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).accessibilityLabel(label).help(label)
+    }
+}
+
+private final class QuickChatPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override func cancelOperation(_ sender: Any?) { orderOut(sender) }
+}
+
+@MainActor
+private final class TrayDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var item: NSStatusItem?
     var popover: NSPopover?
     var model: TrayModel?
+    private var chat: QuickChat?
+    private var chatPanel: QuickChatPanel?
+    private var hotKey: EventHotKeyRef?
+    private var hotKeyHandler: EventHandlerRef?
+    private var shortcutAvailable = false
+
+    private func registerShortcut() -> Bool {
+        var event = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let handlerStatus = InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
+            guard let event, let context else { return OSStatus(eventNotHandledErr) }
+            var key = EventHotKeyID()
+            guard GetEventParameter(event, OSType(kEventParamDirectObject), OSType(typeEventHotKeyID),
+                                    nil, MemoryLayout<EventHotKeyID>.size, nil, &key) == noErr,
+                  key.signature == 0x434F4D4D, key.id == 1 else { return OSStatus(eventNotHandledErr) }
+            DispatchQueue.main.async {
+                Unmanaged<TrayDelegate>.fromOpaque(context).takeUnretainedValue().toggleChat()
+            }
+            return noErr
+        }, 1, &event, Unmanaged.passUnretained(self).toOpaque(), &hotKeyHandler)
+        guard handlerStatus == noErr else { return false }
+        let status = RegisterEventHotKey(UInt32(kVK_Space), UInt32(shiftKey),
+                                         EventHotKeyID(signature: 0x434F4D4D, id: 1),
+                                         GetApplicationEventTarget(), 0, &hotKey)
+        if status != noErr { NSLog("Common could not register Shift–Space: %d", status) }
+        return status == noErr
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let hotKey { UnregisterEventHotKey(hotKey) }
+        if let hotKeyHandler { RemoveEventHandler(hotKeyHandler) }
+    }
+
+    func windowDidResignKey(_ notification: Notification) { chatPanel?.orderOut(nil) }
+
+    private func toggleChat() {
+        if chatPanel?.isKeyWindow == true { chatPanel?.orderOut(nil) }
+        else { showChat() }
+    }
+
+    private func showChat() {
+        guard let chat else { return }
+        popover?.performClose(nil)
+        chat.showsHistory = false
+        chat.showsConversation = false
+        let panel: QuickChatPanel
+        if let existing = chatPanel {
+            panel = existing
+        } else {
+            panel = QuickChatPanel(contentRect: NSRect(origin: .zero, size: chat.panelSize),
+                                   styleMask: [.borderless, .fullSizeContentView],
+                                   backing: .buffered, defer: false)
+            panel.title = "Common Quick Chat"
+            panel.isFloatingPanel = true
+            panel.level = .floating
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = true
+            panel.delegate = self
+            let hosting = NSHostingController(rootView: QuickChatView(chat: chat, shortcutAvailable: shortcutAvailable,
+                close: { [weak panel] in panel?.orderOut(nil) },
+                resize: { [weak panel] size in
+                    guard let panel else { return }
+                    let frame = panel.frame
+                    panel.setFrame(NSRect(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2,
+                                          width: size.width, height: size.height), display: true)
+                }))
+            hosting.sizingOptions = []
+            panel.contentViewController = hosting
+            chatPanel = panel
+        }
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
+            let frame = screen.visibleFrame
+            panel.setFrame(NSRect(x: frame.midX - chat.panelSize.width / 2,
+                                  y: frame.midY - chat.panelSize.height / 2,
+                                  width: chat.panelSize.width, height: chat.panelSize.height), display: true)
+        } else {
+            panel.center()
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        chat.focusRequest += 1
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
             let options = arguments()
@@ -396,6 +877,9 @@ private final class TrayDelegate: NSObject, NSApplicationDelegate {
             let assets = URL(fileURLWithPath: options["--assets"] ?? home.appendingPathComponent("commonnet-src/commonnet/assets").path)
             let model = try TrayModel(configPath: config, statusPath: status)
             self.model = model
+            self.chat = QuickChat(statusPath: status,
+                                  historyPath: config.deletingLastPathComponent().appendingPathComponent("tray-conversations.json"))
+            shortcutAvailable = registerShortcut()
             let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             self.item = item
             if let button = item.button {
@@ -409,7 +893,8 @@ private final class TrayDelegate: NSObject, NSApplicationDelegate {
             }
             let popover = NSPopover()
             popover.behavior = .transient
-            let hosting = NSHostingController(rootView: TrayView(model: model))
+            let hosting = NSHostingController(rootView: TrayView(model: model, openChat: { [weak self] in self?.showChat() },
+                                                                shortcutAvailable: shortcutAvailable))
             hosting.sizingOptions = [.preferredContentSize]
             popover.contentViewController = hosting
             self.popover = popover
@@ -417,7 +902,9 @@ private final class TrayDelegate: NSObject, NSApplicationDelegate {
                 self?.item?.button?.toolTip = "Common — \(state.title). \(state.detail)"
             }
             model.refresh()
-            if options["--show"] == "1" {
+            if options["--show"] == "chat" {
+                DispatchQueue.main.async { [weak self] in self?.showChat() }
+            } else if options["--show"] == "1" {
                 DispatchQueue.main.async { [weak self] in self?.toggle(nil) }
             }
         } catch {
@@ -468,6 +955,19 @@ private func selfTest() throws {
     defer { try? FileManager.default.removeItem(at: temporary) }
     let configURL = temporary.appendingPathComponent("service.json")
     try Data(#"{"argv":["/usr/bin/false","/tmp/test-only.py","--network"],"limits":{}}"#.utf8).write(to: configURL)
+    let historyURL = temporary.appendingPathComponent("tray-conversations.json")
+    let saved = Conversation(messages: [ChatMessage(role: "user", content: "Hello")])
+    try JSONEncoder().encode([saved]).write(to: historyURL)
+    let chat = QuickChat(statusPath: temporary.appendingPathComponent("status.json"), historyPath: historyURL)
+    guard chat.messages.first?.content == "Hello", chat.panelSize.height == 88 else {
+        throw TrayError.settings("Quick Chat should open compact with its history intact")
+    }
+    chat.showsHistory = true
+    guard chat.panelSize.height == 382 else { throw TrayError.settings("Chat history sizing failed") }
+    chat.openConversation(saved.id)
+    guard chat.panelSize.height == 330 else { throw TrayError.settings("Conversation sizing failed") }
+    chat.newConversation()
+    guard chat.messages.isEmpty, chat.panelSize.height == 88 else { throw TrayError.settings("New chat did not reset the composer") }
     let model = try TrayModel(configPath: configURL, statusPath: temporary.appendingPathComponent("status.json"))
     guard !model.dirty, !model.customExpanded else { throw TrayError.settings("Initial UI state failed") }
     model.choose(.quiet)
@@ -484,6 +984,7 @@ private func selfTest() throws {
         throw TrayError.settings("Native panel exceeds its layout budget: compact \(compact), expanded \(expanded)")
     }
     print("PASS presets, resource validation, service argument preservation, honest coverage status, dirty-state behavior")
+    print("PASS Quick Chat history and compact, conversation, and history sizing")
     print("Native SwiftUI layout: compact \(Int(compact.width))×\(Int(compact.height)), expanded \(Int(expanded.width))×\(Int(expanded.height))")
 }
 

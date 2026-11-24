@@ -11,6 +11,10 @@ need Xcode, Swift, or PyObjC on macOS 14+. The Python companion retains the
 existing single-instance lock while the native child runs. Windows/Linux keep
 the portable controls; older macOS keeps the legacy AppKit fallback.
 
+On macOS 14+, press Shift–Space or choose Quick Chat in the contribution
+popover. The floating window sends requests through the node's local chat API
+and stores its conversation history in `~/.common-network/tray-conversations.json`.
+
 To change the native source, rebuild on a Mac with Xcode's current SDK:
 
 ```sh
