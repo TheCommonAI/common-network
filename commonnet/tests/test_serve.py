@@ -8,7 +8,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 from commonnet.mesh.placement import NoRoute
 from commonnet.net.client import Unreachable
-from commonnet.serve import ApiError, TextStream, _WorkerStream, make_server, parse_request
+from commonnet.mesh.assign import AssignmentError
+from commonnet.mesh.manifest import Manifest
+from commonnet.serve import (
+    ApiError, FallbackUnavailable, LazyBackend, TextStream, _WorkerStream, make_server, parse_request,
+    select_api_network,
+)
 
 
 class LetterTokenizer:
@@ -58,6 +63,46 @@ class FakeBackend:
         return {"peers": 3}
 
 
+def fallback_manifest(network_id, name, gib_per_layer):
+    return Manifest.from_dict({
+        "id": network_id,
+        "model": {"name": name, "num_layers": 2, "repos": {"cpu": "test/model"}},
+        "boundaries": [0, 2],
+        "gib_per_layer": {"cpu": gib_per_layer},
+    })
+
+
+class RouteNetwork:
+    def __init__(self, manifest, covered):
+        self.manifest, self.covered = manifest, covered
+        self.table = type("Table", (), {"live": lambda _: [{"network": manifest.id}]})()
+        self.gateway = None
+
+    def refresh(self, force=False):
+        pass
+
+    def plan(self):
+        if not self.covered:
+            raise AssignmentError("not enough peers for a complete route")
+        return [], None
+
+    def status(self):
+        return {"network": self.manifest.id, "model": self.manifest.model["name"]}
+
+
+class SelectedBackend:
+    def __init__(self, network):
+        self.network = network
+        self.model_name = network.manifest.model["name"]
+        self.tokenizer = LetterTokenizer()
+
+    def stream(self, *args):
+        return FakeStream([1, 2])
+
+    def health(self):
+        return {**self.network.status(), "fallback_from": self.network._fallback_from}
+
+
 class ServeTests(unittest.TestCase):
     def setUp(self):
         self.backend = FakeBackend()
@@ -90,6 +135,44 @@ class ServeTests(unittest.TestCase):
         self.assertEqual(json.loads(payload)["data"][0]["id"], "Tiny")
         self.assertEqual(json.loads(self.request("GET", "/health")[2]), {"peers": 3})
         self.assertEqual(self.request("GET", "/nope")[0], 404)
+
+    def test_api_selection_keeps_a_covered_primary_model(self):
+        primary = RouteNetwork(fallback_manifest("primary", "Full model", 2.0), covered=True)
+
+        selected, used_fallback = select_api_network(primary, type("Hardware", (), {
+            "backend": "cpu", "gib": 2.0, "name": "test CPU"})(), candidates=[])
+
+        self.assertIs(selected, primary)
+        self.assertFalse(used_fallback)
+
+    def test_api_selection_uses_largest_locally_fitting_bonsai_with_coverage(self):
+        hardware = type("Hardware", (), {"backend": "cpu", "gib": 2.0, "name": "test CPU"})()
+        primary = RouteNetwork(fallback_manifest("primary", "Full model", 2.0), covered=False)
+        too_large = RouteNetwork(fallback_manifest("bonsai-27", "Ternary Bonsai 27B", 0.75), covered=False)
+        largest_routable = RouteNetwork(fallback_manifest("bonsai-9", "Ternary Bonsai 9B", 0.4), covered=True)
+        smaller = RouteNetwork(fallback_manifest("bonsai-8", "Ternary Bonsai 8B", 0.25), covered=True)
+
+        selected, used_fallback = select_api_network(
+            primary, hardware, candidates=[too_large, smaller, largest_routable])
+        lazy = LazyBackend(primary)
+        lazy.set(SelectedBackend(selected))
+
+        self.assertIs(selected, largest_routable)
+        self.assertTrue(used_fallback)
+        self.assertEqual(lazy.model_name, "Ternary Bonsai 9B")
+        self.assertEqual(list(lazy.stream([], 2, 0, 1, None)), [1, 2])
+        self.assertEqual(lazy.health()["network"], "bonsai-9")
+        self.assertEqual(lazy.health()["fallback_from"], "primary")
+
+    def test_api_selection_reports_clear_error_when_no_bonsai_route_fits(self):
+        hardware = type("Hardware", (), {"backend": "cpu", "gib": 1.0, "name": "test CPU"})()
+        primary = RouteNetwork(fallback_manifest("primary", "Full model", 2.0), covered=False)
+        too_large = RouteNetwork(fallback_manifest("bonsai-27", "Ternary Bonsai 27B", 1.0), covered=True)
+
+        with self.assertRaises(FallbackUnavailable) as caught:
+            select_api_network(primary, hardware, candidates=[too_large])
+
+        self.assertIn("no Bonsai model/window fits test CPU", str(caught.exception))
 
     def test_plain_completion(self):
         status, ctype, payload = self.request("POST", "/v1/chat/completions", self.chat(max_tokens=10))

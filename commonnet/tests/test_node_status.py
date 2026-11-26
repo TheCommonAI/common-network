@@ -15,14 +15,18 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+from unittest import mock
 
 import torch
 
 from commonnet import node
 from commonnet.mesh.manifest import Manifest
 from commonnet.mesh.records import Identity
+from commonnet.serve import FallbackUnavailable
 from commonnet.tests.test_node import MANIFEST, ONE_STAGE_GIB, wait_for
-from commonnet.tests.test_serve import FakeStream, LetterTokenizer
+from commonnet.tests.test_serve import (
+    FakeStream, LazyBackend, LetterTokenizer, RouteNetwork, SelectedBackend, fallback_manifest,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 FIELDS = {"v", "state", "network", "model", "peer", "window", "backend", "gib", "url", "download", "stages",
@@ -386,6 +390,71 @@ class LocalApi(StatusCase):
         self.assertEqual(t._local_urls, {a.url: a.server.url})
         self.assertEqual(t._replicas["hop1"], [(a.url, "tok"), a.url])
         self.assertEqual(t._replicas["hop0"], [("https://other.example", "t")])
+
+
+class LocalApiFallback(StatusCase):
+    def test_api_backend_loads_client_weights_for_the_selected_manifest(self):
+        candidate = RouteNetwork(fallback_manifest("bonsai-8", "Ternary Bonsai 8B", 0.25), covered=True)
+        candidate._fallback_from = "primary"
+        n, _, _ = self.make(18973, "api-fallback-checkpoint")
+        n.hw = node.Hardware("cpu", 2.0, "test CPU")
+        backend = object()
+
+        with mock.patch.dict(os.environ), \
+                mock.patch("commonnet.hub.Hub") as hub, \
+                mock.patch("commonnet.serve.NetworkBackend", return_value=backend) as network_backend:
+            os.environ.pop("COMMONNET_LOCAL_CHECKPOINT", None)
+            hub.return_value.fetch.return_value = "bonsai-checkpoint"
+            self.assertIs(n._default_api_backend(candidate), backend)
+
+        hub.assert_called_once_with("test/model")
+        hub.return_value.fetch.assert_called_once_with(client=True)
+        args, kwargs = network_backend.call_args
+        self.assertIs(args[0], candidate)
+        self.assertEqual(args[1], "bonsai-checkpoint")
+        self.assertEqual(kwargs["fmt"], "fp16")
+
+    def test_api_loads_and_reports_the_selected_model_and_streams_through_it(self):
+        primary = RouteNetwork(fallback_manifest("primary", "Full model", 2.0), covered=False)
+        candidate = RouteNetwork(fallback_manifest("bonsai-8", "Ternary Bonsai 8B", 0.25), covered=True)
+        candidate._fallback_from = primary.manifest.id
+        n, path, _ = self.make(18977, "api-fallback", api_port=18976)
+        n._api_server = object()
+        n._api = {"port": 18976, "ready": False}
+        lazy = LazyBackend(primary)
+        selected = []
+
+        with mock.patch("commonnet.serve.select_api_network", return_value=(candidate, True)), \
+                mock.patch.object(n, "_default_api_backend",
+                                  side_effect=lambda network: selected.append(network) or SelectedBackend(network)), \
+                mock.patch.object(n, "_init_local_front") as init_front:
+            n._load_api_backend(lazy, primary)
+
+        self.assertEqual(selected, [candidate])
+        init_front.assert_not_called()  # a front loaded for the primary model cannot be used with Bonsai weights
+        self.assertEqual(lazy.model_name, "Ternary Bonsai 8B")
+        self.assertEqual(list(lazy.stream([], 2, 0, 1, None)), [1, 2])
+        self.assertEqual(lazy.health()["network"], "bonsai-8")
+        self.assertEqual(read(path)["api"], {
+            "port": 18976, "ready": True, "model": "Ternary Bonsai 8B",
+            "network": "bonsai-8", "fallback_from": "primary",
+        })
+
+    def test_api_reports_an_explicit_error_when_no_fallback_is_available(self):
+        primary = RouteNetwork(fallback_manifest("primary", "Full model", 2.0), covered=False)
+        n, path, _ = self.make(18975, "api-fallback-error", api_port=18974)
+        n._api_server = object()
+        n._api = {"port": 18974, "ready": False}
+        n._stop.set()
+        lazy = LazyBackend(primary)
+
+        with mock.patch("commonnet.serve.select_api_network",
+                        side_effect=FallbackUnavailable("no Bonsai model/window fits test CPU (1.0 GiB on cpu)")):
+            n._load_api_backend(lazy, primary)
+
+        self.assertIn("no Bonsai model/window fits test CPU", lazy.error)
+        self.assertEqual(read(path)["api"], {"port": 18974, "ready": False})
+        self.assertIn("no Bonsai model/window fits test CPU", read(path)["error"])
 
 
 if __name__ == "__main__":

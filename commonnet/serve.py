@@ -27,6 +27,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from commonnet.fallback import FallbackUnavailable
+
 DEFAULT_PORT = 11440
 MAX_BODY_BYTES = 1 << 20
 DEFAULT_MAX_TOKENS = 256
@@ -34,6 +36,7 @@ HARD_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.7   # a request with no "temperature" is sampled, so it never speculates; `common ask` sends 0
 DEFAULT_DRAFT = "mlx-community/Qwen3-0.6B-4bit"
 TORCH_DRAFT = "Qwen/Qwen3-0.6B"
+_USE_NETWORK_GATEWAY = object()
 
 
 def build_default_drafter(target_tokenizer, repos=None):
@@ -361,8 +364,28 @@ class NetworkBackend:
 
     def health(self) -> dict:
         status = dict(self.network.status())
+        fallback_from = getattr(self.network, "_fallback_from", None)
+        if fallback_from:
+            status["fallback_from"] = fallback_from
         status["speculation"] = self.speculation()
         return status
+
+
+def select_api_network(network, hardware, candidates=None, gateway=_USE_NETWORK_GATEWAY):
+    """Choose one manifest and route together, before loading its tokenizer and client checkpoint."""
+    from commonnet.fallback import available_bonsai_networks, select_network_with_bonsai_fallback
+    from commonnet.netclient import Network
+
+    original_id = network.manifest.id
+    selected, fallback = select_network_with_bonsai_fallback(
+        network,
+        candidates if candidates is not None else lambda: available_bonsai_networks(
+            Network, network.gateway if gateway is _USE_NETWORK_GATEWAY else gateway),
+        hardware,
+    )
+    if fallback:
+        selected._fallback_from = original_id
+    return selected, fallback
 
 
 class LazyBackend:
@@ -412,12 +435,16 @@ class LazyBackend:
         return self._need().stream(prompt_ids, max_tokens, temperature, top_p, seed)
 
     def health(self) -> dict:
-        status = dict(self.network.status())
+        backend = self._backend
+        if backend is not None and hasattr(backend, "health"):
+            status = dict(backend.health())
+        else:
+            status = dict(self.network.status())
         status["ready"] = self.ready
         if self.error:
             status["error"] = self.error
-        if self._backend is not None and hasattr(self._backend, "speculation"):
-            status["speculation"] = self._backend.speculation()
+        if backend is not None and hasattr(backend, "speculation"):
+            status["speculation"] = backend.speculation()
         return status
 
     def close(self) -> None:
@@ -696,4 +723,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
