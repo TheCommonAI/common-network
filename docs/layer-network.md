@@ -213,8 +213,14 @@ no second copy of any weights, and requests for this peer's own layers go to its
 through the tunnel. The port answers straight away; chat requests get `503 loading` (and `/health` says
 `"ready": false`) until the client part of the model — the embedding, final norm and head, **about 1 GB for
 Qwen3-8B on a 16 GB Mac, on top of the layers this peer serves** — has downloaded and loaded in the background.
-`status.json` shows `api: {"port", "ready"}`. If the port is taken or the model part fails to load, the peer keeps
-serving and the status `error` says so. On NVIDIA and CPU peers the client part runs from CPU in fp16; that path is untested.
+If the requested network has no complete live route, the API tries the largest Bonsai network with live route coverage
+and a stage window that fits this machine. It switches the API's client checkpoint, tokenizer and route together; the
+layer peer itself remains on the originally requested network. `/v1/models` and `/health` report the API's selected
+model/network, and `status.json` adds `model`, `network` and `fallback_from` to `api` when a fallback is active.
+`COMMONNET_LOCAL_CHECKPOINT` disables model switching because its checkpoint identity cannot be verified; unset it
+to allow fallback. If no candidate fits and has coverage, the API reports a clear load error rather than serving an
+incompatible route. `status.json` normally shows `api: {"port", "ready"}`. If the port is taken or the model part fails
+to load, the peer keeps serving and the status `error` says so. On NVIDIA and CPU peers the client part runs from CPU in fp16; that path is untested.
 `python -m commonnet.serve` still runs the API alone, without serving layers.
 
 ## See the layer assignment

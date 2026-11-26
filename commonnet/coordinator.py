@@ -10,7 +10,9 @@ or a comma-separated list of URL@START:END (token from COMMONNET_BLOCK_TOKEN).
     python -m commonnet.coordinator --network URL|FILE --plan
 
 --network uses the live layer network: the route, replicas and failover come from the peers it lists.
-The client then holds its embedding and head as mlx4 and exchanges float32 hidden states with the peers.
+If that network has no complete route, the coordinator tries the largest Bonsai network with live coverage
+and a window that fits the local machine. The client then holds its embedding and head as mlx4 and
+exchanges float32 hidden states with the peers.
 Prints the generated text only. It never prints the bearer token or token ids.
 --plan prints the layer assignment the live peers add up to (commonnet.mesh.assign) as JSON and generates nothing.
 """
@@ -22,6 +24,12 @@ import os
 import sys
 
 from commonnet.client import BlockEndpoint, Client
+from commonnet.fallback import (
+    FallbackUnavailable,
+    available_bonsai_networks as _available_bonsai_networks,
+    local_hardware as _local_hardware,
+    select_network_with_bonsai_fallback,
+)
 from commonnet.net import auth
 from commonnet.net.transport import HttpTransport
 
@@ -101,12 +109,25 @@ def print_plan(spec: str) -> int:
     from commonnet.netclient import Network, NetworkUnreachable
     try:
         network = Network.from_spec(spec)
-        network.refresh(force=True)
+        original = network
+        network, fallback = select_network_with_bonsai_fallback(
+            network,
+            lambda: _available_bonsai_networks(Network),
+            _local_hardware,
+            coverage_check=lambda candidate: assign.plan(candidate.manifest, candidate.table.live()),
+        )
         result = assign.plan(network.manifest, network.table.live())
-    except (NetworkUnreachable, assign.AssignmentError) as e:
+    except (NetworkUnreachable, assign.AssignmentError, FallbackUnavailable) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    print(json.dumps(result.to_dict(), indent=2))
+    payload = result.to_dict()
+    if fallback:
+        payload.update({
+            "selected_network": network.manifest.id,
+            "selected_model": network.manifest.model.get("name", network.manifest.id),
+            "fallback_from": original.manifest.id,
+        })
+    print(json.dumps(payload, indent=2))
     return 0
 
 
@@ -115,7 +136,8 @@ def main(argv=None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--endpoints", help="a members.json file, or URL@START:END,... (a fixed route)")
     p.add_argument("--network", metavar="URL|FILE",
-                   help="use the live layer network instead of a fixed route: a peer URL, or a manifest file that lists seeds")
+                   help="use the live layer network instead of a fixed route: a peer URL, or a manifest file that lists seeds; "
+                        "if it has no complete route, try the largest locally fitting Bonsai network")
     p.add_argument("--checkpoint", help="local checkpoint directory")
     p.add_argument("--repo", help="Hugging Face repo id; downloads only embed, final norm and lm_head")
     p.add_argument("--revision", default="main")
@@ -148,6 +170,14 @@ def main(argv=None) -> int:
             from commonnet.netclient import Network
             network = Network.from_spec(args.network)
             if not args.checkpoint and not args.repo:
+                original = network
+                network, fallback = select_network_with_bonsai_fallback(
+                    network, lambda: _available_bonsai_networks(Network), _local_hardware)
+                if fallback:
+                    print(f"using {network.manifest.model.get('name', network.manifest.id)} "
+                          f"({network.manifest.id}) because {original.manifest.id} lacks peer coverage",
+                          file=sys.stderr)
+            if not args.checkpoint and not args.repo:
                 args.repo = network.manifest.client_repo
         if not args.checkpoint:
             if not args.repo:
@@ -169,7 +199,7 @@ def main(argv=None) -> int:
                            hidden_dtype=getattr(torch, args.hidden_dtype))
     except RuntimeError as e:
         kind = type(e).__name__
-        if kind in ("NetworkUnreachable", "NoLayersServed"):
+        if kind in ("NetworkUnreachable", "NoLayersServed", "FallbackUnavailable"):
             print(f"error: {e}", file=sys.stderr)
             return 1
         if kind != "HubError":

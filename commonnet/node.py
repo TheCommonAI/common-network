@@ -1042,7 +1042,12 @@ class Node:
     def _default_api_backend(self, network):
         import torch
         from commonnet.serve import NetworkBackend
+
+        manifest = network.manifest
         checkpoint = os.environ.get("COMMONNET_LOCAL_CHECKPOINT")
+        if checkpoint and getattr(network, "_fallback_from", None):
+            raise RuntimeError("COMMONNET_LOCAL_CHECKPOINT prevents a safe model switch to the Bonsai fallback; "
+                               "unset it to let the API load the selected model's tokenizer and client weights")
         if self.hw.backend == "mlx":
             fmt = "mlx4"  # the manifest's client_repo is the 4-bit MLX one
         else:
@@ -1050,7 +1055,7 @@ class Node:
             # packed 512 wide, not 4096). Other peers take the embedding, norm and head from their own checkpoint
             # repo, in fp16 on the CPU.
             fmt = "fp16"
-            repo = self.manifest.repo(self.hw.backend)
+            repo = manifest.repo(self.hw.backend)
             if checkpoint is None and repo:
                 from commonnet import hub
                 checkpoint = hub.Hub(repo).fetch(client=True)
@@ -1163,12 +1168,29 @@ class Node:
 
     def _load_api_backend(self, lazy, network) -> None:
         """Load the chat API's model part; on failure keep retrying in the background (downloads resume)."""
-        self._init_local_front(network)
         attempt = 0
+        selected_network = None
+        front_initialized = False
         while True:
             attempt += 1
             try:
-                backend = (self._api_backend or self._default_api_backend)(network)
+                fallback = False
+                if selected_network is None:
+                    if self._api_backend is None:
+                        from commonnet.serve import select_api_network
+                        selected_network, fallback = select_api_network(network, self.hw, gateway=self.gateway)
+                    else:
+                        selected_network = network
+                    if fallback:
+                        self.log(f"chat API using {selected_network.manifest.model.get('name', selected_network.manifest.id)} "
+                                 f"({selected_network.manifest.id}); {network.manifest.id} has no complete peer route")
+                    else:
+                        self._init_local_front(selected_network)
+                        front_initialized = True
+                elif not front_initialized and self._api_backend is not None:
+                    self._init_local_front(selected_network)
+                    front_initialized = True
+                backend = (self._api_backend or self._default_api_backend)(selected_network)
             except (Exception, SystemExit) as e:  # NetworkBackend exits (not raises) when the manifest names no client repo
                 lazy.fail(friendly(f"the chat API could not load its model part ({type(e).__name__}: {e})"))
                 self._api_error = lazy.error
@@ -1192,6 +1214,11 @@ class Node:
                 self._api_error = None
                 if self._api is not None:
                     self._api["ready"] = True
+                    fallback_from = getattr(getattr(backend, "network", None), "_fallback_from", None)
+                    if fallback_from:
+                        self._api["model"] = getattr(backend, "model_name", None)
+                        self._api["network"] = backend.network.manifest.id
+                        self._api["fallback_from"] = fallback_from
             self.log("chat API ready")
             break
         self.write_status()
