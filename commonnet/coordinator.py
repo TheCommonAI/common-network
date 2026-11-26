@@ -10,7 +10,9 @@ or a comma-separated list of URL@START:END (token from COMMONNET_BLOCK_TOKEN).
     python -m commonnet.coordinator --network URL|FILE --plan
 
 --network uses the live layer network: the route, replicas and failover come from the peers it lists.
-The client then holds its embedding and head as mlx4 and exchanges float32 hidden states with the peers.
+If that network has no complete route, the coordinator tries the largest Bonsai network with live coverage
+and a window that fits the local machine. The client then holds its embedding and head as mlx4 and
+exchanges float32 hidden states with the peers.
 Prints the generated text only. It never prints the bearer token or token ids.
 --plan prints the layer assignment the live peers add up to (commonnet.mesh.assign) as JSON and generates nothing.
 """
@@ -19,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 from commonnet.client import BlockEndpoint, Client
@@ -101,13 +104,114 @@ def print_plan(spec: str) -> int:
     from commonnet.netclient import Network, NetworkUnreachable
     try:
         network = Network.from_spec(spec)
-        network.refresh(force=True)
+        original = network
+        network, fallback = select_network_with_bonsai_fallback(
+            network,
+            lambda: _available_bonsai_networks(Network),
+            _local_hardware,
+            coverage_check=lambda candidate: assign.plan(candidate.manifest, candidate.table.live()),
+        )
         result = assign.plan(network.manifest, network.table.live())
-    except (NetworkUnreachable, assign.AssignmentError) as e:
+    except (NetworkUnreachable, assign.AssignmentError, FallbackUnavailable) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    print(json.dumps(result.to_dict(), indent=2))
+    payload = result.to_dict()
+    if fallback:
+        payload.update({
+            "selected_network": network.manifest.id,
+            "selected_model": network.manifest.model.get("name", network.manifest.id),
+            "fallback_from": original.manifest.id,
+        })
+    print(json.dumps(payload, indent=2))
     return 0
+
+
+class FallbackUnavailable(RuntimeError):
+    """No locally fitting Bonsai network has enough live peers to serve a route."""
+
+
+def _local_hardware():
+    from commonnet.node import detect_hardware
+    return detect_hardware()
+
+
+def _bonsai_parameter_count(manifest) -> float:
+    """Read the nominal parameter count from the catalogue model name (for example, 'Bonsai 2 9B')."""
+    name = str(manifest.model.get("name", ""))
+    counts = re.findall(r"(?<![\d.])(\d+(?:\.\d+)?)\s*B\b", name, flags=re.IGNORECASE)
+    return float(counts[-1]) if counts else 0.0
+
+
+def _available_bonsai_networks(network_type):
+    """Load each catalogue Bonsai network and learn peers from its own model-id namespace."""
+    from pathlib import Path
+    from commonnet.mesh import directory
+    from commonnet.node import NETWORK_MODELS
+    from commonnet.netclient import NetworkUnreachable
+
+    networks_dir = Path(__file__).resolve().parent / "networks"
+    gateway = directory.gateway_url(default=directory.DEFAULT_GATEWAY)
+    candidates = []
+    for name, filename in NETWORK_MODELS.items():
+        if not name.startswith("bonsai-"):
+            continue
+        candidate = network_type.from_spec(str(networks_dir / filename), gateway=gateway)
+        try:
+            candidate.refresh(force=True)
+        except NetworkUnreachable:
+            continue
+        candidates.append(candidate)
+    return candidates
+
+
+def select_network_with_bonsai_fallback(primary, candidates, hardware, coverage_check=None):
+    """Keep a covered network; otherwise choose the largest locally fitting, covered Bonsai network."""
+    from commonnet.mesh.assign import AssignmentError
+    from commonnet.netclient import NetworkUnreachable, NoLayersServed
+
+    check = coverage_check or (lambda network: network.plan())
+    try:
+        primary.refresh(force=True)
+    except NetworkUnreachable:
+        pass
+    try:
+        check(primary)
+        return primary, False
+    except (AssignmentError, NetworkUnreachable, NoLayersServed) as primary_error:
+        from commonnet.node import NodeError
+        try:
+            hardware = hardware() if callable(hardware) else hardware
+        except NodeError as e:
+            raise FallbackUnavailable(f"{primary_error}; cannot detect local capacity for a Bonsai fallback ({e})") from None
+        candidates = candidates() if callable(candidates) else candidates
+        fitting = []
+        for candidate in candidates:
+            manifest = candidate.manifest
+            if manifest.id == primary.manifest.id:
+                continue
+            if not str(manifest.model.get("name", "")).lower().startswith("ternary bonsai"):
+                continue
+            if not manifest.repo(hardware.backend) or not manifest.windows_fitting(hardware.gib, hardware.backend):
+                continue
+            live = candidate.table.live()
+            if any(record.get("network") != manifest.id for record in live):
+                continue
+            fitting.append(candidate)
+
+        fitting.sort(key=lambda candidate: (-_bonsai_parameter_count(candidate.manifest), candidate.manifest.id))
+        for candidate in fitting:
+            try:
+                check(candidate)
+                return candidate, True
+            except (AssignmentError, NetworkUnreachable, NoLayersServed):
+                continue
+
+        if not fitting:
+            reason = (f"no Bonsai model/window fits {hardware.name} "
+                      f"({hardware.gib:.1f} GiB on {hardware.backend})")
+        else:
+            reason = "no locally fitting Bonsai network has enough live peers to cover its model"
+        raise FallbackUnavailable(f"{primary_error}; {reason}") from None
 
 
 def main(argv=None) -> int:
@@ -115,7 +219,8 @@ def main(argv=None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--endpoints", help="a members.json file, or URL@START:END,... (a fixed route)")
     p.add_argument("--network", metavar="URL|FILE",
-                   help="use the live layer network instead of a fixed route: a peer URL, or a manifest file that lists seeds")
+                   help="use the live layer network instead of a fixed route: a peer URL, or a manifest file that lists seeds; "
+                        "if it has no complete route, try the largest locally fitting Bonsai network")
     p.add_argument("--checkpoint", help="local checkpoint directory")
     p.add_argument("--repo", help="Hugging Face repo id; downloads only embed, final norm and lm_head")
     p.add_argument("--revision", default="main")
@@ -148,6 +253,14 @@ def main(argv=None) -> int:
             from commonnet.netclient import Network
             network = Network.from_spec(args.network)
             if not args.checkpoint and not args.repo:
+                original = network
+                network, fallback = select_network_with_bonsai_fallback(
+                    network, lambda: _available_bonsai_networks(Network), _local_hardware)
+                if fallback:
+                    print(f"using {network.manifest.model.get('name', network.manifest.id)} "
+                          f"({network.manifest.id}) because {original.manifest.id} lacks peer coverage",
+                          file=sys.stderr)
+            if not args.checkpoint and not args.repo:
                 args.repo = network.manifest.client_repo
         if not args.checkpoint:
             if not args.repo:
@@ -169,7 +282,7 @@ def main(argv=None) -> int:
                            hidden_dtype=getattr(torch, args.hidden_dtype))
     except RuntimeError as e:
         kind = type(e).__name__
-        if kind in ("NetworkUnreachable", "NoLayersServed"):
+        if kind in ("NetworkUnreachable", "NoLayersServed", "FallbackUnavailable"):
             print(f"error: {e}", file=sys.stderr)
             return 1
         if kind != "HubError":
