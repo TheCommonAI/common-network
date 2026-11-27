@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the Common Network CLI tools (macOS / Linux).
-# The Common Network (v0.5 Beta).
+# The Common Network (v0.5.1 Beta).
 #
 #   curl -fsSL https://commonai.com.au/install.sh | sh
 #
@@ -18,7 +18,7 @@ INSTALL_DIR="$HOME/.common-network"
 BIN_DIR="$INSTALL_DIR/bin"
 RAW="https://raw.githubusercontent.com/$REPO/main"
 
-echo "Installing the Common Network (v0.5 Beta)..."
+echo "Installing the Common Network (v0.5.1 Beta)..."
 mkdir -p "$BIN_DIR"
 
 OS="$(uname -s)"
@@ -177,7 +177,7 @@ if [ -n "$SHELL_RC" ] && ! grep -qs "$BIN_DIR" "$SHELL_RC" 2>/dev/null; then
 fi
 
 echo ""
-echo "Common v0.5 Beta is installed. Open a new terminal, then run:"
+echo "Common v0.5.1 Beta is installed. Open a new terminal, then run:"
 echo ""
 echo "    common join --check  # can this machine join? checks only"
 if [ "$JOIN_INSTALLED" = "1" ]; then

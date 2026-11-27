@@ -1,5 +1,5 @@
 # Install the Common Network CLI tools (Windows).
-# The Common Network (v0.5 Beta).
+# The Common Network (v0.5.1 Beta).
 #
 #   irm https://commonai.com.au/install.ps1 | iex
 #
@@ -23,7 +23,7 @@ $InstallDir = "$env:USERPROFILE\.common-network"
 $BinDir = "$InstallDir\bin"
 $Raw = "https://raw.githubusercontent.com/$Repo/main"
 
-Write-Host "Installing the Common Network (v0.5 Beta)..."
+Write-Host "Installing the Common Network (v0.5.1 Beta)..."
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
 # --- python ---
@@ -147,7 +147,7 @@ if ($userPath -notlike "*$BinDir*") {
 }
 
 Write-Host ""
-Write-Host "Common v0.5 Beta is installed. Open a new terminal, then run:"
+Write-Host "Common v0.5.1 Beta is installed. Open a new terminal, then run:"
 Write-Host ""
 Write-Host "    common join --check  # can this machine join? checks only"
 if ($joinInstalled) {

@@ -9,4 +9,6 @@ chains the blocks for every token.
 from commonnet.block import BlockRange
 from commonnet.client import BlockEndpoint, Client, LocalTransport, Transport
 
+__version__ = "0.5.1"
+
 __all__ = ["BlockRange", "BlockEndpoint", "Client", "LocalTransport", "Transport"]

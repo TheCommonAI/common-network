@@ -1,4 +1,4 @@
-# Security notes — Common Network v0.5 Beta
+# Security notes — Common Network v0.5.1 Beta
 
 Common is **permissionless by design**: anyone can join as a peer, and anyone
 with a running node can ask the network. That is the thesis — but it means the

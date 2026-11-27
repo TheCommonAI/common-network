@@ -25,7 +25,11 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, closing
+from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from commonnet import web_search
 
 DEFAULT_PORT = 11440
 MAX_BODY_BYTES = 1 << 20
@@ -132,7 +136,11 @@ def parse_request(body: dict) -> dict:
     max_tokens = number("max_tokens", None, 1, HARD_MAX_TOKENS, int)
     if max_tokens is None:
         max_tokens = number("max_completion_tokens", DEFAULT_MAX_TOKENS, 1, HARD_MAX_TOKENS, int)
+    search_enabled = body.get("web_search", True)
+    if not isinstance(search_enabled, bool):
+        raise ApiError(400, "web_search must be a boolean")
     return {"messages": clean, "max_tokens": max_tokens,
+            "web_search": search_enabled,
             "temperature": number("temperature", DEFAULT_TEMPERATURE, 0.0, 2.0),
             "top_p": number("top_p", 1.0, 0.0001, 1.0), "seed": number("seed", None, 0, 2 ** 63 - 1, int),
             "stream": bool(body.get("stream", False)),
@@ -536,66 +544,155 @@ def make_handler(backend, *, max_context: int = DEFAULT_MAX_CONTEXT, metrics=Non
                 if not isinstance(body, dict):
                     raise ApiError(400, "body must be a JSON object")
                 req = parse_request(body)
-                try:
-                    prompt_ids = backend.encode_chat(req["messages"], req["template_kwargs"])
-                except ApiError:
-                    raise
-                except Exception as e:
-                    raise ApiError(400, f"cannot build a prompt from these messages: {e}") from None
-                if len(prompt_ids) + req["max_tokens"] > max_context:
-                    raise ApiError(400, f"prompt ({len(prompt_ids)} tokens) plus max_tokens ({req['max_tokens']}) is over "
-                                        f"this server's context limit of {max_context}", code="context_length_exceeded")
-                stream = backend.stream(prompt_ids, req["max_tokens"], req["temperature"], req["top_p"], req["seed"])
-                if metrics is not None:
-                    from commonnet.metrics import MeasuredStream
-                    tracking = getattr(stream, "speculative_stats", None)
-                    stream = MeasuredStream(stream, metrics, started,
-                                            speculative_stats=(lambda: tracking.get("stats")) if tracking is not None else None)
             except Exception as e:
                 err = _classify(e)
                 self._json(err.status, err.body())
                 return
+            with ExitStack() as cleanup:
+                self._complete(body, req, started, cleanup)
+
+        def _encode(self, messages, template_kwargs):
+            try:
+                return backend.encode_chat(messages, template_kwargs)
+            except ApiError:
+                raise
+            except Exception as e:
+                raise ApiError(400, f"cannot build a prompt from these messages: {e}") from None
+
+        def _complete(self, body, req, started, cleanup):
+            messages, template_kwargs = req["messages"], req["template_kwargs"]
+            max_tokens = req["max_tokens"]
+            allow_search = (
+                req["web_search"] and backend.model_name == "Nanbeige4.3-33B"
+                and os.environ.get("COMMONNET_WEB_SEARCH", "1").strip().lower() not in ("0", "false", "off", "no")
+                and template_kwargs.get("enable_thinking") is False
+                and not {"tools", "chat_template"}.intersection(template_kwargs)
+            )
+
+            def generate(prompt_ids):
+                return cleanup.enter_context(closing(backend.stream(
+                    prompt_ids, max_tokens, req["temperature"], req["top_p"], req["seed"])))
+
+            try:
+                if allow_search:
+                    prompt_ids = self._encode(web_search.with_instructions(messages, web_search.SEARCH_INSTRUCTIONS),
+                                              {**template_kwargs, "tools": [web_search.TOOL], "tool_call_format": "xml"})
+                    allow_search = len(prompt_ids) + max_tokens <= max_context
+                if not allow_search:
+                    prompt_ids = self._encode(messages, template_kwargs)
+                if len(prompt_ids) + max_tokens > max_context:
+                    raise ApiError(400, f"prompt ({len(prompt_ids)} tokens) plus max_tokens ({max_tokens}) is over "
+                                        f"this server's context limit of {max_context}", code="context_length_exceeded")
+                raw = stream = generate(prompt_ids)
+                usage = {"prompt_tokens": len(prompt_ids), "completion_tokens": 0}
+                if allow_search:
+                    initial = raw
+                    if req["stream"]:
+                        # Surface route failures before SSE headers, without waiting for a lookup to finish.
+                        try:
+                            first = next(raw, _END)
+                        except Exception:
+                            if metrics is not None:
+                                metrics.record(outcome="failed", count=0, first=None, last=None,
+                                               started=started, ended=time.monotonic())
+                            raise
+                        initial = () if first is _END else itertools.chain((first,), raw)
+                    stream = self._search_reply(raw, initial, generate, req, usage)
+                if metrics is not None:
+                    from commonnet.metrics import MeasuredStream
+                    tracking = getattr(raw, "speculative_stats", None)
+                    stream = cleanup.enter_context(closing(MeasuredStream(
+                        stream, metrics, started,
+                        speculative_stats=(lambda: tracking.get("stats")) if tracking is not None else None)))
+                elif allow_search:
+                    cleanup.enter_context(closing(stream))
+                tokens = stream
+                if req["stream"] and not allow_search:
+                    first = next(stream, _END)
+                    tokens = () if first is _END else itertools.chain((first,), stream)
+            except Exception as e:
+                err = _classify(e)
+                self._json(err.status, err.body())
+                return
+
             model = body.get("model") if isinstance(body.get("model"), str) else backend.model_name
             try:
                 if req["stream"]:
-                    # Read the first token before headers, so initial route failures are real HTTP errors.
-                    try:
-                        first = next(stream, _END)
-                    except Exception as e:
-                        err = _classify(e)
-                        self._json(err.status, err.body())
-                        return
-                    self._stream_reply(stream, first, prompt_ids, req, model)
+                    self._stream_reply(tokens, req, model)
                 else:
-                    self._plain_reply(stream, prompt_ids, req, model)
-            finally:
-                stream.close()
+                    self._plain_reply(tokens, usage, req, model)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the caller went away: ExitStack closes any active generation
+
+        def _search_reply(self, raw, tokens, generate, req, usage):
+            decoder = TextStream(backend.tokenizer)
+            prefix = ""
+            for token in tokens:
+                prefix += decoder.push(token)
+                candidate = prefix.lstrip()
+                if candidate.startswith(web_search.OPEN_CALL):
+                    if web_search.CLOSE_CALL in candidate or len(decoder.ids) >= web_search.MAX_CALL_TOKENS:
+                        break
+                elif not web_search.OPEN_CALL.startswith(candidate) or len(decoder.ids) >= web_search.MAX_CALL_TOKENS:
+                    yield from decoder.ids
+                    yield from tokens
+                    return
+            else:
+                candidate = (prefix + decoder.flush()).lstrip()
+                if not candidate.startswith(web_search.OPEN_CALL):
+                    yield from decoder.ids
+                    return
+
+            raw.close()
+            usage["completion_tokens"] += len(decoder.ids)
+            end = candidate.find(web_search.CLOSE_CALL)
+            query = web_search.parse_call(candidate[:end + len(web_search.CLOSE_CALL)]) if end >= 0 else None
+            messages = req["messages"]
+            instructions = web_search.ANSWER_INSTRUCTIONS
+            if query is None:
+                instructions += " The web search request could not be read."
+            else:
+                try:
+                    results = web_search.search(query)
+                    error = None if results else "No web search results were returned."
+                except (OSError, HTTPException):
+                    results, error = [], "The web search provider was unavailable."
+                messages = [*messages, {"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": "web_search", "arguments": {"query": query}}}]},
+                    web_search.result_message(results, error)]
+            prompt_ids = self._encode(web_search.with_instructions(messages, instructions), req["template_kwargs"])
+            if len(prompt_ids) + req["max_tokens"] > max_context:
+                instructions += " Search results did not fit in this request."
+                prompt_ids = self._encode(web_search.with_instructions(req["messages"], instructions), req["template_kwargs"])
+                if len(prompt_ids) + req["max_tokens"] > max_context:
+                    prompt_ids = self._encode(req["messages"], req["template_kwargs"])
+            usage["prompt_tokens"] += len(prompt_ids)
+            yield from generate(prompt_ids)
 
         def _finish(self, count: int, req: dict, stopped: bool) -> str:
             return "length" if (count >= req["max_tokens"] and not stopped) else "stop"
 
-        def _plain_reply(self, stream, prompt_ids, req, model):
+        def _plain_reply(self, tokens, usage, req, model):
             text = TextStream(backend.tokenizer)
             pieces, count = [], 0
             try:
-                for token_id in stream:
+                for token_id in tokens:
                     count += 1
                     pieces.append(text.push(token_id))
                 pieces.append(text.flush())
             except Exception as e:
-                stream.close()
                 err = _classify(e)
                 self._json(err.status, err.body())
                 return
+            usage["completion_tokens"] += count
             self._json(200, {
                 "id": "chatcmpl-" + uuid.uuid4().hex[:24], "object": "chat.completion", "created": int(time.time()),
                 "model": model,
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(pieces)},
                              "finish_reason": self._finish(count, req, False)}],
-                "usage": {"prompt_tokens": len(prompt_ids), "completion_tokens": count,
-                          "total_tokens": len(prompt_ids) + count}})
+                "usage": {**usage, "total_tokens": sum(usage.values())}})
 
-        def _stream_reply(self, stream, first, prompt_ids, req, model):
+        def _stream_reply(self, tokens, req, model):
             ident, created = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time())
 
             def chunk(delta, finish=None):
@@ -616,7 +713,7 @@ def make_handler(backend, *, max_context: int = DEFAULT_MAX_CONTEXT, metrics=Non
             text, count = TextStream(backend.tokenizer), 0
             try:
                 send(chunk({"role": "assistant", "content": ""}))
-                for token_id in ([] if first is _END else itertools.chain([first], stream)):
+                for token_id in tokens:
                     count += 1
                     piece = text.push(token_id)
                     if piece:
@@ -626,10 +723,8 @@ def make_handler(backend, *, max_context: int = DEFAULT_MAX_CONTEXT, metrics=Non
                     send(chunk({"content": tail}))
                 send(chunk({}, self._finish(count, req, False)))
             except (BrokenPipeError, ConnectionResetError):
-                stream.close()  # the caller went away: stop spending the network's time
                 return
             except Exception as e:
-                stream.close()
                 try:
                     send(_classify(e).body())
                 except OSError:

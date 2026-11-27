@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import threading
 
+from commonnet import __version__
 from commonnet.controls import (SLIDERS, actionable_error, change_service, display_value,
                                 limits_equal, load_config, matching_preset, memory_gib,
                                 node_status, preset_limits)
@@ -101,7 +102,7 @@ def run_macos(path, status_path):
             self.popover.setBehavior_(A.NSPopoverBehaviorTransient)
 
             self.label("COMMON.", 24, 15, 210, 26, 19, True)
-            self.label("v0.5 Beta", 24, 39, 210, 16, 10, True, secondary=True)
+            self.label(f"v{__version__} Beta", 24, 39, 210, 16, 10, True, secondary=True)
             self.dot = StatusDot.alloc().initWithFrame_(((284, 28), (9, 9)))
             self.view.addSubview_(self.dot)
             self.badge = self.label("Connecting", 298, 22, 75, 20, 11, True)

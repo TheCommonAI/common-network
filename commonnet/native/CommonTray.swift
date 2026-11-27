@@ -386,9 +386,8 @@ private struct TrayView: View {
     }
 
     private var versionLabel: String {
-        guard let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-              let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String else { return "v0.5 Beta" }
-        return "v\(version).\(build) Beta"
+        guard let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String else { return "Beta" }
+        return "v\(version) Beta"
     }
     @ViewBuilder private var applyButton: some View {
         if #available(macOS 26.0, *) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Chat with the Common Network from your terminal.
 
-The Common Network (v0.5 Beta).
+The Common Network (v0.5.1 Beta).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -31,7 +31,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 RELEASE = "The Common Network"
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 REPO = "TheCommonAI/common-network"
@@ -490,7 +490,7 @@ def one_shot(gateway: str, question: str, region: str | None, target_node: str |
 
 def interactive(gateway: str, region: str | None, target_node: str | None, legacy: bool = False) -> None:
     print(paper(BANNER, bold=True))
-    print(f"{RELEASE} · v0.5 Beta")
+    print(f"{RELEASE} · v{VERSION} Beta")
     print(dim(f"common network chat — talking to {gateway}" if (legacy or use_gateway()) else "common network chat — talking to your peer's layer network (127.0.0.1)"))
     if target_node:
         print(dim(f"talking to a specific node: {target_node}"))
@@ -541,6 +541,7 @@ def main() -> None:
     sys.stdout.reconfigure(line_buffering=True)
     _enable_windows_ansi()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--version", action="version", version=f"{RELEASE} · v{VERSION} Beta")
     parser.add_argument("question", nargs="*", help="Ask a one-shot question (omit for interactive chat)")
     parser.add_argument("--gateway", default=os.environ.get("COMMON_GATEWAY_URL", DEFAULT_GATEWAY), help="Gateway base URL (default: the shared Common Network gateway)")
     parser.add_argument("--region", default=None, help="Optional region hint for routing, e.g. au-adelaide")

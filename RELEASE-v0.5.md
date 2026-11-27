@@ -1,4 +1,10 @@
-# Common Network v0.5 Beta
+# Common Network v0.5.1 Beta
+
+Nanbeige can now request a web search when a question needs current information or sources. The local chat service queries DuckDuckGo and gives the model up to four result snippets to cite.
+
+Update with `common update`, then run `common join` again to refresh the background service.
+
+## v0.5 Beta launch
 
 **The alpha is over. Common Network v0.5 is officially in beta.**
 

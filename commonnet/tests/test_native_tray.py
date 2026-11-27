@@ -37,6 +37,7 @@ class NativeBundle(unittest.TestCase):
             self.assertTrue(os.access(executable, os.X_OK))
             info = plistlib.loads((root / 'Common.app/Contents/Info.plist').read_bytes())
             self.assertEqual(info['CFBundleIdentifier'], 'network.common.tray')
+            self.assertEqual(info['CFBundleShortVersionString'], '0.5.1')
             self.assertTrue(info['LSUIElement'])
             self.assertTrue((root / 'Common.app/Contents/Resources/tray-template.svg').is_file())
 

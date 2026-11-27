@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Join the Common Network as a peer.
 
-The Common Network (v0.5 Beta).
+The Common Network (v0.5.1 Beta).
 
 Copyright (C) 2026 Common AI Inc. Licensed under AGPL-3.0; see LICENSE at
 https://github.com/TheCommonAI/common-network. This program comes with
@@ -122,7 +122,7 @@ TUNNEL_RATE_LIMITED_PATTERN = re.compile(r"\b1015\b|\b429\b|too many requests", 
 # join (or run) a different network entirely.
 DEFAULT_GATEWAY = "https://gateway-production-b820.up.railway.app"
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 RELEASE = "The Common Network"
 REPO = "TheCommonAI/common-network"
 UPDATE_URL = f"https://raw.githubusercontent.com/{REPO}/main/join/join.py"
@@ -1992,6 +1992,7 @@ def main() -> None:
     sys.stdout.reconfigure(line_buffering=True)
     _enable_windows_ansi()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--version", action="version", version=f"{RELEASE} · v{VERSION} Beta")
     counts = parser.add_mutually_exclusive_group()
     counts.add_argument("--nodes", type=int, choices=range(1, 8), metavar="1-7",
                         help="planned nodes: 1-2 Qwen3-8B, 3-6 Qwen3.5-35B-A3B, 7 Qwen3.5-122B-A10B")
@@ -2141,7 +2142,7 @@ def main() -> None:
             apply_update_and_restart(remote)
 
     print(paper(BANNER, bold=True))
-    print(f"{RELEASE} · v0.5 Beta")
+    print(f"{RELEASE} · v{VERSION} Beta")
 
     if args.remove_permanent:
         remove_permanent()

@@ -10,6 +10,9 @@ import shutil
 import subprocess
 
 
+from commonnet import __version__
+
+
 BUNDLE_ID = 'network.common.tray'
 
 
@@ -36,7 +39,7 @@ def install_app(source=None, destination=None):
     info = {'CFBundleIdentifier': BUNDLE_ID, 'CFBundleName': 'Common',
             'CFBundleDisplayName': 'Common', 'CFBundleExecutable': 'CommonTray',
             'CFBundlePackageType': 'APPL', 'CFBundleInfoDictionaryVersion': '6.0',
-            'CFBundleShortVersionString': '0.5.0', 'CFBundleVersion': '1',
+            'CFBundleShortVersionString': __version__, 'CFBundleVersion': '2',
             'CommonBuildSource': manifest['source_sha256'],
             'LSUIElement': True, 'LSMinimumSystemVersion': manifest['minimum_macos'],
             'NSHighResolutionCapable': True}

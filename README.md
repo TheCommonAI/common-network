@@ -2,7 +2,7 @@
 
 ![Common.](assets/common-banner.png)
 
-**v0.5 Beta** · [Release notes](RELEASE-v0.5.md)
+**v0.5.1 Beta** · [Release notes](RELEASE-v0.5.md)
 
 Common is an open, peer-to-peer network for running a language model across multiple computers. Instead of requiring every machine to hold the whole model, each participating peer downloads and serves a window of consecutive model layers. A request is processed by routing it through peers that collectively cover the model.
 
@@ -50,6 +50,8 @@ common status
 ```
 
 The local OpenAI-compatible API is available at `http://127.0.0.1:11440/v1` while the node is running. Any OpenAI-compatible client can use that endpoint.
+
+Nanbeige can search automatically in its default chat mode. Try `common ask "Search the web for the latest Python release and link the release notes."` The local chat API sends the model's search query to DuckDuckGo and gives Nanbeige up to four result snippets to answer from. It needs internet access and uses no API key. To turn search off, send `"web_search": false` in the API request or set `COMMONNET_WEB_SEARCH=0` in the chat service environment.
 
 `common join --check` is a read-only preflight: it checks the platform, memory, disk and required network access without installing or downloading anything. The first actual join sets up its private runtime and downloads the selected layer weights. Joining runs in the background by default, recovers from crashes, and resumes at login. Use `common leave` to stop, or `common join --foreground` for a terminal session that ends with Ctrl+C.
 
